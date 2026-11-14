@@ -11,7 +11,7 @@ the contract:
 state = init(opt, z, oracle)            # memory and history
 info  = step!(opt, state, z, oracle, ctx) # overwrites z with the next design, returns a StepInfo
 reset!(opt, state)                      # forget the history (continuation jump, remeshing)
-shrink!(opt, state, factor)             # roll back the last step and reduce the step size
+shrink!(opt, state, factor)             # roll back the last step and reduce the next one
 ```
 """
 module Optimizers
@@ -20,7 +20,7 @@ using LinearAlgebra
 
 export Optimizer, StepInfo
 export AbstractOracle, FunctionOracle
-export objective, objective!, bounds, linear_constraint, inner, riesz!
+export objective, gradient!, bounds, linear_constraint, riesz!
 export OC, SiMPL
 
 include("Oracle.jl")

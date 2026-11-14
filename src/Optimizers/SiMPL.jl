@@ -19,10 +19,16 @@ Barzilai–Borwein step `α_GBB = (ψₖ - ψₖ₋₁, zₖ - zₖ₋₁)_M / |
   of the (scaled) Fermi–Dirac entropy in the metric `M`.
 
 A trial with a non-finite objective counts as failed. If no step is accepted after `max_backtracks` halvings, `z` is
-left unchanged and `accepted = false`.
+left unchanged and `accepted = false`. The tests allow a decrease lost in rounding (`10 eps |F|`), so a converged
+design keeps returning accepted steps with a negligible change instead of a failed line search.
 
-Optimality measure (`kkt` in [`StepInfo`](@ref)): `(1, η)_M` with `λ = (ψ_new - ψ)/α` and
-`η = max(-(z - lb) λ, (ub - z) λ)` (eq. 23a of arXiv:2411.19421).
+Cost per step: one call to `gradient!` and one call to `objective` per trial (the value at the accepted trial is
+reused as the value of the next step). After `init`, `reset!` or a change of `z` by the caller, one more `objective`.
+
+Optimality measure (`kkt` in [`StepInfo`](@ref)): `(1, η)_M` with `λ = (ψ_trial - ψ)/α` at the first trial of the
+step and `η = max(-(z - lb) λ, (ub - z) λ)` (eq. 23a of arXiv:2411.19421).
+
+Requires `a ≥ 0` (not all zero) in the linear constraint.
 """
 struct SiMPL <: Optimizer
   linesearch::Symbol
@@ -39,13 +45,22 @@ function SiMPL(; linesearch = :armijo, c1 = 1e-4, max_backtracks = 30, root_tol 
 end
 
 mutable struct SiMPLState{V}
-  ψ::V; z::V; dF::V; g::V; ga::V
-  ψ_prev::V; z_prev::V; g_prev::V
-  ψ_trial::V; ψ_half::V; z_trial::V; work::V; one::V
-  ψ_back::V; ψ_prev_back::V; z_prev_back::V; g_prev_back::V
-  k::Int; α_prev::Float64; scale::Float64
-  k_back::Int; α_prev_back::Float64
-  resync::Bool
+  ψ::V; z::V; dF::V; g::V; ga::V          # current latent variable, design, derivative, gradient, M⁻¹a
+  ψ_prev::V; z_prev::V; g_prev::V         # previous iterate (Barzilai–Borwein)
+  ψ_trial::V; z_trial::V; work::V; one::V
+  k::Int
+  α_prev::Float64        # accepted step of the previous iteration
+  α_prev_back::Float64   # its value before the last accepted step
+  α_guess::Float64       # initial guess of the last step, before scaling
+  f::Float64             # objective at z
+  f_back::Float64        # objective before the last accepted step
+  scale::Float64         # reduction asked by shrink!
+  resync::Bool           # rebuild ψ from the caller's z
+  have_f::Bool
+  have_grad::Bool
+  shrunk::Bool           # shrink! was called since the last step!
+  can_rollback::Bool
+  retry::Bool            # the next step repeats a rolled-back step
 end
 
 _σ(x) = inv(one(x) + exp(-x))
@@ -61,9 +76,9 @@ end
 _to_design!(z, ψ, lb, ub) = (@. z = lb + (ub - lb) * _σ(ψ))
 
 function init(opt::SiMPL, z, oracle)
-  v() = zero(similar(z))
-  s = SiMPLState(v(), v(), v(), v(), v(), v(), v(), v(), v(), v(), v(), v(), v(), v(), v(), v(), v(),
-                 0, NaN, 1.0, 0, NaN, true)
+  v() = similar(z)
+  s = SiMPLState(v(), v(), v(), v(), v(), v(), v(), v(), v(), v(), v(), v(),
+                 0, NaN, NaN, NaN, NaN, NaN, 1.0, true, false, false, false, false, false)
   fill!(s.one, 1)
   _sync!(s, z, oracle)
   s
@@ -74,8 +89,16 @@ function _sync!(s::SiMPLState, z, oracle)
   _to_latent!(s.ψ, z, lb, ub)
   _to_design!(s.z, s.ψ, lb, ub)
   c = linear_constraint(oracle)
-  c === nothing ? fill!(s.ga, 0) : riesz!(s.ga, oracle, c[1])
+  if c === nothing
+    fill!(s.ga, 0)
+  else
+    (minimum(c[1]) >= 0 && maximum(c[1]) > 0) ||
+      throw(ArgumentError("SiMPL needs a linear constraint with a ≥ 0, not all zero"))
+    riesz!(s.ga, oracle, c[1])
+  end
   s.resync = false
+  s.have_f = false
+  s.have_grad = false
   s
 end
 
@@ -83,73 +106,110 @@ function reset!(opt::SiMPL, s::SiMPLState)
   s.k = 0
   s.α_prev = NaN
   s.scale = 1.0
+  s.shrunk = false
+  s.can_rollback = false
+  s.retry = false
   s.resync = true   # the latent variable is rebuilt from z at the next step
   s
 end
 
 function shrink!(opt::SiMPL, s::SiMPLState, factor)
-  copyto!(s.ψ, s.ψ_back); copyto!(s.ψ_prev, s.ψ_prev_back)
-  copyto!(s.z_prev, s.z_prev_back); copyto!(s.g_prev, s.g_prev_back)
-  s.k, s.α_prev = s.k_back, s.α_prev_back
+  if s.can_rollback
+    # back to the start of the last accepted step; its derivative is still in dF and its gradient in g_prev
+    s.ψ, s.ψ_prev = s.ψ_prev, s.ψ
+    s.z, s.z_prev = s.z_prev, s.z
+    s.g, s.g_prev = s.g_prev, s.g
+    s.k -= 1
+    s.α_prev = s.α_prev_back
+    s.f = s.f_back
+    s.have_f = true
+    s.have_grad = true
+    s.retry = true
+    s.can_rollback = false
+  end
   s.scale *= factor
-  s.resync = true   # z was restored by the loop; rebuild the design copy from it
+  s.shrunk = true
   s
 end
 
-# aᵀz(ψ_half - α μ ga) - V
-function _constraint_gap(s, a, V, α, μ, lb, ub)
-  @. s.ψ_trial = s.ψ_half - α * μ * s.ga
+# Sets ψ_trial = ψ - α (g + μ ga) and z_trial
+function _set_trial!(s, α, μ, lb, ub)
+  @. s.ψ_trial = s.ψ - α * (s.g + μ * s.ga)
   _to_design!(s.z_trial, s.ψ_trial, lb, ub)
-  dot(a, s.z_trial) - V
+  nothing
 end
 
-function _volume_shift(opt, s, a, V, α, lb, ub)
-  h0 = _constraint_gap(s, a, V, α, 0.0, lb, ub)
-  h0 <= 0 && return 0.0
-  μ0, h_lo = 0.0, h0
+_gap!(s, a, V, α, μ, lb, ub) = (_set_trial!(s, α, μ, lb, ub); dot(a, s.z_trial) - V)
+
+# Multiplier of the linear constraint for the step α. Leaves ψ_trial and z_trial at the returned multiplier.
+function _volume_shift!(opt, s, a, V, α, lb, ub)
+  h = _gap!(s, a, V, α, 0.0, lb, ub)
+  h <= 0 && return 0.0
+  tol = opt.root_tol * max(abs(V), 1.0)
+  μ0, h0 = 0.0, h                               # h0 > 0
   μ1 = max(maximum(abs, s.g), 1.0)
-  h_hi = _constraint_gap(s, a, V, α, μ1, lb, ub)
+  h1 = _gap!(s, a, V, α, μ1, lb, ub)            # h1 ≤ 0 once bracketed
   n = 0
-  while h_hi > 0 && n < opt.max_root_iterations
-    μ0, h_lo = μ1, h_hi
+  while h1 > 0 && n < opt.max_root_iterations
+    μ0, h0 = μ1, h1
     μ1 *= 2
-    h_hi = _constraint_gap(s, a, V, α, μ1, lb, ub)
+    h1 = _gap!(s, a, V, α, μ1, lb, ub)
     n += 1
   end
-  h_hi > 0 && error("SiMPL: could not bracket the multiplier of the linear constraint")
-  # Illinois method on [μ0, μ1], h(μ0) > 0 > h(μ1)
-  side = 0
-  μ = μ1
+  h1 > 0 && error("SiMPL: could not bracket the multiplier of the linear constraint (is aᵀlb ≤ V?)")
+  # Illinois method on [μ0, μ1]
+  μ, h, side = μ1, h1, 0
   for _ in 1:opt.max_root_iterations
-    μ = (μ0 * h_hi - μ1 * h_lo) / (h_hi - h_lo)
-    h = _constraint_gap(s, a, V, α, μ, lb, ub)
-    abs(h) <= opt.root_tol * max(abs(V), 1) && break
+    abs(h) <= tol && break
+    μ1 - μ0 <= 4 * eps(μ1) && break
+    μ = (μ0 * h1 - μ1 * h0) / (h1 - h0)
+    h = _gap!(s, a, V, α, μ, lb, ub)
     if h > 0
-      μ0, h_lo = μ, h
-      side == -1 && (h_hi /= 2)
+      μ0, h0 = μ, h
+      side == -1 && (h1 /= 2)
       side = -1
     else
-      μ1, h_hi = μ, h
-      side == 1 && (h_lo /= 2)
+      μ1, h1 = μ, h
+      side == 1 && (h0 /= 2)
       side = 1
     end
-    abs(μ1 - μ0) <= eps(μ1) * 4 && break
+  end
+  if h > tol   # stopped on the infeasible side: take the feasible end of the bracket
+    μ = μ1
+    _gap!(s, a, V, α, μ, lb, ub)
   end
   μ
 end
 
+_violation(c::Nothing, z) = 0.0
+_violation(c, z) = max(0.0, dot(c[1], z) - c[2])
+
 function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
   s.resync && _sync!(s, z, oracle)
+  s.shrunk || (s.scale = 1.0)   # the previous step stood
+  s.shrunk = false
   lb, ub = bounds(oracle)
   c = linear_constraint(oracle)
+  nev = 0
 
-  f = objective!(s.dF, oracle, s.z)
-  nev = 1
-  riesz!(s.g, oracle, s.dF)
+  if !s.have_grad
+    if !s.have_f
+      s.f = objective(oracle, s.z)
+      nev += 1
+      s.have_f = true
+    end
+    isfinite(s.f) || return StepInfo(false, s.f, NaN, NaN, 0.0, 0.0, _violation(c, s.z), nev)
+    gradient!(s.dF, oracle, s.z)
+    riesz!(s.g, oracle, s.dF)
+    s.have_grad = true
+  end
+  f = s.f
 
-  if s.k == 0 || !isfinite(s.α_prev)
+  if s.retry
+    guess = s.α_guess
+  elseif s.k == 0 || !isfinite(s.α_prev)
     gmax = maximum(abs, s.g)
-    α = gmax > 0 ? 1 / gmax : 1.0
+    guess = gmax > 0 ? 1 / gmax : 1.0
   else
     @. s.work = s.z - s.z_prev
     @. s.ψ_trial = s.ψ - s.ψ_prev
@@ -157,32 +217,42 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
     @. s.ψ_trial = s.g - s.g_prev
     den = abs(inner(oracle, s.ψ_trial, s.work))
     α_gbb = (den > 0 && num > 0) ? num / den : s.α_prev
-    α = sqrt(α_gbb * s.α_prev)
+    guess = sqrt(α_gbb * s.α_prev)
   end
-  α *= s.scale
+  s.α_guess = guess
+  α = guess * s.scale
 
+  slack = 10 * eps(Float64) * abs(f)
   accepted = false
   f_new = NaN
-  for _ in 0:opt.max_backtracks
-    @. s.ψ_half = s.ψ - α * s.g
+  kkt = NaN
+  change = 0.0
+  for j in 0:opt.max_backtracks
     if c === nothing
-      copyto!(s.ψ_trial, s.ψ_half)
-      _to_design!(s.z_trial, s.ψ_trial, lb, ub)
+      _set_trial!(s, α, 0.0, lb, ub)
     else
-      μ = _volume_shift(opt, s, c[1], c[2], α, lb, ub)
-      _constraint_gap(s, c[1], c[2], α, μ, lb, ub)   # leaves ψ_trial and z_trial at μ
+      _volume_shift!(opt, s, c[1], c[2], α, lb, ub)
     end
+    if j == 0   # optimality measure at the current design
+      @. s.work = (s.ψ_trial - s.ψ) / α
+      @. s.work = max(-(s.z - lb) * s.work, (ub - s.z) * s.work)
+      kkt = inner(oracle, s.one, s.work)
+    end
+    @. s.work = s.z_trial - s.z
+    change = maximum(abs, s.work)
+    if change == 0   # nothing left to move at this precision
+      return StepInfo(true, f, f, kkt, 0.0, α, _violation(c, s.z), nev)
+    end
+    decrease = dot(s.dF, s.work)
     f_new = objective(oracle, s.z_trial)
     nev += 1
     if isfinite(f_new)
-      @. s.work = s.z_trial - s.z
-      decrease = dot(s.dF, s.work)
       bound = if opt.linesearch === :armijo
         f + opt.c1 * decrease
       else
         f + decrease + _bregman(oracle, s, lb, ub) / α
       end
-      if f_new <= bound
+      if f_new <= bound + slack
         accepted = true
         break
       end
@@ -190,30 +260,23 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
     α /= 2
   end
 
-  if !accepted
-    return StepInfo(false, f, f_new, NaN, 0.0, α, nev)
-  end
+  # the forward state of the oracle is now at a rejected trial; f, dF and g at z remain valid
+  accepted || return StepInfo(false, f, f_new, kkt, 0.0, α, _violation(c, s.z), nev)
 
-  # optimality measure at the current design
-  @. s.work = (s.ψ_trial - s.ψ) / α
-  @. s.work = max(-(s.z - lb) * s.work, (ub - s.z) * s.work)
-  kkt = inner(oracle, s.one, s.work)
-
-  # memory for shrink!
-  copyto!(s.ψ_back, s.ψ); copyto!(s.ψ_prev_back, s.ψ_prev)
-  copyto!(s.z_prev_back, s.z_prev); copyto!(s.g_prev_back, s.g_prev)
-  s.k_back, s.α_prev_back = s.k, s.α_prev
-
-  copyto!(s.ψ_prev, s.ψ); copyto!(s.z_prev, s.z); copyto!(s.g_prev, s.g)
-  copyto!(s.ψ, s.ψ_trial); copyto!(s.z, s.z_trial)
+  s.f_back, s.α_prev_back = f, s.α_prev
+  s.ψ_prev, s.ψ, s.ψ_trial = s.ψ, s.ψ_trial, s.ψ_prev
+  s.z_prev, s.z, s.z_trial = s.z, s.z_trial, s.z_prev
+  s.g_prev, s.g = s.g, s.g_prev
+  s.f = f_new
+  s.have_f = true
+  s.have_grad = false
   s.α_prev = α
   s.k += 1
-  s.scale = 1.0
+  s.can_rollback = true
+  s.retry = false
 
-  @. s.work = s.z - s.z_prev
-  change = maximum(abs, s.work)
   copyto!(z, s.z)
-  StepInfo(true, f, f_new, kkt, change, α, nev)
+  StepInfo(true, f, f_new, kkt, change, α, _violation(c, s.z), nev)
 end
 
 # (1, D(z_trial, z))_M for the scaled Fermi–Dirac entropy; uses the latent variables for stability

@@ -9,8 +9,9 @@ with `m = move * (ub - lb)` and `λ > 0` found by bisection on `aᵀz = V`, star
 stops when `(λ₂ - λ₁)/(λ₁ + λ₂) ≤ bisection_tol` and, as in top88, keeps the design of the last midpoint, so the
 constraint holds up to the bisection tolerance. With the defaults, the step is the one of top88.
 
-Requires a linear constraint with `a > 0`. The objective is evaluated once per step (with derivative) and the new
-design is not evaluated (`f_new = NaN`, `kkt = NaN`).
+Requires a linear constraint with `a > 0`. The objective is evaluated once per step and the new design is not
+evaluated (`f_new = NaN`, `kkt = NaN`). If the move limit does not allow reaching `aᵀz ≤ V` (infeasible start), the
+step is still taken and `violation > 0` in the [`StepInfo`](@ref).
 """
 struct OC <: Optimizer
   move::Float64
@@ -32,39 +33,46 @@ mutable struct OCState{V}
 end
 
 function init(opt::OC, z, oracle)
-  linear_constraint(oracle) === nothing && throw(ArgumentError("OC needs a linear constraint aᵀz ≤ V"))
+  c = linear_constraint(oracle)
+  c === nothing && throw(ArgumentError("OC needs a linear constraint aᵀz ≤ V"))
+  minimum(c[1]) > 0 || throw(ArgumentError("OC needs a linear constraint with a > 0"))
   OCState(opt.move, similar(z), similar(z))
 end
 
 reset!(opt::OC, s::OCState) = (s.move = opt.move; s)
 shrink!(opt::OC, s::OCState, factor) = (s.move *= factor; s)
 
+function _oc_update!(z, zo, dF, a, lb, ub, λ, η, m)
+  @. z = clamp(zo * (max(zero(dF), -dF) / (λ * a))^η, max(lb, zo - m * (ub - lb)), min(ub, zo + m * (ub - lb)))
+  dot(a, z)
+end
+
 function step!(opt::OC, s::OCState, z, oracle, ctx)
-  f = objective!(s.dF, oracle, z)
+  f = objective(oracle, z)
+  isfinite(f) || return StepInfo(false, f, NaN, NaN, 0.0, s.move, 0.0, 1)
+  gradient!(s.dF, oracle, z)
   a, V = linear_constraint(oracle)
   lb, ub = bounds(oracle)
   copyto!(s.z_old, z)
   zo, dF, η, m = s.z_old, s.dF, opt.damping, s.move
 
-  function update!(λ)
-    @. z = clamp(zo * (max(zero(eltype(dF)), -dF) / (λ * a))^η,
-                 max(lb, zo - m * (ub - lb)), min(ub, zo + m * (ub - lb)))
-    dot(a, z)
-  end
-
   λ1, λ2 = 0.0, 1e9
   n = 0
-  while update!(λ2) > V && n < opt.max_bisections   # widen the bracket if the objective is badly scaled
+  vol = _oc_update!(z, zo, dF, a, lb, ub, λ2, η, m)
+  while vol > V && n < 60   # widen the bracket if the objective is badly scaled
     λ1, λ2 = λ2, 10λ2
+    vol = _oc_update!(z, zo, dF, a, lb, ub, λ2, η, m)
     n += 1
   end
   n = 0
   while (λ2 - λ1) / (λ1 + λ2) > opt.bisection_tol && n < opt.max_bisections
     λ = (λ1 + λ2) / 2
-    update!(λ) > V ? (λ1 = λ) : (λ2 = λ)   # as in top88, z keeps the update of the last midpoint
+    vol = _oc_update!(z, zo, dF, a, lb, ub, λ, η, m)   # as in top88, z keeps the update of the last midpoint
+    vol > V ? (λ1 = λ) : (λ2 = λ)
     n += 1
   end
 
-  change = maximum(abs, z .- zo)
-  StepInfo(true, f, NaN, NaN, change, m, 1)
+  @. dF = z - zo   # dF is free now: use it as work vector
+  change = maximum(abs, dF)
+  StepInfo(true, f, NaN, NaN, change, m, max(0.0, vol - V), 1)
 end

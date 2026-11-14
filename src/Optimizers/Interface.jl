@@ -14,10 +14,11 @@ What [`step!`](@ref) reports about one design step.
 - `accepted`: `false` if no acceptable step was found; `z` is then left unchanged.
 - `f`: objective at the design before the step.
 - `f_new`: objective at the new design, if the optimiser evaluated it (`NaN` otherwise).
-- `kkt`: optimality measure, if the optimiser computes one (`NaN` otherwise).
+- `kkt`: optimality measure at the design before the step, if the optimiser computes one (`NaN` otherwise).
 - `change`: `maximum(abs, z_new - z_old)`.
 - `step`: step size (SiMPL) or move limit (OC) used.
-- `evaluations`: number of objective evaluations in the step (including the one with derivative).
+- `violation`: `max(0, aᵀz - V)` of the linear constraint at the returned design (`0` without constraint).
+- `evaluations`: number of calls to `objective` in the step (forward solves).
 """
 struct StepInfo
   accepted::Bool
@@ -26,6 +27,7 @@ struct StepInfo
   kkt::Float64
   change::Float64
   step::Float64
+  violation::Float64
   evaluations::Int
 end
 
@@ -54,9 +56,9 @@ function reset! end
 """
     shrink!(opt::Optimizer, state, factor)
 
-Called after the loop rejected the last step and restored `z` to its value before that step. Rolls back the memory
-of the optimiser to the start of the last step and multiplies its step size (or move limit) by `factor` (`0 < factor
-< 1`).
+Called by the loop after it rejected the last step and restored `z` to its value before that step. Rolls back the
+memory of the optimiser to the start of that step and multiplies the size of the next step (or the move limit) by
+`factor` (`0 < factor < 1`). Consecutive calls accumulate; the reduction is dropped once a step stands (the next
+`step!` is called without a `shrink!` in between) or after [`reset!`](@ref).
 """
 function shrink! end
-

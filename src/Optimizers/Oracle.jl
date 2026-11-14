@@ -3,21 +3,22 @@
 
 What an optimiser may ask about the problem. Methods to implement for a subtype `O`:
 
-- `objective(o::O, z)`: value of the objective at `z` (forward problem only). Used at trial points of a line search.
-  Return `NaN` or `Inf` if the value cannot be computed (for example, the forward problem did not converge); the
-  optimisers treat it as a failed trial and shorten the step.
-- `objective!(dF, o::O, z)`: value of the objective at `z`; writes the derivative `∂F/∂z` (a dual vector, no metric
-  applied) into `dF`.
+- `objective(o::O, z)`: value of the objective at `z` (forward problem only). Return `NaN` or `Inf` if the value cannot
+  be computed (for example, the forward problem did not converge); the optimisers treat it as a failed trial.
+- `gradient!(dF, o::O, z)`: writes the derivative `∂F/∂z` (a dual vector, no metric applied) into `dF`. The optimisers
+  only call it for the `z` of their last call to `objective` on this oracle, so an implementation can reuse the
+  forward state of that call and only pay for the adjoint.
 - `bounds(o::O)`: `(lb, ub)`, the bounds of `z` (scalars or vectors of the length of `z`), with `lb < ub`.
-- `linear_constraint(o::O)`: `(a, V)` for the constraint `aᵀz ≤ V` (`a` is a dual vector, for example the derivative
-  of the volume), or `nothing` if there is none.
+- `linear_constraint(o::O)`: `(a, V)` for the constraint `aᵀz ≤ V` (`a ≥ 0` is a dual vector, for example the
+  derivative of the volume), or `nothing` if there is none.
 
-Methods with a default (Euclidean metric):
+Methods with a default (Euclidean metric); they are not exported, extend them as `Optimizers.inner`:
 
 - `inner(o::O, x, y)`: inner product of two primal vectors; default `dot(x, y)`.
 - `riesz!(g, o::O, dF)`: primal representative `g = M⁻¹ dF` of a dual vector; default `copyto!(g, dF)`.
 
-Optimisers only use these functions and global reductions (`dot`, `sum`, `maximum`) on the vectors.
+Optimisers only use these functions, broadcasting and global reductions (`dot`, `maximum`) on the vectors. If the
+bounds, the constraint or the objective change (continuation), call [`reset!`](@ref) on the optimiser.
 """
 abstract type AbstractOracle end
 
@@ -29,11 +30,11 @@ Value of the objective at `z`. See [`AbstractOracle`](@ref).
 function objective end
 
 """
-    objective!(dF, oracle, z)
+    gradient!(dF, oracle, z)
 
-Value of the objective at `z`; writes `∂F/∂z` into `dF`. See [`AbstractOracle`](@ref).
+Writes `∂F/∂z` into `dF`, for the `z` of the last call to [`objective`](@ref). See [`AbstractOracle`](@ref).
 """
-function objective! end
+function gradient! end
 
 """
     bounds(oracle) -> (lb, ub)
@@ -52,7 +53,8 @@ function linear_constraint end
 """
     inner(oracle, x, y)
 
-Inner product of two primal vectors in the metric of the design. Default: `dot(x, y)`.
+Inner product of two primal vectors in the metric of the design. Default: `dot(x, y)`. Not exported (Gridap exports
+another `inner`): use `Optimizers.inner`.
 """
 inner(::AbstractOracle, x, y) = dot(x, y)
 
@@ -69,7 +71,7 @@ riesz!(g, ::AbstractOracle, dF) = copyto!(g, dF)
 Oracle built from plain functions, for analytical tests and small problems.
 
 - `f(z)`: objective value.
-- `df!(dF, z)`: writes `∂F/∂z` into `dF` (it may also return the value; it is ignored).
+- `df!(dF, z)`: writes `∂F/∂z` into `dF`.
 - `constraint = (a, V)`: linear constraint `aᵀz ≤ V`.
 - `metric = m`: diagonal metric, `inner(x, y) = Σ mᵢ xᵢ yᵢ` and `riesz!(g, dF) = dF ./ m` (cell volumes for P0
   designs, lumped mass for P1 designs). `nothing` is the Euclidean metric.
@@ -96,11 +98,10 @@ function objective(o::FunctionOracle, z)
   o.f(z)
 end
 
-function objective!(dF, o::FunctionOracle, z)
-  o.nvalue += 1
+function gradient!(dF, o::FunctionOracle, z)
   o.nderivative += 1
   o.df!(dF, z)
-  o.f(z)
+  dF
 end
 
 bounds(o::FunctionOracle) = (o.lb, o.ub)
