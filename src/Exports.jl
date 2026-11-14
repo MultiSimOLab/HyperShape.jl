@@ -21,6 +21,7 @@ end
 
 @publish Operators LinearOperator
 @publish Operators StateOperator
+@publish Operators is_converged
 @publish Functionals Functional
 @publish Functionals functional_value
 @publish Functionals functional_gradient!

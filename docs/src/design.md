@@ -77,16 +77,20 @@ Implemented:
 
 ```julia
 model_u = StaticLinearModel(l, a, U, V, bc; ls = LUSolver())          # forms and solver of the user; they capture θ
-S = StateOperator(model_u; depends = (θ,), solve = (m, ctx) -> solve!(m; Assembly = true))
+S = StateOperator(model_u; depends = θ, solve = (m, ctx) -> solve!(m; Assembly = true))
 uh = get_state(S)                                                       # fixed object
-model_p = StaticLinearModel(l_adj, (p, w) -> a(w, p), U, V, bc; ls = LUSolver())   # captures θ and uh
+# adjoint: a(w, p) = ∂J/∂u[w] for all w, on the space with homogeneous Dirichlet values (U0, bc0)
+model_p = StaticLinearModel(l_adj, (p, w) -> a(w, p), U0, V, bc0; ls = LUSolver())   # captures θ and uh
 A = StateOperator(model_p; depends = (θ, S), solve = (m, ctx) -> solve!(m; Assembly = true))
 ```
 
 - `solve` returns the solution vector (taken as converged) or a tuple whose last element is the convergence flag,
-  as `(x, flagconv)` from HyperFEM's nonlinear models. A failed solve does not throw; the functionals return `NaN`.
+  as `(x, flagconv)` from HyperFEM's nonlinear models. A failed solve does not throw: `is_converged(S)` is `false`,
+  states that depend on it are not solved and the functionals return `NaN`.
 - A state is solved again only when one of its dependencies changed; a failed solve is not repeated for the same
   design.
+- The functional checks that the forward state depends on θ and the adjoint on θ and on the forward state, and that
+  the trial space of the adjoint has homogeneous Dirichlet values.
 
 ## Functionals
 
