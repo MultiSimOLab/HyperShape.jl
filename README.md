@@ -48,7 +48,9 @@ HyperShape is not registered yet. To try the development version:
 pkg> add https://github.com/MultiSimOLab/HyperShape.jl
 ```
 
-It requires Julia 1.12 or later, HyperFEM 0.2 and Gridap 0.19.9.
+It requires Julia 1.12 or later and Gridap 0.20.8. During development HyperShape follows the `main` branches of
+HyperFEM and HyperFEMKernels (declared in `[sources]` of `Project.toml`), so it cannot be installed from the General
+registry until both are released with these changes.
 
 ## Related packages
 
