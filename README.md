@@ -1,3 +1,5 @@
+<p align="center"><img src="https://github.com/MultiSimOLab/HyperShape.jl/raw/main/docs/img/logo.png" width="30%"></p>
+
 # HyperShape.jl
 
 [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://multisimolab.github.io/HyperShape.jl/dev/)
