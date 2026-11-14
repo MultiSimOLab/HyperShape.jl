@@ -5,13 +5,15 @@ Operators over HyperFEM computational models.
 
 - [`LinearOperator`](@ref): auxiliary linear solves (filter, reaction–diffusion step, velocity extension). The model
   carries the bilinear form only and HyperShape supplies the right-hand side.
-- `StateOperator` (forward and adjoint states): planned.
+- [`StateOperator`](@ref): forward and adjoint states. The model carries the user's full weak forms.
 
 Both declare their dependencies explicitly (`depends = ...`): objects with a [`version`](@ref) counter.
 """
 module Operators
 
-export LinearOperator
+using HyperFEM: HyperFEM
+
+export LinearOperator, StateOperator
 
 """
     version(obj) -> Int
@@ -19,6 +21,14 @@ export LinearOperator
 Counter that grows every time `obj` changes. Objects listed in the `depends` of an operator implement it.
 """
 function version end
+
+"""
+    refresh!(obj, ctx)
+
+Brings a dependency up to date before its version is compared: physical fields are updated, state operators are
+solved. Nothing for other objects.
+"""
+refresh!(obj, ctx) = obj
 
 """
     LinearOperator(model; depends, solve)
@@ -59,6 +69,7 @@ get_model(op::LinearOperator) = op.model
 Solves with the right-hand side `b` through the user's `solve` and copies the solution into `x`.
 """
 function solve_linear!(x, op::LinearOperator, b, ctx)
+  foreach(d -> refresh!(d, ctx), op.depends)
   stale = false
   for (i, d) in enumerate(op.depends)
     stale |= version(d) != op.seen[i]
@@ -72,5 +83,7 @@ function solve_linear!(x, op::LinearOperator, b, ctx)
   end
   copyto!(x, y)
 end
+
+include("StateOperator.jl")
 
 end

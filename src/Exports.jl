@@ -20,6 +20,10 @@ end
 
 
 @publish Operators LinearOperator
+@publish Operators StateOperator
+@publish Functionals Functional
+@publish Functionals functional_value
+@publish Functionals functional_gradient!
 @publish Variables FieldVariable
 @publish Variables OptVariables
 @publish Variables DesignFields
