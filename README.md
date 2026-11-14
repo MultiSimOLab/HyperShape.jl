@@ -3,7 +3,7 @@
 [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://multisimolab.github.io/HyperShape.jl/dev/)
 [![Build Status](https://github.com/MultiSimOLab/HyperShape.jl/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MultiSimOLab/HyperShape.jl/actions/workflows/ci.yml?query=branch%3Amain)
 
-# Shape and Topology Optimisation of Nonlinear Multiphysics
+## Shape and Topology Optimisation of Nonlinear Multiphysics
 
 **HyperShape** is a library for **shape and topology optimisation of nonlinear multiphysics problems**
 (finite-strain hyperelasticity, electro-, magneto- and thermo-mechanics). It is built on top of
