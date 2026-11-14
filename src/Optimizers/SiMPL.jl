@@ -9,7 +9,8 @@ the bounds strictly. One step, with `g = M⁻¹ ∂F/∂z` (see [`riesz!`](@ref)
 
     ψ ← ψ - α (g + μ M⁻¹a),
 
-where `μ ≥ 0` is zero if the constraint `aᵀz ≤ V` is inactive and otherwise solves `aᵀz(ψ) = V` (Illinois method).
+where `μ ≥ 0` is zero if the constraint `aᵀz ≤ V` is inactive and otherwise solves `aᵀz(ψ) = V` (Newton iteration
+kept inside a bracket).
 
 Step size: `α₀ = 1/maximum(abs, g)` after `init`/`reset!`; afterwards `√(α_GBB α_prev)` with the generalised
 Barzilai–Borwein step `α_GBB = (ψₖ - ψₖ₋₁, zₖ - zₖ₋₁)_M / |(gₖ - gₖ₋₁, zₖ - zₖ₋₁)_M|`. The step is halved until
@@ -49,6 +50,7 @@ mutable struct SiMPLState{V}
   ψ_prev::V; z_prev::V; g_prev::V         # previous iterate (Barzilai–Borwein)
   ψ_trial::V; z_trial::V; work::V; one::V
   k::Int
+  μ::Float64             # last multiplier of the linear constraint (starting guess of the next search)
   α_prev::Float64        # accepted step of the previous iteration
   α_prev_back::Float64   # its value before the last accepted step
   α_guess::Float64       # initial guess of the last step, before scaling
@@ -78,7 +80,7 @@ _to_design!(z, ψ, lb, ub) = (@. z = lb + (ub - lb) * _σ(ψ))
 function init(opt::SiMPL, z, oracle)
   v() = similar(z)
   s = SiMPLState(v(), v(), v(), v(), v(), v(), v(), v(), v(), v(), v(), v(),
-                 0, NaN, NaN, NaN, NaN, NaN, 1.0, true, false, false, false, false, false)
+                 0, 0.0, NaN, NaN, NaN, NaN, NaN, 1.0, true, false, false, false, false, false)
   fill!(s.one, 1)
   _sync!(s, z, oracle)
   s
@@ -97,6 +99,7 @@ function _sync!(s::SiMPLState, z, oracle)
     riesz!(s.ga, oracle, c[1])
   end
   s.resync = false
+  s.μ = 0.0
   s.have_f = false
   s.have_grad = false
   s
@@ -141,43 +144,45 @@ end
 
 _gap!(s, a, V, α, μ, lb, ub) = (_set_trial!(s, α, μ, lb, ub); dot(a, s.z_trial) - V)
 
-# Multiplier of the linear constraint for the step α. Leaves ψ_trial and z_trial at the returned multiplier.
+# Multiplier of the linear constraint for the step α: root of h(μ) = aᵀz(ψ - α(g + μ ga)) - V, which decreases with μ.
+# Newton iteration (the derivative of the sigmoid is analytical) kept inside a bracket, with bisection as fallback,
+# started from the multiplier of the previous call. The target is h = -tol/2 and the result satisfies -tol ≤ h ≤ 0,
+# so every iterate is feasible. Leaves ψ_trial and z_trial at the returned multiplier.
 function _volume_shift!(opt, s, a, V, α, lb, ub)
   h = _gap!(s, a, V, α, 0.0, lb, ub)
   h <= 0 && return 0.0
-  tol = opt.root_tol * max(abs(V), 1.0)
-  μ0, h0 = 0.0, h                               # h0 > 0
-  μ1 = max(maximum(abs, s.g), 1.0)
-  h1 = _gap!(s, a, V, α, μ1, lb, ub)            # h1 ≤ 0 once bracketed
-  n = 0
-  while h1 > 0 && n < opt.max_root_iterations
-    μ0, h0 = μ1, h1
-    μ1 *= 2
-    h1 = _gap!(s, a, V, α, μ1, lb, ub)
-    n += 1
+  half = opt.root_tol * max(abs(V), 1.0) / 2
+  h += half
+  μ, μ0, μ1 = 0.0, 0.0, Inf   # h(μ0) > 0 ≥ h(μ1), with h shifted by tol/2
+  if s.μ > 0
+    μ = s.μ
+    h = _gap!(s, a, V, α, μ, lb, ub) + half
+    abs(h) <= half && return μ
+    h > 0 ? (μ0 = μ) : (μ1 = μ)
   end
-  h1 > 0 && error("SiMPL: could not bracket the multiplier of the linear constraint (is aᵀlb ≤ V?)")
-  # Illinois method on [μ0, μ1]
-  μ, h, side = μ1, h1, 0
   for _ in 1:opt.max_root_iterations
-    abs(h) <= tol && break
-    μ1 - μ0 <= 4 * eps(μ1) && break
-    μ = (μ0 * h1 - μ1 * h0) / (h1 - h0)
-    h = _gap!(s, a, V, α, μ, lb, ub)
-    if h > 0
-      μ0, h0 = μ, h
-      side == -1 && (h1 /= 2)
-      side = -1
-    else
-      μ1, h1 = μ, h
-      side == 1 && (h0 /= 2)
-      side = 1
+    @. s.work = s.ga * (s.z_trial - lb) * (ub - s.z_trial) / (ub - lb)
+    dh = -α * dot(a, s.work)
+    μn = dh < 0 ? μ - h / dh : Inf
+    if !(μ0 < μn < μ1)   # Newton left the bracket, or the slope vanished
+      μn = isfinite(μ1) ? (μ0 + μ1) / 2 : max(2 * μ0, maximum(abs, s.g), 1.0)
     end
+    μn == μ && break
+    μ = μn
+    h = _gap!(s, a, V, α, μ, lb, ub) + half
+    if abs(h) <= half
+      s.μ = μ
+      return μ
+    end
+    h > 0 ? (μ0 = μ) : (μ1 = μ)
+    μ1 - μ0 <= 4 * eps(μ1) && break
   end
-  if h > tol   # stopped on the infeasible side: take the feasible end of the bracket
+  isfinite(μ1) || error("SiMPL: could not bracket the multiplier of the linear constraint (is aᵀlb ≤ V?)")
+  if h > half   # stopped on the infeasible side: take the feasible end of the bracket
     μ = μ1
     _gap!(s, a, V, α, μ, lb, ub)
   end
+  s.μ = μ
   μ
 end
 

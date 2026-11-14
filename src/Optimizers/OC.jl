@@ -42,8 +42,11 @@ end
 reset!(opt::OC, s::OCState) = (s.move = opt.move; s)
 shrink!(opt::OC, s::OCState, factor) = (s.move *= factor; s)
 
-function _oc_update!(z, zo, dF, a, lb, ub, λ, η, m)
-  @. z = clamp(zo * (max(zero(dF), -dF) / (λ * a))^η, max(lb, zo - m * (ub - lb)), min(ub, zo + m * (ub - lb)))
+_oc_power(x, η) = η == 0.5 ? sqrt(x) : x^η
+
+# B holds (max(0, -∂F/∂z) / a)^η and κ = λ^(-η), so the power is not recomputed at every bisection
+function _oc_update!(z, zo, B, a, lb, ub, κ, m)
+  @. z = clamp(zo * B * κ, max(lb, zo - m * (ub - lb)), min(ub, zo + m * (ub - lb)))
   dot(a, z)
 end
 
@@ -54,25 +57,26 @@ function step!(opt::OC, s::OCState, z, oracle, ctx)
   a, V = linear_constraint(oracle)
   lb, ub = bounds(oracle)
   copyto!(s.z_old, z)
-  zo, dF, η, m = s.z_old, s.dF, opt.damping, s.move
+  zo, B, η, m = s.z_old, s.dF, opt.damping, s.move
+  @. B = _oc_power(max(zero(B), -B) / a, η)
 
   λ1, λ2 = 0.0, 1e9
   n = 0
-  vol = _oc_update!(z, zo, dF, a, lb, ub, λ2, η, m)
+  vol = _oc_update!(z, zo, B, a, lb, ub, λ2^(-η), m)
   while vol > V && n < 60   # widen the bracket if the objective is badly scaled
     λ1, λ2 = λ2, 10λ2
-    vol = _oc_update!(z, zo, dF, a, lb, ub, λ2, η, m)
+    vol = _oc_update!(z, zo, B, a, lb, ub, λ2^(-η), m)
     n += 1
   end
   n = 0
   while (λ2 - λ1) / (λ1 + λ2) > opt.bisection_tol && n < opt.max_bisections
     λ = (λ1 + λ2) / 2
-    vol = _oc_update!(z, zo, dF, a, lb, ub, λ, η, m)   # as in top88, z keeps the update of the last midpoint
+    vol = _oc_update!(z, zo, B, a, lb, ub, λ^(-η), m)   # as in top88, z keeps the update of the last midpoint
     vol > V ? (λ1 = λ) : (λ2 = λ)
     n += 1
   end
 
-  @. dF = z - zo   # dF is free now: use it as work vector
-  change = maximum(abs, dF)
+  @. B = z - zo   # B is free now: use it as work vector
+  change = maximum(abs, B)
   StepInfo(true, f, NaN, NaN, change, m, max(0.0, vol - V), 1)
 end
