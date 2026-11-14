@@ -3,5 +3,5 @@
 Docstrings of the code implemented so far.
 
 ```@autodocs
-Modules = [HyperShape, HyperShape.TopOpt]
+Modules = [HyperShape, HyperShape.TopOpt, HyperShape.Optimizers]
 ```

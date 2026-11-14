@@ -12,4 +12,6 @@ using Test
         end
     end
 
+    include("Optimizers/runtests.jl")
+
 end
