@@ -325,7 +325,7 @@ end
     failing[] = false
     HyperShape.Operators.solve_linear!(y, op2, b, nothing)
     @test flags[end-1:end] == [true, true]
-    @test_throws ArgumentError LinearOperator(op.model; depends = z, solve = op.solve)
+    @test LinearOperator(op.model; depends = z, solve = op.solve).depends == (z,)   # one object is accepted
     @test_throws ArgumentError LinearOperator(op.model; depends = (1.0,), solve = op.solve)
     @test_throws UndefKeywordError LinearOperator(op.model; solve = op.solve)
     bad = LinearOperator(op.model; depends = (), solve = (m, b, ctx, stale) -> zeros(3))

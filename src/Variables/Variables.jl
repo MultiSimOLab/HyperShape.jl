@@ -23,7 +23,7 @@ using Gridap
 using Gridap.FESpaces
 using HyperFEM: get_spaces
 using ..Operators: LinearOperator, solve_linear!
-import ..Operators: version
+import ..Operators: version, refresh!
 
 export FieldVariable, OptVariables, DesignFields, PhysicalFields
 export Identity, HelmholtzFilter, Heaviside
@@ -33,6 +33,9 @@ include("OptVariables.jl")
 include("DesignFields.jl")
 include("Maps.jl")
 include("PhysicalFields.jl")
+
+refresh!(x::DesignFields, ctx) = update_fields!(x, ctx)
+refresh!(θ::PhysicalFields, ctx) = update_fields!(θ, ctx)
 
 """
     single_field_design(name, V; bounds, init, physical) -> (z, x, θ)

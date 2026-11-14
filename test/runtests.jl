@@ -14,5 +14,6 @@ using Test
 
     include("Optimizers/runtests.jl")
     include("Variables/runtests.jl")
+    include("Functionals/runtests.jl")
 
 end
