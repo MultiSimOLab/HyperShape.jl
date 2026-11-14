@@ -15,17 +15,40 @@ Three linked levels, built in order; each one can only be created from the previ
 
 | Level | Object | Meaning |
 |---|---|---|
-| `z` | `OptVariables` | What the optimiser sees: a block vector, scaled and bounded |
+| `z` | `OptVariables` | What the optimiser sees: one vector made of named blocks, with bounds |
 | `x` | `DesignFields` | Design fields on the design mesh: nodal (P1) or cell-wise (P0) |
 | `θ` | `PhysicalFields` | Physical fields read by the weak forms at the quadrature points |
 
-- A block of `z` is a field (density, level set, magnetisation direction, material fraction) or a global parameter
-  (applied voltage, applied field, fibre angle).
-- The map `z → x` holds scaling, frozen regions and symmetries. The map `x → θ` holds the filter, the projection and,
-  optionally, the material interpolation.
-- One design field may feed several physical fields, and one physical field may depend on several design fields.
+Implemented (filter by PDE, Heaviside projection, P0 and P1 design fields):
+
+```julia
+af(ρ̃, v) = ∫(r^2 * ∇(ρ̃) ⋅ ∇(v) + ρ̃ * v)dΩ
+Sf = LinearOperator(StaticLinearModel(af, Uf, Vf, NothingBC(); ls = LUSolver()); depends = (),
+                    solve = (m, b, ctx, stale) -> solve!(m, b; Assembly = stale))
+
+z = OptVariables(ρ = FieldVariable(Vρ; bounds = (0.0, 1.0), init = 0.5))
+x = DesignFields(z; ρ = Identity())
+θ = PhysicalFields(x; ρ = Heaviside(β = 1.0, η = 0.5) ∘ HelmholtzFilter(Sf; measure = dΩ))
+
+# the same in one line
+z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = 0.5,
+                              physical = Heaviside(β = 1.0, η = 0.5) ∘ HelmholtzFilter(Sf; measure = dΩ))
+```
+
+- Maps are composed with `∘` in the mathematical order: `H ∘ F` filters first and projects after.
+- The filter output lives in the trial space of the filter model (usually P1), also for a P0 design field. The
+  projection is applied point by point at the quadrature points, so `θ.ρ` is a Gridap `CellField`.
+- `θ.ρ` is a fixed object updated in place: weak forms capture it once (checked with the lazy and the compiled
+  backends of HyperFEM).
+- Several physical fields can come from one design field (`E = :ρ => map`); their sensitivities are added.
+- Sensitivities: for linear forms `δ -> ∫(… * δ)dΩ` with respect to each physical field, `design_gradient!` returns
+  the derivative with respect to `z` (derivative of the projection inside the integrals, then the transposed filter,
+  which is the same solve because the filter form is symmetric).
 - Bounds, initial values and maps are mandatory; write `Identity()` when there is no transformation.
 - Only HyperShape writes `x` and `θ`; the user reads them as Gridap fields.
+
+Planned: global parameters as blocks (applied voltage, fibre angle), frozen regions and scaling in the map `z → x`,
+physical fields that depend on several design fields, material interpolation in the map `x → θ`.
 
 ## Constitutive wrappers
 
