@@ -307,7 +307,19 @@ end
     @test step_allocations(opt, state, z, oracle) == 0
   end
 
+  @testset "SiMPL: growth of the step is capped" begin
+    for (ls, growth) in ((:armijo, 10.0), (:bregman, 10.0), (:bregman, 2.0))
+      oracle = quadratic()
+      opt = SiMPL(linesearch = ls, max_growth = growth)
+      z = fill(0.3, n)
+      state = init(opt, z, oracle)
+      steps = [step!(opt, state, z, oracle, nothing).step for _ in 1:200]
+      @test all(steps[2:end] .<= growth .* steps[1:end-1] .* (1 + 1e-12))
+    end
+  end
+
   @testset "Constructor checks and names" begin
+    @test_throws ArgumentError SiMPL(max_growth = 0.5)
     @test_throws ArgumentError SiMPL(linesearch = :wolfe)
     @test_throws ArgumentError SiMPL(c1 = 2.0)
     @test_throws ArgumentError OC(move = 0.0)

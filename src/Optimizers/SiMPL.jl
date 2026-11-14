@@ -1,5 +1,6 @@
 """
-    SiMPL(; linesearch = :armijo, c1 = 1e-4, max_backtracks = 30, root_tol = 1e-12, max_root_iterations = 100)
+    SiMPL(; linesearch = :armijo, c1 = 1e-4, max_backtracks = 30, max_growth = 10.0, root_tol = 1e-12,
+            max_root_iterations = 100)
 
 Sigmoidal mirror descent with a projected latent variable (Keith, Kim, Lazarov and Surowiec, arXiv:2409.19341;
 Kim, Lazarov, Surowiec and Keith, arXiv:2411.19421).
@@ -13,7 +14,8 @@ where `μ ≥ 0` is zero if the constraint `aᵀz ≤ V` is inactive and otherwi
 kept inside a bracket).
 
 Step size: `α₀ = 1/maximum(abs, g)` after `init`/`reset!`; afterwards `√(α_GBB α_prev)` with the generalised
-Barzilai–Borwein step `α_GBB = (ψₖ - ψₖ₋₁, zₖ - zₖ₋₁)_M / |(gₖ - gₖ₋₁, zₖ - zₖ₋₁)_M|`. The step is halved until
+Barzilai–Borwein step `α_GBB = (ψₖ - ψₖ₋₁, zₖ - zₖ₋₁)_M / |(gₖ - gₖ₋₁, zₖ - zₖ₋₁)_M|`, capped at
+`max_growth * α_prev` (each rejected trial costs a forward solve). The step is halved until
 
 - `linesearch = :armijo`: `F(z_new) ≤ F(z) + c1 ∂F/∂z ⋅ (z_new - z)`, or
 - `linesearch = :bregman`: `F(z_new) ≤ F(z) + ∂F/∂z ⋅ (z_new - z) + D(z_new, z)/α`, with `D` the Bregman divergence
@@ -35,14 +37,17 @@ struct SiMPL <: Optimizer
   linesearch::Symbol
   c1::Float64
   max_backtracks::Int
+  max_growth::Float64
   root_tol::Float64
   max_root_iterations::Int
 end
 
-function SiMPL(; linesearch = :armijo, c1 = 1e-4, max_backtracks = 30, root_tol = 1e-12, max_root_iterations = 100)
+function SiMPL(; linesearch = :armijo, c1 = 1e-4, max_backtracks = 30, max_growth = 10.0, root_tol = 1e-12,
+               max_root_iterations = 100)
   linesearch in (:armijo, :bregman) || throw(ArgumentError("linesearch must be :armijo or :bregman"))
   0 < c1 < 1 || throw(ArgumentError("c1 must be in (0, 1)"))
-  SiMPL(linesearch, c1, max_backtracks, root_tol, max_root_iterations)
+  max_growth >= 1 || throw(ArgumentError("max_growth must be at least 1"))
+  SiMPL(linesearch, c1, max_backtracks, max_growth, root_tol, max_root_iterations)
 end
 
 mutable struct SiMPLState{V}
@@ -222,7 +227,7 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
     @. s.ψ_trial = s.g - s.g_prev
     den = abs(inner(oracle, s.ψ_trial, s.work))
     α_gbb = (den > 0 && num > 0) ? num / den : s.α_prev
-    guess = sqrt(α_gbb * s.α_prev)
+    guess = min(sqrt(α_gbb * s.α_prev), opt.max_growth * s.α_prev)
   end
   s.α_guess = guess
   α = guess * s.scale
