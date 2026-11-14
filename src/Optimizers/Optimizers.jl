@@ -1,9 +1,31 @@
-# Optimisers (planned; not included in the package yet).
-#
-# Independent of finite elements: an optimiser sees vectors, bounds and an oracle.
-#   abstract type Optimizer end
-#   init(opt, z, oracle) -> state
-#   step!(opt, state, z, oracle, ctx) -> status
-#   reset!(opt, state)
-#   shrink!(opt, state, factor)
-# First: optimality criteria (OC) and SiMPL. Later: GCMMA, augmented Lagrangian.
+"""
+    HyperShape.Optimizers
+
+Optimisers for problems with a box-bounded design vector `z` and one linear (volume) constraint.
+
+The module is independent of finite elements: an optimiser sees vectors, bounds and an oracle (see
+[`AbstractOracle`](@ref)). A new optimiser is a subtype of [`Optimizer`](@ref) that implements the four functions of
+the contract:
+
+```julia
+state = init(opt, z, oracle)            # memory and history
+info  = step!(opt, state, z, oracle, ctx) # overwrites z with the next design, returns a StepInfo
+reset!(opt, state)                      # forget the history (continuation jump, remeshing)
+shrink!(opt, state, factor)             # roll back the last step and reduce the step size
+```
+"""
+module Optimizers
+
+using LinearAlgebra
+
+export Optimizer, StepInfo
+export AbstractOracle, FunctionOracle
+export objective, objective!, bounds, linear_constraint, inner, riesz!
+export OC, SiMPL
+
+include("Oracle.jl")
+include("Interface.jl")
+include("OC.jl")
+include("SiMPL.jl")
+
+end

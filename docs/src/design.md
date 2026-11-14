@@ -82,10 +82,31 @@ attempts the optimisation stops with a checkpoint.
 
 ```julia
 abstract type Optimizer end
-init(opt, z, oracle)               -> state
-step!(opt, state, z, oracle, ctx)  -> status
-reset!(opt, state)
-shrink!(opt, state, factor)
+init(opt, z, oracle)               -> state      # memory and history
+step!(opt, state, z, oracle, ctx)  -> StepInfo   # overwrites z with the next design
+reset!(opt, state)                               # forget the history
+shrink!(opt, state, factor)                      # roll back the last step, reduce the step size
+```
+
+The oracle is the only thing an optimiser may ask: value and derivative of the objective, value at a trial point
+(forward problem only), bounds, the linear (volume) constraint and the inner product of the design metric.
+Implemented: `OC` (optimality criteria, as in top88) and `SiMPL` (mirror descent with a latent variable, Armijo or
+Bregman line search). `FunctionOracle` builds an oracle from plain functions:
+
+```julia
+using HyperShape.Optimizers
+using HyperShape.Optimizers: init, step!
+
+t = [0.9, 0.1, 0.7, 0.4]
+oracle = FunctionOracle(z -> sum(abs2, z .- t) / 2, (dF, z) -> (dF .= z .- t);
+                        lb = 0.0, ub = 1.0, constraint = (ones(4), 1.6))   # Σz ≤ 1.6
+z = fill(0.4, 4)
+opt = SiMPL()
+state = init(opt, z, oracle)
+for k in 1:50
+  info = step!(opt, state, z, oracle, nothing)
+  info.kkt < 1e-6 && break
+end
 ```
 
 ## Post-processing
