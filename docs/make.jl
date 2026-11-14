@@ -2,7 +2,7 @@ using Documenter
 using HyperShape
 
 makedocs(;
-    modules = [HyperShape, HyperShape.TopOpt, HyperShape.Optimizers],
+    modules = [HyperShape, HyperShape.TopOpt, HyperShape.Optimizers, HyperShape.Operators, HyperShape.Variables],
     authors = "MultiSimOLab",
     sitename = "HyperShape.jl",
     format = Documenter.HTML(;

@@ -19,5 +19,15 @@ end
 @publish TopOpt pullback!
 
 
+@publish Operators LinearOperator
+@publish Variables FieldVariable
+@publish Variables OptVariables
+@publish Variables DesignFields
+@publish Variables PhysicalFields
+@publish Variables Identity
+@publish Variables HelmholtzFilter
+@publish Variables Heaviside
+@publish Variables single_field_design
+
 # @publish LinearSolvers solve
 # @publish LinearSolvers solve!
