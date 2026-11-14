@@ -6,6 +6,7 @@
 #   update_stage!(s, ctx)     recompute the output from the input (in place)
 #   pullback(s, L, ctx)       L: δ_out ↦ DomainContribution, linear form on the output; returns the linear form on the input
 #   parameter_version(s)      counter of the parameters of the map (β of a Heaviside); 0 if it has none
+#   is_lazy(s)                true if the output is evaluated lazily (nothing to recompute when an earlier parameter changes)
 
 """
     FieldMap
@@ -44,9 +45,11 @@ parameter_version(s) = 0
 PDE filter (Lazarov and Sigmund, 2011): the filtered field ρ̃ solves `a(ρ̃, v) = ∫(x v) dΩ` for all `v`, where
 `a` is the bilinear form of the model of `op` (for example `a(ρ̃, v) = ∫(r^2 ∇(ρ̃)⋅∇(v) + ρ̃ v)dΩ`, solver chosen by
 the user) and `dΩ = measure`. The output is a field of the trial space of that model (usually P1), also for a P0
-design field. The bilinear form must be symmetric: the same solve gives the transpose for the sensitivities.
+design field. The bilinear form must be symmetric (the same solve gives the transpose for the sensitivities; this is
+not checked) and the trial space may only have homogeneous Dirichlet values (checked).
 
-Cost: one assembly of a load vector and one solve to filter, and the same to pull a sensitivity back.
+Cost: one assembly of a load vector and one solve each time the design changes, and the same for each sensitivity
+pulled back.
 """
 struct HelmholtzFilter{O<:LinearOperator,M} <: FieldMap
   op::O
@@ -67,6 +70,9 @@ end
 
 function _stage(f::HelmholtzFilter, input)
   U, V = get_spaces(f.op.model)
+  # the load vector carries no Dirichlet lift: only homogeneous Dirichlet values are allowed
+  all(iszero, get_dirichlet_dof_values(U)) ||
+    throw(ArgumentError("HelmholtzFilter: the trial space of the filter model has non-zero Dirichlet values"))
   out = FEFunction(U, zeros(num_free_dofs(U)))
   w = FEFunction(U, zeros(num_free_dofs(U)))
   b = zeros(num_free_dofs(V))
@@ -121,10 +127,14 @@ Changes the sharpness of the projection.
 """
 function set_beta!(h::Heaviside, β)
   β > 0 || throw(ArgumentError("Heaviside: β must be positive"))
-  h.β = β
-  h.version += 1
+  β == h.β && return h
+  setfield!(h, :β, Float64(β))
+  setfield!(h, :version, h.version + 1)
   h
 end
+
+Base.setproperty!(::Heaviside, s::Symbol, v) =
+  throw(ArgumentError("Heaviside: use set_beta! to change β; η and the other fields cannot be changed"))
 
 struct HeavisideValue <: Function
   h::Heaviside
@@ -153,6 +163,10 @@ end
 _stage(h::Heaviside, input) = HeavisideStage(h, input, Operation(HeavisideValue(h))(input), Operation(HeavisideSlope(h))(input))
 output(s::HeavisideStage) = s.out
 parameter_version(s::HeavisideStage) = s.h.version
+has_parameters(s) = false
+has_parameters(s::HeavisideStage) = true
+is_lazy(s) = true
+is_lazy(s::FilterStage) = false
 update_stage!(s::HeavisideStage, ctx) = s
 function pullback(s::HeavisideStage, L, ctx)
   slope = s.slope

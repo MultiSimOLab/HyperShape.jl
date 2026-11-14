@@ -176,13 +176,131 @@ end
     @test p.nsolves[] == n + 1 && version(θ) == vθ + 1  # one filter solve
     set_beta!(H, 4.0)
     update_fields!(θ, nothing)
-    @test version(θ) == vθ + 2                           # β counts as a change
+    @test p.nsolves[] == n + 1 && version(θ) == vθ + 2  # β counts as a change; the projection is lazy: no solve
+    set_beta!(H, 4.0)
+    update_fields!(θ, nothing)
+    @test version(θ) == vθ + 2                           # same β: no change
     dΩ = p.dΩ
-    design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(δ)dΩ,), nothing)
-    @test p.nsolves[] == n + 3                           # update after β (1) + transpose (1)
+    g1 = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(δ)dΩ,), nothing)
+    @test p.nsolves[] == n + 2                           # one transposed solve
+    g2 = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(2 * δ)dΩ,), nothing)
+    @test p.nsolves[] == n + 3 && g2 ≈ 2 .* g1           # another form, same design: one solve, no update
+    # projection before the filter: a new β changes the input of the filter
+    H2 = Heaviside(β = 2.0, η = 0.5)
+    z2, x2, θ2 = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0,
+                                     physical = HelmholtzFilter(p.Sf; measure = p.dΩ) ∘ H2)
+    n = p.nsolves[]
+    set_beta!(H2, 5.0)
+    update_fields!(θ2, nothing)
+    @test p.nsolves[] == n + 1
     @test_throws ArgumentError Heaviside(β = 0.0, η = 0.5)
     @test_throws ArgumentError Heaviside(β = 1.0, η = 1.0)
     @test_throws ArgumentError set_beta!(H, -1.0)
+    @test_throws ArgumentError (H.η = 0.3)
+    @test_throws ArgumentError (H.β = 3.0)
+    @test_throws DimensionMismatch design_gradient!(zeros(3), θ, (ρ = δ -> ∫(δ)dΩ,), nothing)
+    @test_throws ArgumentError θ.foo
+    @test_throws ArgumentError x.foo
+  end
+
+  @testset "Values of z are checked" begin
+    z, x, θ = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0, physical = Identity())
+    v = version(z)
+    w = copy(get_values(z)); w[3] = NaN
+    @test_throws ArgumentError set_values!(z, w)
+    w[3] = 1.5
+    @test_throws ArgumentError set_values!(z, w)
+    get_values(z)[2] = -0.1
+    @test_throws ArgumentError changed!(z)
+    @test version(z) == v
+  end
+
+  @testset "Filter with homogeneous Dirichlet values" begin
+    Vd = TestFESpace(p.model, ReferenceFE(lagrangian, Float64, 1); conformity = :H1, dirichlet_tags = "boundary")
+    Ud = TrialFESpace(Vd, 0.0)
+    af, dΩ = p.af, p.dΩ
+    Sd = LinearOperator(StaticLinearModel(af, Ud, Vd, NothingBC(); ls = LUSolver()); depends = (),
+                        solve = (m, b, ctx, stale) -> solve!(m, b; Assembly = stale))
+    z, x, θ = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0,
+                                  physical = Heaviside(β = 3.0, η = 0.5) ∘ HelmholtzFilter(Sd; measure = dΩ))
+    xh = FEFunction(p.V0, ρ0)
+    ref = solve(LUSolver(), AffineFEOperator(af, v -> ∫(xh * v)dΩ, Ud, Vd))
+    filtered = PhysicalFields(x; ρ = HelmholtzFilter(Sd; measure = dΩ))
+    @test maximum(abs, get_free_dof_values(filtered.ρ) .- get_free_dof_values(ref)) < 1e-12
+    c = CellField(cfun, p.Ω)
+    J() = (update_fields!(θ, nothing); sum(∫(c * θ.ρ * θ.ρ)dΩ))
+    g = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(2 * c * θ.ρ * δ)dΩ,), nothing)
+    @test all(r -> 1.9 < r < 2.1, taylor_rates(J, g, z, [sin(0.7i) for i in 1:length(z)]))
+    # non-homogeneous values are rejected (the load vector carries no lift)
+    Un = TrialFESpace(Vd, 1.0)
+    Sn = LinearOperator(StaticLinearModel(af, Un, Vd, NothingBC(); ls = LUSolver()); depends = (),
+                        solve = (m, b, ctx, stale) -> solve!(m, b; Assembly = stale))
+    @test_throws ArgumentError PhysicalFields(x; ρ = HelmholtzFilter(Sn; measure = dΩ))
+  end
+
+  @testset "Transpose with independent vectors ($(name))" for (name, V, ρ) in (("P0", p.V0, ρ0), ("P1", p.V1, ρ1))
+    # g is the gradient of z ↦ ∫(y F(z)) dΩ at one design; ∫(y F(z₂)) dΩ = g⋅z₂ for another design z₂
+    z, x, θ = single_field_design(:ρ, V; bounds = (0.0, 1.0), init = ρ,
+                                  physical = HelmholtzFilter(p.Sf; measure = p.dΩ))
+    yh = interpolate(x -> sin(4x[1]) * cos(3x[2]), p.Uf)
+    dΩ = p.dΩ
+    g = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(yh * δ)dΩ,), nothing)
+    z2 = [0.1 + 0.8 * abs(cos(2.3i)) for i in 1:length(z)]
+    set_values!(z, z2)
+    update_fields!(θ, nothing)
+    @test sum(∫(yh * θ.ρ)dΩ) ≈ dot(g, z2) rtol = 1e-12
+  end
+
+  @testset "Taylor tests of other chains ($(name), $(label))" for (name, V, ρ) in (("P0", p.V0, ρ0), ("P1", p.V1, ρ1)),
+                                                                     (label, mk) in (("H", (F, H, H2) -> H),
+                                                                                     ("F ∘ H", (F, H, H2) -> F ∘ H),
+                                                                                     ("F ∘ F", (F, H, H2) -> F ∘ F),
+                                                                                     ("H ∘ H ∘ F", (F, H, H2) -> H2 ∘ H ∘ F))
+    F = HelmholtzFilter(p.Sf; measure = p.dΩ)
+    map = mk(F, Heaviside(β = 3.0, η = 0.45), Heaviside(β = 2.0, η = 0.55))
+    z, x, θ = single_field_design(:ρ, V; bounds = (0.0, 1.0), init = ρ, physical = map)
+    c = CellField(cfun, p.Ω)
+    dΩ = p.dΩ
+    J() = (update_fields!(θ, nothing); sum(∫(c * θ.ρ * θ.ρ)dΩ))
+    g = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(2 * c * θ.ρ * δ)dΩ,), nothing)
+    @test all(r -> 1.9 < r < 2.1, taylor_rates(J, g, z, [sin(0.7i) for i in 1:length(z)]))
+  end
+
+  @testset "Two design blocks, each filtered and projected" begin
+    z = OptVariables(a = FieldVariable(p.V0; bounds = (0.0, 1.0), init = ρ0),
+                     b = FieldVariable(p.V1; bounds = (0.0, 1.0), init = ρ1))
+    x = DesignFields(z; a = Identity(), b = Identity())
+    θ = PhysicalFields(x; a = Heaviside(β = 3.0, η = 0.5) ∘ HelmholtzFilter(p.Sf; measure = p.dΩ),
+                          b = Heaviside(β = 5.0, η = 0.4) ∘ HelmholtzFilter(p.Sf; measure = p.dΩ))
+    c = CellField(cfun, p.Ω)
+    dΩ = p.dΩ
+    J() = (update_fields!(θ, nothing); sum(∫(c * θ.a * θ.b + θ.b * θ.b)dΩ))
+    g = design_gradient!(zeros(length(z)), θ, (a = δ -> ∫(c * θ.b * δ)dΩ, b = δ -> ∫((c * θ.a + 2 * θ.b) * δ)dΩ), nothing)
+    @test all(r -> 1.9 < r < 2.1, taylor_rates(J, g, z, [cos(0.9i) for i in 1:length(z)]))
+  end
+
+  @testset "Memory per update does not grow with the mesh" begin
+    dΩs = Dict{Int,Any}()
+    bytes = map((8, 16)) do n
+      q = filter_problem(; n)
+      z, x, θ = single_field_design(:ρ, q.V0; bounds = (0.0, 1.0), init = 0.5,
+                                    physical = Heaviside(β = 3.0, η = 0.5) ∘ HelmholtzFilter(q.Sf; measure = q.dΩ))
+      dΩ = q.dΩ
+      forms = (ρ = δ -> ∫(δ)dΩ,)
+      g = zeros(length(z))
+      for _ in 1:2
+        changed!(z); update_fields!(θ, nothing); design_gradient!(g, θ, forms, nothing)
+      end
+      changed!(z)
+      up = @allocated update_fields!(θ, nothing)
+      gr = @allocated design_gradient!(g, θ, forms, nothing)
+      none = @allocated update_fields!(θ, nothing)
+      (up, gr, none)
+    end
+    @test bytes[1][3] == 0 && bytes[2][3] == 0            # nothing changed: no allocation
+    # Gridap rebuilds the lazy forms at each assembly: a fixed amount, independent of the number of cells
+    @test bytes[2][1] <= 1.2 * bytes[1][1] + 1024
+    @test bytes[2][2] <= 1.2 * bytes[1][2] + 1024
   end
 
   @testset "LinearOperator: depends and stale" begin
@@ -197,6 +315,16 @@ end
     HyperShape.Operators.solve_linear!(y, op, b, nothing)
     HyperShape.Operators.solve_linear!(y, op, b, nothing)
     @test flags == [false, true, false]
+    # a solve that throws does not consume the change: the next call is still stale
+    failing = Ref(true)
+    op2 = LinearOperator(op.model; depends = (z,),
+                         solve = (m, b, ctx, stale) -> (push!(flags, stale); failing[] && error("no convergence");
+                                                        solve!(m, b; Assembly = stale)))
+    changed!(z)
+    @test_throws ErrorException HyperShape.Operators.solve_linear!(y, op2, b, nothing)
+    failing[] = false
+    HyperShape.Operators.solve_linear!(y, op2, b, nothing)
+    @test flags[end-1:end] == [true, true]
     @test_throws ArgumentError LinearOperator(op.model; depends = z, solve = op.solve)
     @test_throws ArgumentError LinearOperator(op.model; depends = (1.0,), solve = op.solve)
     @test_throws UndefKeywordError LinearOperator(op.model; solve = op.solve)

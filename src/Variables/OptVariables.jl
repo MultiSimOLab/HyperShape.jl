@@ -1,8 +1,9 @@
 """
     FieldVariable(V; bounds, init)
 
-Block of [`OptVariables`](@ref) holding the free values of a design field in the space `V` (cell-wise P0 or nodal P1,
-without Dirichlet conditions). `bounds = (lb, ub)` with `lb < ub`; `init` is a number or a vector of the length of
+Block of [`OptVariables`](@ref) holding the free values of a scalar design field in the space `V` (cell-wise P0 or
+nodal P1 Lagrangian, without Dirichlet conditions; the bounds act on the free values, which bound the field only for
+these two spaces). `bounds = (lb, ub)` with `lb < ub`; `init` is a number or a vector of the length of
 the free values, inside the bounds. Both are mandatory.
 """
 struct FieldVariable{S}
@@ -70,14 +71,29 @@ block_range(z::OptVariables, name::Symbol) = z.ranges[_index(z.names, name)]
 """
     changed!(z::OptVariables)
 
-Marks the values of `z` as changed (after writing into `get_values(z)` in place).
+Marks the values of `z` as changed (after writing into `get_values(z)` in place). Throws if a value is outside the
+bounds or not finite.
 """
-changed!(z::OptVariables) = (z.version += 1; z)
+function changed!(z::OptVariables)
+  _check_values(z)
+  z.version += 1
+  z
+end
+
+function _check_values(z::OptVariables)
+  v, lb, ub = z.values, z.lb, z.ub
+  ok = true
+  @inbounds for i in eachindex(v, lb, ub)
+    ok &= lb[i] <= v[i] <= ub[i]   # false for NaN
+  end
+  ok || throw(ArgumentError("OptVariables: values outside the bounds or not finite"))
+  nothing
+end
 
 """
     set_values!(z::OptVariables, v)
 
-Copies `v` into `z` and marks it as changed.
+Copies `v` into `z` and marks it as changed (values must be inside the bounds).
 """
 function set_values!(z::OptVariables, v)
   length(v) == length(z.values) || throw(DimensionMismatch("set_values!: $(length(v)) values, z has $(length(z.values))"))

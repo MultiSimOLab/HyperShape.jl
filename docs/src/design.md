@@ -68,7 +68,8 @@ Two kinds of operator wrap a HyperFEM computational model built by the user.
 | User function | `solve = (m, ctx) -> …` | `solve = (m, b, ctx, stale) -> …` |
 
 - Dependencies are declared explicitly with `depends`; an operator solves again only when one of them has changed.
-- `ctx` is a read-only context updated by HyperShape: design iteration, attempt, continuation values and phase.
+- `ctx` is a read-only context updated by HyperShape: design iteration, attempt, continuation values and phase. Until
+  the common optimisation loop exists, whoever updates the fields passes it (`nothing` when the fields are built).
 - The adjoint is another state operator; its forms are written by the user, typically the tangent of the forward
   problem with trial and test functions swapped.
 

@@ -4,11 +4,11 @@
 Design fields x built from the blocks of `z`, one per block and with the same name. Each map z → x is mandatory;
 only [`Identity`](@ref) is available for now. Read a field as `x.ρ` (a Gridap `FEFunction`, updated in place).
 """
-struct DesignFields{Z<:OptVariables,N,F<:NamedTuple}
+struct DesignFields{Z<:OptVariables,N,F<:NamedTuple,S<:Tuple}
   z::Z
   names::NTuple{N,Symbol}
   fields::F
-  spaces::Tuple
+  spaces::S
   seen::Base.RefValue{Int}
   version::Base.RefValue{Int}
 end
@@ -31,7 +31,11 @@ function DesignFields(z::OptVariables; kwargs...)
 end
 
 version(x::DesignFields) = getfield(x, :version)[]
-Base.getproperty(x::DesignFields, s::Symbol) = getfield(getfield(x, :fields), s)
+function Base.getproperty(x::DesignFields, s::Symbol)
+  f = getfield(x, :fields)
+  haskey(f, s) || throw(ArgumentError("no design field named $s; available: $(join(keys(f), ", "))"))
+  getfield(f, s)
+end
 Base.propertynames(x::DesignFields) = getfield(x, :names)
 get_optvariables(x::DesignFields) = getfield(x, :z)
 

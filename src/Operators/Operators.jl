@@ -33,7 +33,8 @@ and a right-hand side supplied by HyperShape.
   solution vector. `stale` is `true` when something in `depends` changed since the last solve, so the user can
   re-assemble, for example `solve = (m, b, ctx, stale) -> solve!(m, b; Assembly = stale)`. Mandatory.
 
-The matrix must be the one the model assembled at construction (no dependency has changed yet).
+The matrix must be the one the model assembled at construction (no dependency has changed yet). The returned vector
+is copied, so it may be a buffer of the model.
 """
 mutable struct LinearOperator{M,F,D}
   model::M
@@ -60,15 +61,15 @@ Solves with the right-hand side `b` through the user's `solve` and copies the so
 function solve_linear!(x, op::LinearOperator, b, ctx)
   stale = false
   for (i, d) in enumerate(op.depends)
-    v = version(d)
-    if v != op.seen[i]
-      stale = true
-      op.seen[i] = v
-    end
+    stale |= version(d) != op.seen[i]
   end
   y = op.solve(op.model, b, ctx, stale)
   length(y) == length(x) ||
     throw(DimensionMismatch("the solve function of the LinearOperator returned $(length(y)) values, expected $(length(x))"))
+  # the dependencies count as seen only after a successful solve: if the solve throws, the next call is stale again
+  for (i, d) in enumerate(op.depends)
+    op.seen[i] = version(d)
+  end
   copyto!(x, y)
 end
 

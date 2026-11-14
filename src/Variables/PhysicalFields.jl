@@ -4,10 +4,11 @@
 Physical fields θ, the ones the weak forms read. Each one comes from one design field through a map (a
 [`FieldMap`](@ref), possibly composed with `∘`): `ρ = map` uses the design field `ρ`; `E = :ρ => map` uses the
 design field `ρ` under another name, so several physical fields can come from the same design field (their
-sensitivities are added). Every design field must be used. Read a field as `θ.ρ`: a fixed object (an `FEFunction` or
+sensitivities are added). Every design field must be used. The constructor brings the fields up to date once,
+calling the solve functions of the operators with `ctx = nothing`. Read a field as `θ.ρ`: a fixed object (an `FEFunction` or
 a `CellField`) updated in place, so the weak forms can capture it.
 """
-struct PhysicalFields{X<:DesignFields,N,C<:Tuple,F<:NamedTuple}
+struct PhysicalFields{X<:DesignFields,N,C<:Tuple,F<:NamedTuple,A<:Tuple}
   x::X
   names::NTuple{N,Symbol}
   sources::NTuple{N,Int}    # index of the design field of each physical field
@@ -15,9 +16,9 @@ struct PhysicalFields{X<:DesignFields,N,C<:Tuple,F<:NamedTuple}
   fields::F
   gx::Vector{Vector{Float64}}   # sensitivity buffers, one per design field
   gtmp::Vector{Vector{Float64}}
-  assems::Tuple
+  assems::A
   seen::Base.RefValue{Int}          # version of x at the last update
-  seen_params::Base.RefValue{Int}   # sum of the parameter versions of the maps at the last update
+  seen_params::Vector{Int}          # parameter version of each chain at the last update
   version::Base.RefValue{Int}
 end
 
@@ -51,7 +52,7 @@ function PhysicalFields(x::DesignFields; kwargs...)
   gx = [zeros(num_free_dofs(V)) for V in spaces]
   gtmp = [zeros(num_free_dofs(V)) for V in spaces]
   assems = Tuple(SparseMatrixAssembler(V, V) for V in spaces)
-  θ = PhysicalFields(x, names, Tuple(sources), chains, fields, gx, gtmp, assems, Ref(-1), Ref(-1), Ref(0))
+  θ = PhysicalFields(x, names, Tuple(sources), chains, fields, gx, gtmp, assems, Ref(-1), fill(-1, length(chains)), Ref(0))
   update_fields!(θ, nothing)
   θ
 end
@@ -61,10 +62,15 @@ end
 
 Counter of changes of the physical fields. It grows in [`update_fields!`](@ref) when z or a parameter of a map
 (`set_beta!`) changed. Note that the fields themselves read β lazily: forms assembled after `set_beta!` already see
-the new value, but operators that depend on θ only notice the change after `update_fields!`.
+the new value, but operators that depend on θ only notice the change after `update_fields!`. Two `PhysicalFields`
+built on the same `DesignFields` are independent: each one is brought up to date by its own `update_fields!`.
 """
 version(θ::PhysicalFields) = getfield(θ, :version)[]
-Base.getproperty(θ::PhysicalFields, s::Symbol) = getfield(getfield(θ, :fields), s)
+function Base.getproperty(θ::PhysicalFields, s::Symbol)
+  f = getfield(θ, :fields)
+  haskey(f, s) || throw(ArgumentError("no physical field named $s; available: $(join(keys(f), ", "))"))
+  getfield(f, s)
+end
 Base.propertynames(θ::PhysicalFields) = getfield(θ, :names)
 get_designfields(θ::PhysicalFields) = getfield(θ, :x)
 
@@ -79,15 +85,31 @@ function update_fields!(θ::PhysicalFields, ctx)
   update_fields!(x, ctx)
   seen, seen_params = getfield(θ, :seen), getfield(θ, :seen_params)
   chains = getfield(θ, :chains)
-  params = sum(c -> _parameter_version(c), chains)
-  seen[] == version(x) && seen_params[] == params && return θ
-  for chain in chains
-    _update_chain!(chain, ctx)
+  xchanged = seen[] != version(x)
+  changed = xchanged
+  for (j, chain) in enumerate(chains)
+    params = _parameter_version(chain)
+    pchanged = params != seen_params[j]
+    # a new design value recomputes every chain; a new parameter only the chains where a map that is not lazy (a
+    # filter) comes after a map with parameters (a projection read lazily needs nothing)
+    if xchanged || (pchanged && _needs_update_after_parameters(chain))
+      _update_chain!(chain, ctx)
+    end
+    seen_params[j] = params
+    changed |= pchanged
   end
   seen[] = version(x)
-  seen_params[] = params
-  getfield(θ, :version)[] += 1
+  changed && (getfield(θ, :version)[] += 1)
   θ
+end
+
+function _needs_update_after_parameters(chain::Tuple)
+  seen_parameters = false
+  for s in chain
+    seen_parameters && !is_lazy(s) && return true
+    seen_parameters |= has_parameters(s)
+  end
+  false
 end
 
 _parameter_version(chain::Tuple) = sum(parameter_version, chain; init = 0)
