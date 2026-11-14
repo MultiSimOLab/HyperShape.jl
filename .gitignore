@@ -4,8 +4,10 @@
 /Manifest.toml
 /docs/Manifest.toml
 /docs/build/
-/test/
 /.vscode
 data/sims/
+results/
 **/.DS_Store
- 
+
+# Local Claude context (not versioned)
+CLAUDE.md
