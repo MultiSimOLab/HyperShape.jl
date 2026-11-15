@@ -4,7 +4,8 @@
 # Stage interface:
 #   output(s)                 the output field (FEFunction or CellField)
 #   update_stage!(s, ctx)     recompute the output from the input (in place)
-#   pullback(s, L, ctx)       L: δ_out ↦ DomainContribution, linear form on the output; returns the linear form on the input
+#   pullback(s, L, ctx, key)  L: δ_out ↦ DomainContribution, linear form on the output; returns the linear form on the input
+#                             (key: identifies the form for the compiled assemblers, see Assembly.jl)
 #   parameter_version(s)      counter of the parameters of the map (β of a Heaviside); 0 if it has none
 #   is_lazy(s)                true if the output is evaluated lazily (nothing to recompute when an earlier parameter changes)
 
@@ -36,11 +37,11 @@ end
 _stage(::Identity, input) = IdentityStage(input)
 output(s::IdentityStage) = s.input
 update_stage!(s::IdentityStage, ctx) = s
-pullback(s::IdentityStage, L, ctx) = L
+pullback(s::IdentityStage, L, ctx, key) = L
 parameter_version(s) = 0
 
 """
-    HelmholtzFilter(op::LinearOperator; measure)
+    HelmholtzFilter(op::LinearOperator; measure, backend = :compiled)
 
 PDE filter (Lazarov and Sigmund, 2011): the filtered field ρ̃ solves `a(ρ̃, v) = ∫(x v) dΩ` for all `v`, where
 `a` is the bilinear form of the model of `op` (for example `a(ρ̃, v) = ∫(r^2 ∇(ρ̃)⋅∇(v) + ρ̃ v)dΩ`, solver chosen by
@@ -48,14 +49,18 @@ the user) and `dΩ = measure`. The output is a field of the trial space of that 
 design field. The bilinear form must be symmetric (the same solve gives the transpose for the sensitivities; this is
 not checked) and the trial space may only have homogeneous Dirichlet values (checked).
 
+`backend` selects who assembles the load vectors of the filter: `:compiled` (default, HyperFEMKernels) or `:lazy`
+(Gridap). It is independent of the backend of the filter model, which assembles the matrix.
+
 Cost: one assembly of a load vector and one solve each time the design changes, and the same for each sensitivity
 pulled back.
 """
 struct HelmholtzFilter{O<:LinearOperator,M} <: FieldMap
   op::O
   measure::M
+  backend::Symbol
 end
-HelmholtzFilter(op::LinearOperator; measure) = HelmholtzFilter(op, measure)
+HelmholtzFilter(op::LinearOperator; measure, backend::Symbol = :compiled) = HelmholtzFilter(op, measure, _check_backend(backend))
 
 struct FilterStage{O,I,M,F,W,V,A}
   op::O
@@ -76,22 +81,20 @@ function _stage(f::HelmholtzFilter, input)
   out = FEFunction(U, zeros(num_free_dofs(U)))
   w = FEFunction(U, zeros(num_free_dofs(U)))
   b = zeros(num_free_dofs(V))
-  FilterStage(f.op, input, f.measure, out, w, b, V, SparseMatrixAssembler(U, V))
+  FilterStage(f.op, input, f.measure, out, w, b, V, form_assembler(f.backend, U, V))
 end
 
 output(s::FilterStage) = s.out
 
 function update_stage!(s::FilterStage, ctx)
   dΩ, xin = s.measure, s.input
-  fill!(s.b, 0)
-  assemble_vector!(v -> ∫(xin * v)dΩ, s.b, s.assem, s.V)
+  assemble_form!(s.b, s.assem, v -> ∫(xin * v)dΩ, :forward)
   solve_linear!(get_free_dof_values(s.out), s.op, s.b, ctx)
   s
 end
 
-function pullback(s::FilterStage, L, ctx)
-  fill!(s.b, 0)
-  assemble_vector!(L, s.b, s.assem, s.V)
+function pullback(s::FilterStage, L, ctx, key)
+  assemble_form!(s.b, s.assem, L, key)
   solve_linear!(get_free_dof_values(s.w), s.op, s.b, ctx)   # symmetric matrix: Aᵀ = A
   w, dΩ = s.w, s.measure
   δ -> ∫(w * δ)dΩ
@@ -168,7 +171,7 @@ has_parameters(s::HeavisideStage) = true
 is_lazy(s) = true
 is_lazy(s::FilterStage) = false
 update_stage!(s::HeavisideStage, ctx) = s
-function pullback(s::HeavisideStage, L, ctx)
+function pullback(s::HeavisideStage, L, ctx, key)
   slope = s.slope
   δ -> L(slope * δ)
 end

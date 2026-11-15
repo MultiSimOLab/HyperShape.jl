@@ -10,7 +10,7 @@ using LinearAlgebra
 using Test
 
 # Heat-conduction-like problem: -∇⋅(k(θ.ρ) ∇u) = f in Ω, u = 0 on the left side, with k(ρ) = kmin + ρ³.
-function state_problem(; n = 8, design = :P0, backend = :lazy, gD = 0.0, adjoint_space = :homogeneous)
+function state_problem(; n = 8, design = :P0, backend = :lazy, gD = 0.0, adjoint_space = :homogeneous, vector_backend = :compiled)
   model = CartesianDiscreteModel((0, 1, 0, 1), (n, n))
   labels = get_face_labeling(model)
   add_tag_from_tags!(labels, "left", [1, 3, 7])
@@ -28,7 +28,8 @@ function state_problem(; n = 8, design = :P0, backend = :lazy, gD = 0.0, adjoint
                       solve = (m, b, ctx, stale) -> solve!(m, b; Assembly = stale))
   ρ0 = [0.3 + 0.5 * abs(sin(2.3i)) for i in 1:num_free_dofs(Vρ)]
   H = Heaviside(β = 3.0, η = 0.5)
-  z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = ρ0, physical = H ∘ HelmholtzFilter(Sf; measure = dΩ))
+  z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = ρ0, backend = vector_backend,
+                                physical = H ∘ HelmholtzFilter(Sf; measure = dΩ, backend = vector_backend))
 
   kmin = 1e-2
   k(ρ) = kmin + ρ^3
@@ -332,6 +333,25 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
     gc = functional_gradient!(zeros(length(pc.z)), funcs[2], nothing)
     @test maximum(abs, gl .- gc) <= 1e-10 * maximum(abs, gl)
     @test functional_value(funcs[1], nothing) ≈ functional_value(funcs[2], nothing) rtol = 1e-12
+  end
+
+  @testset "Two functionals alternate through the same filter (compiled and lazy)" begin
+    grads = map((:compiled, :lazy)) do vb
+      p = state_problem(; vector_backend = vb)
+      (; z, θ, S, A, f, dk, dΩ, dΓ) = p
+      C = Functional((u, θ) -> ∫(f * u)dΩ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, S, θ; scale = 1.0)
+      B = Functional((u, θ) -> ∫(u)dΓ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, A, θ; scale = 1.0)
+      Vol = Functional(θ -> ∫(θ.ρ)dΩ, θ -> (δ -> ∫(δ)dΩ), θ; scale = 1.0)
+      gs = Vector{Float64}[]
+      for it in 1:3
+        for F in (C, B, Vol)
+          push!(gs, functional_gradient!(zeros(length(z)), F, nothing))
+        end
+        set_values!(z, clamp.(get_values(z) .+ 0.03, 0, 1))
+      end
+      gs
+    end
+    @test all(k -> maximum(abs, grads[1][k] .- grads[2][k]) <= 1e-10 * maximum(abs, grads[2][k]), eachindex(grads[1]))
   end
 
   @testset "Exported names do not clash with Gridap and HyperFEM" begin

@@ -358,6 +358,41 @@ end
     end
   end
 
+  @testset "Compiled and lazy backends give the same fields and gradients ($(name), $(label))" for (name, V, ρ) in (("P0", p.V0, ρ0), ("P1", p.V1, ρ1)),
+                                                                                                           (label, mk) in (("H ∘ F", (F, H) -> H ∘ F), ("F ∘ H", (F, H) -> F ∘ H), ("H", (F, H) -> H))
+    c = CellField(cfun, p.Ω)
+    dΩ = p.dΩ
+    out = map((:compiled, :lazy)) do backend
+      H = Heaviside(β = 3.0, η = 0.45)
+      z, x, θ = single_field_design(:ρ, V; bounds = (0.0, 1.0), init = ρ, backend,
+                                    physical = mk(HelmholtzFilter(p.Sf; measure = dΩ, backend), H))
+      g1 = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(2 * c * θ.ρ * δ)dΩ,), nothing; key = 1)
+      # another quantity under another key, then the first one again after changing z and β
+      g2 = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(δ)dΩ,), nothing; key = 2)
+      set_values!(z, clamp.(get_values(z) .+ 0.05, 0, 1))
+      set_beta!(H, 6.0)
+      g3 = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(2 * c * θ.ρ * δ)dΩ,), nothing; key = 1)
+      # a form of another structure under a used key: compiled again, still correct
+      g4 = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(c * δ)dΩ,), nothing; key = 1)
+      (g1, g2, g3, g4, sum(∫(θ.ρ)dΩ))
+    end
+    for k in 1:4
+      @test maximum(abs, out[1][k] .- out[2][k]) <= 1e-12 * maximum(abs, out[2][k])
+    end
+    @test out[1][5] ≈ out[2][5] rtol = 1e-13
+  end
+
+  @testset "Backend options" begin
+    @test_throws ArgumentError HelmholtzFilter(p.Sf; measure = p.dΩ, backend = :gpu)
+    z = OptVariables(ρ = FieldVariable(p.V0; bounds = (0.0, 1.0), init = ρ0))
+    x = DesignFields(z; ρ = Identity())
+    @test_throws ArgumentError PhysicalFields(x; ρ = Identity(), backend = :gpu)
+    @test_throws ArgumentError single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = 0.5, physical = Identity(), backend = :gpu)
+    F = HelmholtzFilter(p.Sf; measure = p.dΩ)
+    @test F.backend === :compiled                                    # the default
+    @test HelmholtzFilter(p.Sf; measure = p.dΩ, backend = :lazy).backend === :lazy
+  end
+
   @testset "Exported names do not clash with Gridap and HyperFEM" begin
     M = Module()
     Core.eval(M, :(using Gridap, HyperFEM, HyperShape))

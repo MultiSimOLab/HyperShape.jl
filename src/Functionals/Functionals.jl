@@ -171,7 +171,7 @@ function functional_gradient!(gz, F::Functional, ctx)
   end
   _check_homogeneous(F)
   isnan(F.scale[]) && _set_scale!(F, _raw_value(F, ctx))
-  design_gradient!(gz, F.θ, _as_named(_forms(F, ctx), F.θ), ctx)
+  design_gradient!(gz, F.θ, _as_named(_forms(F, ctx), F.θ), ctx; key = objectid(F.scale))
   gz ./= F.scale[]
   gz
 end
