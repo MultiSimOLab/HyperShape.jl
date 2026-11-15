@@ -10,7 +10,7 @@ using Random
 using Gridap
 using Gridap.FESpaces
 using HyperFEM: get_state, get_spaces
-using ..Operators: AbstractOperator, LinearOperator, StateOperator, apply!, solve_linear!, invalidate!
+using ..Operators: AbstractOperator, LinearOperator, StateOperator, apply!, solve_linear!, invalidate!, OptContext
 using ..Variables: PhysicalFields, update_fields!, design_gradient!, get_designfields, get_optvariables,
                    get_values, get_bounds, set_values!, filter_operators
 using ..Functionals: Functional, functional_value, functional_gradient!
@@ -53,8 +53,8 @@ Base.show(io::IO, r::ConsistencyReport) =
   print(io, "ConsistencyReport(", count(x -> x.passed, r.results), " of ", length(r.results), " passed)")
 
 """
-    check_consistency(J1, J2, …; ctx = nothing, kwargs...) -> ConsistencyReport
-    check_consistency((name1 = J1, name2 = J2, …); ctx = nothing, kwargs...)
+    check_consistency(J1, J2, …; ctx = OptContext(:check), kwargs...) -> ConsistencyReport
+    check_consistency((name1 = J1, name2 = J2, …); ctx = OptContext(:check), kwargs...)
 
 Checks, at the current design, that the derivatives the user wrote and the dependencies the user declared are
 consistent. The functionals must share the same optimisation variables `z`. Four kinds of checks:
@@ -83,7 +83,7 @@ another direction or design. It fails as *inconclusive* when only the largest st
 (a nearly linear functional): try a larger `h0`. With `h0 = 1e-2` a relative error of about 0.1 % in a gradient can still pass.
 
 Keyword arguments:
-- `ctx`: passed to the solve functions (default `nothing`).
+- `ctx`: passed to the solve functions (default `OptContext(:check)`).
 - `direction`: direction δ in z (default: random, scaled by the width of the bounds, zero within 1e-3 of the width
   from a bound).
 - `h0`: first step (default: 90 % of the largest step that keeps z + hδ inside the bounds, at most `1e-2`).
@@ -106,7 +106,7 @@ or solves propagate (z and the scales are restored first).
 check_consistency(Fs::Functional...; kwargs...) =
   check_consistency(NamedTuple{Tuple(Symbol("functional ", i) for i in eachindex(Fs))}(Fs); kwargs...)
 
-function check_consistency(Fs::NamedTuple; ctx = nothing, direction = nothing, h0 = nothing, steps::Integer = 5,
+function check_consistency(Fs::NamedTuple; ctx = OptContext(:check), direction = nothing, h0 = nothing, steps::Integer = 5,
                            seed::Integer = 1, min_rate::Real = 1.8, rtol::Real = 1e-8, tangents = ())
   isempty(Fs) && throw(ArgumentError("check_consistency: give at least one Functional"))
   all(F -> F isa Functional, values(Fs)) || throw(ArgumentError("check_consistency: every argument must be a Functional"))

@@ -30,7 +30,7 @@ using Gridap.FESpaces
 using Gridap.Algebra: residual!
 using HyperFEM: get_spaces
 using HyperFEMKernels: KernelOperator, update
-using ..Operators: LinearOperator, solve_linear!
+using ..Operators: LinearOperator, solve_linear!, OptContext
 import ..Operators: version, refresh!, invalidate!
 
 export FieldVariable, OptVariables, DesignFields, PhysicalFields

@@ -4,11 +4,17 @@ using HyperFEM
 using HyperShape
 
 # Heat-conduction-like problem: -∇⋅(k(θ.ρ) ∇u) = f in Ω, u = 0 on the left side, with k(ρ) = kmin + ρ³.
-function state_problem(; n = 8, design = :P0, backend = :lazy, gD = 0.0, adjoint_space = :homogeneous, vector_backend = :compiled)
-  model = CartesianDiscreteModel((0, 1, 0, 1), (n, n))
+function state_problem(; n = 8, dim = 2, design = :P0, backend = :lazy, gD = 0.0, adjoint_space = :homogeneous,
+                       vector_backend = :compiled, init = nothing)
+  model = CartesianDiscreteModel(dim == 2 ? (0, 1, 0, 1) : (0, 1, 0, 1, 0, 1), ntuple(_ -> n, dim))
   labels = get_face_labeling(model)
-  add_tag_from_tags!(labels, "left", [1, 3, 7])
-  add_tag_from_tags!(labels, "right", [2, 4, 8])
+  if dim == 2
+    add_tag_from_tags!(labels, "left", [1, 3, 7])
+    add_tag_from_tags!(labels, "right", [2, 4, 8])
+  else
+    add_tag_from_tags!(labels, "left", [25])     # face x = 0
+    add_tag_from_tags!(labels, "right", [26])    # face x = 1
+  end
   Ω = Triangulation(model)
   dΩ = Measure(Ω, 2)
   Γ = BoundaryTriangulation(model; tags = "right")
@@ -20,7 +26,7 @@ function state_problem(; n = 8, design = :P0, backend = :lazy, gD = 0.0, adjoint
   af(u, v) = ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
   Sf = LinearOperator(StaticLinearModel(af, Uf, Vf, NothingBC(); ls = LUSolver()); depends = (),
                       solve = (m, b, ctx, stale) -> solve!(m, b; Assembly = stale))
-  ρ0 = [0.3 + 0.5 * abs(sin(2.3i)) for i in 1:num_free_dofs(Vρ)]
+  ρ0 = init === nothing ? [0.3 + 0.5 * abs(sin(2.3i)) for i in 1:num_free_dofs(Vρ)] : init
   H = Heaviside(β = 3.0, η = 0.5)
   z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = ρ0, backend = vector_backend,
                                 physical = H ∘ HelmholtzFilter(Sf; measure = dΩ, backend = vector_backend))
@@ -45,6 +51,6 @@ function state_problem(; n = 8, design = :P0, backend = :lazy, gD = 0.0, adjoint
   Ua, bca = adjoint_space === :homogeneous ? (U0, bc0) : (U, bc)
   model_p = StaticLinearModel(w -> ∫(w)dΓ, (p, w) -> a(w, p), Ua, V, bca; ls = LUSolver(), backend)
   A = StateOperator(model_p; depends = (θ, S), solve = (m, ctx) -> (nadjoint[] += 1; push!(ctxs, (:A, ctx)); solve!(m; Assembly = true)))
-  (; z, x, θ, H, S, A, uh, k, dk, f, dΩ, dΓ, nforward, nadjoint, Vρ, U, U0, V, bc, bc0, a, l, ctxs)
+  (; z, x, θ, H, S, A, uh, k, dk, f, dΩ, dΓ, nforward, nadjoint, Vρ, U, U0, V, bc, bc0, a, l, ctxs, Sf)
 end
 
