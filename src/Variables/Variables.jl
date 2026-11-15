@@ -19,8 +19,8 @@ derivative with respect to z.
 The vectors HyperShape assembles (load vector of a filter, sensitivities) use `backend = :compiled` by default
 (HyperFEMKernels: forms compiled once into threaded kernels) or `backend = :lazy` (Gridap's assembler); see
 [`HelmholtzFilter`](@ref) and [`PhysicalFields`](@ref). Both give the same vectors up to rounding. The compiled
-backend is meant for several threads (`julia -t N`): with one thread, or on meshes of a few thousand cells, the
-lazy one is as fast or faster (in 3D with one thread, about 1.4 times faster).
+backend is faster from tens of thousands of cells on, already with one thread, and scales with the threads
+(`julia -t N`); on meshes of about a thousand cells both take well under a millisecond per vector.
 """
 module Variables
 
