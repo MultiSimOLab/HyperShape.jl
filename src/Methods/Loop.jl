@@ -22,12 +22,13 @@ function RejectStep(; shrink, max)
 end
 
 """
-    StopCriteria(; change = nothing, kkt = nothing, objective = nothing, window = 5)
+    StopCriteria(; change = nothing, kkt = nothing, objective = nothing, window = nothing)
 
 Convergence criteria; each one is off unless given, and the first one met stops the optimisation (in the last stage of
 the continuation). `change`: `maximum(abs, Δz)` of the step below this value. `kkt`: optimality measure of the
 optimiser below this value (SiMPL; an optimiser that does not compute it, such as OC, gives an error). `objective`:
-relative change of the objective over the last `window` iterations below this value.
+relative change of the objective over the last `window` iterations (mandatory with `objective`) below this value,
+counting only iterations of the current continuation stage.
 """
 struct StopCriteria
   change::Union{Nothing,Float64}
@@ -36,14 +37,18 @@ struct StopCriteria
   window::Int
 end
 
-function StopCriteria(; change = nothing, kkt = nothing, objective = nothing, window::Integer = 5)
+function StopCriteria(; change = nothing, kkt = nothing, objective = nothing, window = nothing)
   for (k, v) in ((:change, change), (:kkt, kkt), (:objective, objective))
     v === nothing || v > 0 || throw(ArgumentError("StopCriteria: $k must be positive"))
   end
+  objective === nothing || window !== nothing || throw(ArgumentError("StopCriteria: objective needs a window"))
+  window = window === nothing ? 1 : window
   window >= 1 || throw(ArgumentError("StopCriteria: window must be at least 1"))
   StopCriteria(change === nothing ? nothing : Float64(change), kkt === nothing ? nothing : Float64(kkt),
                objective === nothing ? nothing : Float64(objective), Int(window))
 end
+
+const HISTORY_COLUMNS = (:iteration, :objective, :constraint, :kkt, :change, :step, :attempts, :forward, :adjoint, :filter)
 
 """
     Continuation(; every, name = object => values, …)
@@ -73,6 +78,12 @@ function Continuation(; every::Integer, kwargs...)
   for o in objects
     applicable(_set_parameter!, o, 1.0) || throw(ArgumentError("Continuation: cannot continue a parameter of $(typeof(o))"))
   end
+  for n in names
+    n in HISTORY_COLUMNS && throw(ArgumentError("Continuation: $n is the name of a history column; choose another name"))
+  end
+  for (o, v) in zip(objects, vals), x in v
+    _valid_parameter(o, x) || throw(ArgumentError("Continuation: value $x not valid for $(typeof(o))"))
+  end
   n = length(first(vals))
   n >= 1 && all(v -> length(v) == n, vals) ||
     throw(ArgumentError("Continuation: every parameter needs the same number of values (stages)"))
@@ -80,9 +91,13 @@ function Continuation(; every::Integer, kwargs...)
 end
 
 _set_parameter!(h::Heaviside, v) = set_beta!(h, v)
+_valid_parameter(h::Heaviside, v) = isfinite(v) && v > 0
 
-function _apply_stage!(c::Continuation, s)
+function _apply_stage!(c::Continuation, s, buf)
   foreach((o, v) -> _set_parameter!(o, v[s]), c.objects, c.values)
+  for (j, v) in enumerate(c.values)
+    buf[j] = v[s]
+  end
   NamedTuple{c.names}(Tuple(v[s] for v in c.values))
 end
 
@@ -90,8 +105,10 @@ end
     Checkpoint(path; every)
 
 Writes the state of the optimisation to the folder `path` every `every` accepted iterations, and also when the
-optimisation stops or fails: `checkpoint.toml` (iteration, continuation stage, scales of the functionals, sizes),
-`z.bin` (the design, raw `Float64`) and `history.csv`. Files are written under a temporary name and then renamed.
+optimisation stops or fails: `checkpoint.toml` (iteration, continuation stage, scales of the functionals, sizes and
+the names of the other two files), `z_<iteration>.bin` (the design, raw `Float64`) and `history_<iteration>.csv`.
+The design and the history are written first and `checkpoint.toml` last, under a temporary name and then renamed, so
+the three files always belong to the same iteration; older files are then deleted.
 Resume with `solve!(…; resume = load_checkpoint(path))`.
 """
 struct Checkpoint
@@ -156,7 +173,6 @@ function _trim!(h::OptHistory)
   h
 end
 
-const HISTORY_COLUMNS = (:iteration, :objective, :constraint, :kkt, :change, :step, :attempts, :forward, :adjoint, :filter)
 
 """
     OptResult
@@ -186,12 +202,13 @@ end
 
 function _write_checkpoint(c::Checkpoint, problem, opt, zk, hist, k, stage, stage_iters, cont_names)
   mkpath(c.path)
-  _atomic_write(io -> write(io, zk), joinpath(c.path, "z.bin"))
-  _atomic_write(joinpath(c.path, "history.csv")) do io
+  zfile, hfile = "z_$k.bin", "history_$k.csv"
+  _atomic_write(io -> write(io, zk), joinpath(c.path, zfile))
+  _atomic_write(joinpath(c.path, hfile)) do io
     println(io, join(vcat(String[String(c) for c in HISTORY_COLUMNS], String[String(c) for c in cont_names]), ","))
-    for k in 1:hist.n
-      row = Any[getfield(hist, f)[k] for f in HISTORY_COLUMNS]
-      append!(row, hist.continuation[:, k])
+    for j in 1:hist.n
+      row = Any[getfield(hist, f)[j] for f in HISTORY_COLUMNS]
+      append!(row, hist.continuation[:, j])
       println(io, join(string.(row), ","))
     end
   end
@@ -204,8 +221,13 @@ function _write_checkpoint(c::Checkpoint, problem, opt, zk, hist, k, stage, stag
     "blocks" => String.(collect(problem.z.names)),
     "continuation" => String.(collect(cont_names)),
     "scales" => [F.scale[] for F in (problem.objective, problem.linear_constraints...)],
+    "z_file" => zfile,
+    "history_file" => hfile,
     "optimizer" => string(nameof(typeof(opt))))
   _atomic_write(io -> TOML.print(io, meta), joinpath(c.path, "checkpoint.toml"))
+  for f in readdir(c.path)
+    (startswith(f, "z_") || startswith(f, "history_")) && f != zfile && f != hfile && rm(joinpath(c.path, f); force = true)
+  end
 end
 
 """
@@ -220,8 +242,8 @@ function load_checkpoint(path::AbstractString)
   meta["format"] == 1 || throw(ArgumentError("load_checkpoint: unknown format $(meta["format"])"))
   n = meta["length"]
   z = Vector{Float64}(undef, n)
-  open(io -> read!(io, z), joinpath(path, "z.bin"))
-  lines = readlines(joinpath(path, "history.csv"))
+  open(io -> read!(io, z), joinpath(path, meta["z_file"]))
+  lines = readlines(joinpath(path, meta["history_file"]))
   header = Symbol.(split(first(lines), ","))
   rows = [parse.(Float64, split(l, ",")) for l in lines[2:end]]
   cols = NamedTuple{Tuple(header)}(Tuple([r[j] for r in rows] for j in eachindex(header)))
@@ -259,16 +281,16 @@ _count(ops) = sum(num_solves, ops; init = 0)
 # ---------------------------------------------------------------------------------------------------------------
 # The loop
 
-function _stop_reason(stop::StopCriteria, info::StepInfo, hist::OptHistory)
+function _stop_reason(stop::StopCriteria, info::StepInfo, hist::OptHistory, stage_start)
   stop.change !== nothing && info.change < stop.change && return :change
   stop.kkt !== nothing && info.kkt < stop.kkt && return :kkt
-  if stop.objective !== nothing && hist.n > stop.window
+  if stop.objective !== nothing && hist.n - stop.window > stage_start
     f, f0 = hist.objective[hist.n], hist.objective[hist.n-stop.window]
     abs(f - f0) <= stop.objective * abs(f) && return :objective
   end
   nothing
 end
-_stop_reason(::Nothing, info, hist) = nothing
+_stop_reason(::Nothing, info, hist, stage_start) = nothing
 
 """
     solve!(problem::Optimization, method::SIMP; maxiter, on_failure, stop = nothing, schedule = nothing,
@@ -277,7 +299,8 @@ _stop_reason(::Nothing, info, hist) = nothing
 Runs the optimisation from the current values of `z`. Mandatory: `maxiter` (total iterations, resumed ones included)
 and `on_failure` ([`RejectStep`](@ref)). Optional: `stop` ([`StopCriteria`](@ref); without it the loop runs
 `maxiter` iterations), `schedule` ([`Continuation`](@ref)), `checkpoint` ([`Checkpoint`](@ref)), `post` (a function
-`post(ctx)` called after each accepted iteration, with the fields and the forward state at the accepted design) and
+`post(ctx)` called after each accepted iteration, with the fields and the forward state at the accepted design; the
+adjoint state is still the one of the previous design) and
 `resume` (the result of [`load_checkpoint`](@ref)).
 
 Each iteration: the optimiser takes a step from the current design; the loop evaluates the new design (no solve when
@@ -306,10 +329,14 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
     resume.blocks == collect(z.names) || throw(ArgumentError("solve!: the checkpoint has blocks $(resume.blocks), z has $(collect(z.names))"))
     resume.continuation == collect(cont_names) ||
       throw(ArgumentError("solve!: the checkpoint continues $(resume.continuation), the schedule $(collect(cont_names))"))
+    nst = schedule === nothing ? 0 : schedule.nstages
+    (schedule === nothing ? resume.stage == 0 : 1 <= resume.stage <= nst) ||
+      throw(ArgumentError("solve!: the checkpoint is at stage $(resume.stage); the schedule has $nst stages"))
     length(resume.scales) == length(Fs) || throw(ArgumentError("solve!: the checkpoint has $(length(resume.scales)) functionals"))
     resume.iteration < maxiter || throw(ArgumentError("solve!: the checkpoint is already at iteration $(resume.iteration) ≥ maxiter"))
     set_values!(z, resume.z)
-    foreach((F, s) -> (F.scale[] = s), Fs, resume.scales)
+    # a scale fixed by :initial is restored; a scale given by the user stays
+    foreach((F, s) -> (F.scale_mode === :initial && (F.scale[] = s)), Fs, resume.scales)
     k0, stage, stage_iters = resume.iteration, resume.stage, resume.stage_iterations
     _prefill!(hist, resume)
   end
@@ -317,91 +344,130 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
   set_context!(ctx, :iteration, k0)
   set_context!(ctx, :attempt, 0)
   set_context!(ctx, :trial, 0)
-  set_context!(ctx, :phase, :optimization)
-  cont = schedule === nothing ? NamedTuple() : _apply_stage!(schedule, stage)
-  set_context!(ctx, :continuation, cont)
+  cont_buf = zeros(length(cont_names))
+  set_context!(ctx, :continuation, schedule === nothing ? NamedTuple() : _apply_stage!(schedule, stage, cont_buf))
 
   oracle = FunctionalOracle(problem, method.metric)
   isempty(problem.linear_constraints) || _setup_constraint!(oracle, only(problem.linear_constraints), ctx)
+  set_context!(ctx, :phase, :optimization)
   zk = oracle.zk
   copyto!(zk, get_values(z))
   zprev = similar(zk)
   state = init(opt, zk, oracle)
   fwd, adj, filters = _counters(problem)
+  run = _LoopState(k0, stage, stage_iters, hist.n)   # what a failure needs to write the checkpoint
+  status, reason = _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_buf, cont_names, maxiter,
+                             on_failure, stop, schedule, checkpoint, post, fwd, adj, filters)
 
-  status, reason = :maxiter, nothing
-  k = k0
-  f_acc = NaN
-  failure(msg) = begin
-    get_values(z) == zk || set_values!(z, zk)
-    checkpoint === nothing || _write_checkpoint(checkpoint, problem, opt, zk, hist, k - 1, stage, stage_iters, cont_names)
-    throw(OptimizationFailure(msg))
+  f_final = _sync!(oracle)                     # fields and forward state at the final design
+  checkpoint === nothing ||
+    _write_checkpoint(checkpoint, problem, opt, zk, hist, run.k, run.stage, run.stage_iters, cont_names)
+  OptResult(status, reason, run.k, f_final, _trim!(hist), state)
+end
+
+mutable struct _LoopState
+  k::Int
+  stage::Int
+  stage_iters::Int
+  stage_start::Int    # history length when the current stage started
+end
+
+function _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint)
+  try
+    _sync!(oracle)                             # fields and forward state at the last accepted design
+  catch
   end
-  while k < maxiter
-    k += 1
+  checkpoint === nothing ||
+    _write_checkpoint(checkpoint, problem, opt, zk, hist, run.k, run.stage, run.stage_iters, cont_names)
+  throw(OptimizationFailure(msg))
+end
+
+function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_buf, cont_names, maxiter, on_failure,
+                   stop, schedule, checkpoint, post, fwd, adj, filters)
+  fail(msg) = _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint)
+  while run.k < maxiter
+    k = run.k + 1
     set_context!(ctx, :iteration, k)
     set_context!(ctx, :attempt, 1)
     set_context!(ctx, :trial, 0)
     jumped = false
-    if schedule !== nothing && stage < schedule.nstages && stage_iters >= schedule.every
-      stage += 1
-      stage_iters = 0
-      set_context!(ctx, :continuation, _apply_stage!(schedule, stage))
+    if schedule !== nothing && run.stage < schedule.nstages && run.stage_iters >= schedule.every
+      jumped = true
+      set_context!(ctx, :continuation, _apply_stage!(schedule, run.stage + 1, cont_buf))
       _invalidate_snapshot!(oracle)
       reset!(opt, state)
-      jumped = true
     end
     copyto!(zprev, zk)
     c0 = (_count(fwd), _count(adj), _count(filters))
     info = nothing
+    f_acc = NaN
+    stalled = false
     while true
-      info = step!(opt, state, zk, oracle, ctx)
+      info = try
+        step!(opt, state, zk, oracle, ctx)
+      catch e
+        e isa OptimizationFailure || rethrow()
+        jumped && _undo_jump!(schedule, run, ctx, cont_buf, opt, state, oracle)
+        fail(e.msg)
+      end
       if !info.accepted
         if !isfinite(info.f)
-          failure("the forward problem does not converge at the current design" *
-                  (k == k0 + 1 ? " (first iteration)" : jumped ? " (right after a continuation jump)" : ""))
+          jumped && _undo_jump!(schedule, run, ctx, cont_buf, opt, state, oracle)
+          fail("the forward problem does not converge at the current design" *
+               (k == 1 ? " (first iteration)" : jumped ? " (right after a continuation jump)" : ""))
         elseif isfinite(info.f_new)
-          status = :stalled
+          stalled = true
           break
         else
-          failure("the optimiser found no step at which the forward problem converges")
+          fail("the optimiser found no step at which the forward problem converges")
         end
       end
       f_acc = objective(oracle, zk)
       isfinite(f_acc) && break
       copyto!(zk, zprev)
       ctx.attempt >= on_failure.max &&
-        failure("the forward problem did not converge at the $(on_failure.max) designs proposed in iteration $k")
+        fail("the forward problem did not converge at the $(on_failure.max) designs proposed in iteration $k")
       shrink!(opt, state, on_failure.shrink)
       set_context!(ctx, :attempt, ctx.attempt + 1)
     end
-    if status === :stalled
-      k -= 1
-      break
+    if stalled
+      jumped && (run.stage += 1; run.stage_iters = 0; run.stage_start = hist.n)
+      return :stalled, nothing
+    end
+    if jumped
+      run.stage += 1
+      run.stage_iters = 0
+      run.stage_start = hist.n
     end
     if stop !== nothing && stop.kkt !== nothing && isnan(info.kkt)
       throw(ArgumentError("StopCriteria: kkt needs an optimiser that computes an optimality measure ($(nameof(typeof(opt))) does not)"))
     end
-    stage_iters += 1
+    run.k = k
+    run.stage_iters += 1
     c1 = (_count(fwd), _count(adj), _count(filters))
     _record!(hist, (k, f_acc, _constraint_value(oracle, zk), info.kkt, info.change, info.step, ctx.attempt,
-                    c1[1] - c0[1], c1[2] - c0[2], c1[3] - c0[3]), values(ctx.continuation))
+                    c1[1] - c0[1], c1[2] - c0[2], c1[3] - c0[3]), cont_buf)
     post === nothing || post(ctx)
-    checkpoint === nothing || k % checkpoint.every == 0 &&
-      _write_checkpoint(checkpoint, problem, opt, zk, hist, k, stage, stage_iters, cont_names)
-    r = _stop_reason(stop, info, hist)
+    r = _stop_reason(stop, info, hist, run.stage_start)
+    done = false
     if r !== nothing
-      if schedule === nothing || stage == schedule.nstages
-        status, reason = :converged, r
-        break
+      if schedule === nothing || run.stage == schedule.nstages
+        done = true
+      else
+        run.stage_iters = schedule.every       # end of the stage: jump at the next iteration
       end
-      stage_iters = schedule.every          # end of the stage: jump at the next iteration
     end
+    checkpoint === nothing || k % checkpoint.every == 0 &&
+      _write_checkpoint(checkpoint, problem, opt, zk, hist, k, run.stage, run.stage_iters, cont_names)
+    done && return :converged, r
   end
+  :maxiter, nothing
+end
 
-  # fields and forward state at the final design
-  set_context!(ctx, :phase, :optimization)
-  f_final = objective(oracle, zk)
-  checkpoint === nothing || _write_checkpoint(checkpoint, problem, opt, zk, hist, k, stage, stage_iters, cont_names)
-  OptResult(status, reason, k, f_final, _trim!(hist), state)
+# a jump whose first design fails: back to the previous stage, so the checkpoint and β match the last accepted design
+function _undo_jump!(schedule, run, ctx, cont_buf, opt, state, oracle)
+  set_context!(ctx, :continuation, _apply_stage!(schedule, run.stage, cont_buf))
+  _invalidate_snapshot!(oracle)
+  reset!(opt, state)
+  nothing
 end

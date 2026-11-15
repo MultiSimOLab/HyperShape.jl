@@ -29,7 +29,8 @@ post-processing. Read-only for the user; HyperShape updates it. Fields:
   optimiser; with SiMPL the design that is finally accepted is first solved in this phase).
 - `continuation`: named tuple with the current values of the continued parameters, for example `(β = 4.0,)`.
 
-For example, `RestartState = ctx.attempt > 1` restarts a nonlinear solve from scratch after a rejected step.
+For example, `RestartState = ctx.trial > 1` restarts a nonlinear solve from scratch at every evaluation after the
+first one of an iteration (a design tried after a rejected step, or a line-search trial).
 """
 mutable struct OptContext
   iteration::Int

@@ -15,6 +15,8 @@ Base.showerror(io::IO, e::OptimizationFailure) = print(io, "OptimizationFailure:
 
 _optvariables(F::Functional) = get_optvariables(get_designfields(F.θ))
 
+struct _Validated end   # only the keyword constructors build problems
+
 """
     Optimization(z; objective, linear_constraints = ())
 
@@ -31,6 +33,7 @@ struct Optimization{Z<:OptVariables,J<:Functional,C<:Tuple}
   objective::J
   linear_constraints::C
   ctx::OptContext
+  Optimization(::_Validated, z, J, cs) = new{typeof(z),typeof(J),typeof(cs)}(z, J, cs, OptContext(:optimization))
 end
 
 function Optimization(z::OptVariables; objective, linear_constraints = (), constraints = nothing)
@@ -45,7 +48,7 @@ function Optimization(z::OptVariables; objective, linear_constraints = (), const
     c.S === nothing || throw(ArgumentError("Optimization: a linear constraint must be a design-only Functional (no states)"))
     _optvariables(c) === z || throw(ArgumentError("Optimization: a constraint is not built on these variables z"))
   end
-  Optimization(z, objective, cs, OptContext(:optimization))
+  Optimization(_Validated(), z, objective, cs)
 end
 
 """
@@ -77,12 +80,11 @@ ignores it; SiMPL uses it in its step and its optimality measure.
 struct SIMP{O<:Optimizer,M}
   optimizer::O
   metric::M
-end
-
-function SIMP(optimizer::Optimizer; metric)
-  ok = metric isa Metric || (metric isa NamedTuple && all(m -> m isa Metric, values(metric)))
-  ok || throw(ArgumentError("SIMP: metric must be LumpedMass(dΩ), Euclidean() or a named tuple of them per block"))
-  SIMP(optimizer, metric)
+  function SIMP(optimizer::Optimizer; metric)
+    ok = metric isa Metric || (metric isa NamedTuple && all(m -> m isa Metric, values(metric)))
+    ok || throw(ArgumentError("SIMP: metric must be LumpedMass(dΩ), Euclidean() or a named tuple of them per block"))
+    new{typeof(optimizer),typeof(metric)}(optimizer, metric)
+  end
 end
 
 _block_metric(::Euclidean, V) = ones(num_free_dofs(V))
@@ -143,16 +145,35 @@ function _set_design!(o::FunctionalOracle, v)
   nothing
 end
 
+# Optimisers may hand back the current design through their own variables (SiMPL: a sigmoid of a logit), equal up to
+# rounding: such a design is taken as the current one, so it is neither solved again nor treated as a trial.
+function _near(v, w)
+  @inbounds for i in eachindex(v, w)
+    abs(v[i] - w[i]) <= 16 * eps(max(abs(w[i]), 1.0)) || return false
+  end
+  true
+end
+_canonical(o::FunctionalOracle, v) = (v === o.zk || _near(v, o.zk)) ? o.zk : v
+
 function objective(o::FunctionalOracle, v)
   ctx = o.ctx
+  v = _canonical(o, v)
   set_context!(ctx, :trial, ctx.trial + 1)
-  set_context!(ctx, :phase, v == o.zk ? :optimization : :linesearch)
+  set_context!(ctx, :phase, v === o.zk ? :optimization : :linesearch)
   (o.snap_valid && v == o.snap_z) && return o.snap_f
   _set_design!(o, v)
   functional_value(o.J, ctx)
 end
 
+# the variables, the fields and the forward state at the loop's design (not served from the snapshot)
+function _sync!(o::FunctionalOracle)
+  set_context!(o.ctx, :phase, :optimization)
+  _set_design!(o, o.zk)
+  functional_value(o.J, o.ctx)
+end
+
 function gradient!(dF, o::FunctionalOracle, v)
+  v = _canonical(o, v)
   if o.snap_valid && v == o.snap_z
     copyto!(dF, o.snap_dF)
     return dF
@@ -186,26 +207,31 @@ end
 riesz!(g, o::FunctionalOracle{J,Z,Nothing}, dF) where {J,Z} = copyto!(g, dF)
 riesz!(g, o::FunctionalOracle, dF) = (g .= dF ./ o.metric)
 
-# a and V of the linear constraint g(z) = aᵀz − V ≤ 0 (scaled as the functional), with a check of linearity
+# a and V of the linear constraint g(z) = aᵀz − V ≤ 0 (scaled as the functional), with a check of linearity at two
+# designs that do not depend on the starting one (relative tolerance 1e-6, so a filter solved iteratively passes)
 function _setup_constraint!(o::FunctionalOracle, c::Functional, ctx)
   z = o.z
   z0 = copy(get_values(z))
-  set_context!(ctx, :phase, :optimization)
+  set_context!(ctx, :phase, :setup)
   a = functional_gradient!(zeros(length(z0)), c, ctx)
   v0 = functional_value(c, ctx)
   (isfinite(v0) && all(isfinite, a)) || throw(ArgumentError("Optimization: the linear constraint is not finite at the start"))
   V = dot(a, z0) - v0
-  # a second point inside the bounds
-  z1 = @. 0.5 * z0 + 0.5 * (o.lb + 0.3 * (o.ub - o.lb))
-  if z1 != z0
+  w = o.ub .- o.lb
+  probes = (o.lb .+ w .* [0.5 + 0.25 * sin(1.7i) for i in eachindex(z0)],
+            o.lb .+ w .* [0.5 + 0.25 * cos(2.3i) for i in eachindex(z0)])
+  for z1 in probes
     set_values!(z, z1)
     v1 = functional_value(c, ctx)
-    set_values!(z, z0)
     pred = dot(a, z1) - V
-    tol = 1e-8 * (abs(v0) + abs(v1) + sum(i -> abs(a[i] * (z1[i] - z0[i])), eachindex(a)))
-    abs(v1 - pred) <= tol || throw(ArgumentError("Optimization: the linear constraint is not linear in z " *
-      "(value $(v1) where the linearisation gives $(pred)); a projected volume is a nonlinear constraint (phase 1)"))
+    tol = 1e-6 * (abs(v0) + abs(v1) + sum(i -> abs(a[i] * (z1[i] - z0[i])), eachindex(a)))
+    if !(abs(v1 - pred) <= tol)
+      set_values!(z, z0)
+      throw(ArgumentError("Optimization: the linear constraint is not linear in z (value $(v1) where the " *
+        "linearisation gives $(pred)); a projected volume is a nonlinear constraint (phase 1)"))
+    end
   end
+  set_values!(z, z0)
   o.a, o.V = a, V
   o
 end

@@ -5,17 +5,23 @@ using HyperShape
 using HyperShape.Variables: get_values, set_values!, set_beta!
 using HyperShape.Operators: num_solves
 using HyperShape.Optimizers: FunctionOracle, OC, SiMPL, init, step!, shrink!
-using HyperShape.Methods: FunctionalOracle, _setup_constraint!
+using HyperShape.Methods: FunctionalOracle, _setup_constraint!, OptHistory, _record!, _stop_reason
 using LinearAlgebra
 using Test
 
 # heat compliance (self-adjoint) and the volume of the unprojected design density
-function compliance_problem(; design = :P0, n = 8, dim = 2, init = 0.4, fraction = 0.4, solve_flag = nothing)
+function compliance_problem(; design = :P0, n = 8, dim = 2, init = 0.4, fraction = 0.4, solve_flag = nothing,
+                            phases = nothing, sign = Ref(1.0))
   p = state_problem(; design, n, dim, init)
   (; z, x, θ, S, f, dk, dΩ) = p
-  Sc = solve_flag === nothing ? S :
-       StateOperator(S.model; depends = θ, solve = (m, ctx) -> (push!(p.ctxs, (:S, ctx)); (solve!(m; Assembly = true), solve_flag())))
-  C = Functional((u, θ) -> ∫(f * u)dΩ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), Sc, Sc, θ; scale = :initial)
+  flag = solve_flag === nothing ? () -> true : solve_flag
+  Sc = (solve_flag === nothing && phases === nothing) ? S :
+       StateOperator(S.model; depends = θ, solve = (m, ctx) -> begin
+         push!(p.ctxs, (:S, ctx))
+         phases === nothing || push!(phases, (ctx.iteration, ctx.trial, ctx.phase))
+         (solve!(m; Assembly = true), flag())
+       end)
+  C = Functional((u, θ) -> ∫(f * u)dΩ, (u, w, θ) -> (δ -> ∫(-sign[] * (dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), Sc, Sc, θ; scale = :initial)
   θv = PhysicalFields(x; ρ = Identity())
   vol = sum(∫(1.0)dΩ)
   Vol = Functional(θ -> sum(∫(θ.ρ)dΩ) - fraction * vol, θ -> (δ -> ∫(δ)dΩ), θv; scale = fraction * vol)
@@ -40,6 +46,18 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     bad = Optimization(q.z; objective = q.C, linear_constraints = (Vp,))
     @test_throws ArgumentError solve!(bad, SIMP(OC(); metric = Euclidean()); maxiter = 2, on_failure = RejectStep(shrink = 0.5, max = 3))
     @test FunctionalOracle(q.problem, Euclidean()).metric === nothing
+    # a uniform start at 0.3 used to hide a nonlinear constraint
+    q3 = compliance_problem(; design, init = 0.3)
+    Vp3 = Functional(θ -> sum(∫(θ.ρ)q3.dΩ) - 0.4, θ -> (δ -> ∫(δ)q3.dΩ), q3.θ; scale = 0.4)
+    @test_throws ArgumentError solve!(Optimization(q3.z; objective = q3.C, linear_constraints = Vp3),
+                                      SIMP(OC(); metric = Euclidean()); maxiter = 2, on_failure = RejectStep(shrink = 0.5, max = 3))
+    @test get_values(q3.z) == fill(0.3, length(q3.z))     # z restored after the probes
+    # the filtered, unprojected volume is linear and has the same vector (Neumann filter)
+    θf = PhysicalFields(q.x; ρ = HelmholtzFilter(q.Sf; measure = q.dΩ))
+    Vf = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4 * sum(m), θ -> (δ -> ∫(δ)q.dΩ), θf; scale = 0.4 * sum(m))
+    of = FunctionalOracle(Optimization(q.z; objective = q.C, linear_constraints = Vf), Euclidean())
+    _setup_constraint!(of, Vf, q.problem.ctx)
+    @test of.a ≈ m ./ (0.4 * sum(m)) rtol = 1e-10
   end
 
   @testset "Problem and method arguments" begin
@@ -166,7 +184,8 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     ra = run(qa, 8)
     qb = compliance_problem()
     rb = run(qb, 4; checkpoint = Checkpoint(dir; every = 2))
-    @test isfile(joinpath(dir, "checkpoint.toml")) && isfile(joinpath(dir, "z.bin")) && isfile(joinpath(dir, "history.csv"))
+    @test isfile(joinpath(dir, "checkpoint.toml")) && isfile(joinpath(dir, "z_4.bin")) && isfile(joinpath(dir, "history_4.csv"))
+    @test !isfile(joinpath(dir, "z_2.bin"))                # older files deleted
     ck = load_checkpoint(dir)
     @test ck.iteration == 4 && ck.z == get_values(qb.z) && length(ck.history.objective) == 4
     qc = compliance_problem()
@@ -189,5 +208,97 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test check_consistency(q.C, q.Vol).passed
     r = solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 5, on_failure = RejectStep(shrink = 0.5, max = 3))
     @test r.history.objective[end] < r.history.objective[1] && nonincreasing(r.history.objective)
+  end
+
+  @testset "Stalled: z, fields and state at the last accepted design" begin
+    sign = Ref(1.0)
+    q = compliance_problem(; sign)
+    r = solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 10,
+               on_failure = RejectStep(shrink = 0.5, max = 3), post = ctx -> (ctx.iteration == 2 && (sign[] = -1.0)))
+    @test r.status === :stalled && r.iterations == 2
+    @test get_values(q.z) == r.state.z || get_values(q.z) ≈ r.state.z
+    @test get_free_dof_values(q.x.ρ) == get_values(q.z)
+    @test functional_value(q.C, q.problem.ctx) ≈ r.objective
+  end
+
+  @testset "Failures: state, fields and checkpoint" begin
+    dir = mktempdir()
+    cnt = Ref(0)
+    q = compliance_problem(; solve_flag = () -> (cnt[] += 1; cnt[] <= 2))
+    accepted = Vector{Float64}[]
+    @test_throws OptimizationFailure solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 6,
+                                            on_failure = RejectStep(shrink = 0.5, max = 2), checkpoint = Checkpoint(dir; every = 10),
+                                            post = ctx -> push!(accepted, copy(get_values(q.z))))
+    @test get_free_dof_values(q.x.ρ) == get_values(q.z) == last(accepted)
+    ck = load_checkpoint(dir)
+    @test ck.iteration == 1 && ck.z == last(accepted)
+    # an adjoint that fails: non-finite gradient, checkpoint written
+    q = compliance_problem()
+    (; z, θ, S, dk, dΩ, dΓ, A) = q
+    Abad = StateOperator(A.model; depends = (θ, S), solve = (m, ctx) -> (solve!(m; Assembly = true), false))
+    B = Functional((u, θ) -> ∫(u)dΓ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, Abad, θ; scale = 1.0)
+    dir2 = mktempdir()
+    @test_throws OptimizationFailure solve!(Optimization(z; objective = B, linear_constraints = q.Vol),
+                                            SIMP(OC(); metric = Euclidean()); maxiter = 3,
+                                            on_failure = RejectStep(shrink = 0.5, max = 2), checkpoint = Checkpoint(dir2; every = 10))
+    @test isfile(joinpath(dir2, "checkpoint.toml"))
+  end
+
+  @testset "Phases seen by the user's solve (SiMPL, non-uniform start, jump)" begin
+    phases = Tuple{Int,Int,Symbol}[]
+    q = compliance_problem(; init = nothing, fraction = 0.7, phases)
+    r = solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 5,
+               schedule = Continuation(β = q.H => [2.0, 4.0]; every = 3), on_failure = RejectStep(shrink = 0.5, max = 3))
+    @test r.iterations == 5
+    # the first solve of iteration 1 and of the jump iteration are the current design
+    first_of(k) = phases[findfirst(p -> p[1] == k, phases)]
+    @test first_of(1)[3] === :optimization
+    @test first_of(4)[3] === :optimization
+    @test all(p -> p[3] in (:setup, :optimization, :linesearch), phases)
+  end
+
+  @testset "Resume in the middle of a continuation stage" begin
+    dir = mktempdir()
+    sched(q) = Continuation(β = q.H => [1.0, 2.0, 4.0]; every = 3)
+    run(q, maxiter; kwargs...) = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter, schedule = sched(q),
+                                        on_failure = RejectStep(shrink = 0.5, max = 3), kwargs...)
+    qa = compliance_problem(); ra = run(qa, 9)
+    qb = compliance_problem(); run(qb, 5; checkpoint = Checkpoint(dir; every = 5))
+    ck = load_checkpoint(dir)
+    @test ck.stage == 2 && ck.stage_iterations == 2
+    qc = compliance_problem(); rc = run(qc, 9; resume = ck)
+    @test get_values(qc.z) ≈ get_values(qa.z) rtol = 1e-12
+    @test vec(rc.history.continuation) == vec(ra.history.continuation)
+    qd = compliance_problem()
+    @test_throws ArgumentError solve!(qd.problem, SIMP(OC(); metric = Euclidean()); maxiter = 9, resume = ck,
+                                      schedule = Continuation(β = qd.H => [1.0]; every = 3), on_failure = RejectStep(shrink = 0.5, max = 3))
+  end
+
+  @testset "Objective criterion counts only the current stage" begin
+    q = compliance_problem()
+    r = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 40, stop = StopCriteria(objective = 5e-2, window = 2),
+               schedule = Continuation(β = q.H => [1.0, 2.0, 4.0, 8.0]; every = 20), on_failure = RejectStep(shrink = 0.5, max = 3))
+    c = vec(r.history.continuation)
+    lengths = [count(==(v), c) for v in unique(c)]
+    @test all(>=(3), lengths[1:end-1])          # window + 1 iterations at least before a stage can end
+    @test_throws ArgumentError StopCriteria(objective = 1e-3)
+  end
+
+  @testset "SiMPL without constraint, loop bookkeeping without allocations" begin
+    q = compliance_problem()
+    r = solve!(Optimization(q.z; objective = q.C), SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 4,
+               on_failure = RejectStep(shrink = 0.5, max = 3))
+    @test r.history.objective[end] < r.history.objective[1] && all(isnan, r.history.constraint)
+    h = OptHistory(10, (:β,))
+    buf = [1.0]
+    row = (1, 1.0, 0.0, NaN, 0.1, 0.2, 1, 1, 0, 2)
+    _record!(h, row, buf)
+    @test (@allocated _record!(h, row, buf)) == 0
+    st = StopCriteria(change = 1e-3, objective = 1e-3, window = 1)
+    info = HyperShape.Optimizers.StepInfo(true, 1.0, 1.0, NaN, 0.1, 0.1, 0.0, 1)
+    _stop_reason(st, info, h, 0)
+    @test (@allocated _stop_reason(st, info, h, 0)) == 0
+    @test_throws ArgumentError Continuation(step = q.H => [1.0]; every = 2)    # history column name
+    @test_throws ArgumentError Continuation(β = q.H => [1.0, -2.0]; every = 2)
   end
 end
