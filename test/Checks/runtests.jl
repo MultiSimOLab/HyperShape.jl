@@ -2,7 +2,8 @@ using Gridap
 using Gridap.FESpaces
 using HyperFEM
 using HyperShape
-using HyperShape.Variables: get_values, set_values!, version
+using HyperShape.Variables: get_values, set_values!, version, set_beta!
+using HyperShape.Operators: apply!
 using HyperShape.Checks: ConsistencyReport
 using LinearAlgebra
 using Test
@@ -48,6 +49,10 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     @test _all_passed(r, "design chain of θ.ρ") && _all_passed(r, "symmetry of filter 1")
     @test _all_passed(r, "tangent") && _all_passed(r, "dependencies")
     @test get_values(z) == z0                       # z restored
+    @test get_free_dof_values(p.x.ρ) == z0          # and the fields and states with it
+    uref = copy(get_free_dof_values(p.uh))
+    set_values!(z, z0); apply!(S, nothing)
+    @test get_free_dof_values(p.uh) ≈ uref rtol = 1e-12
     @test isnan(C.scale[]) && B.scale[] == 2.0      # scales restored
     @test functional_value(C, nothing) ≈ 1.0        # :initial still taken at the first real evaluation
     s = sprint(show, MIME("text/plain"), r)
@@ -111,5 +116,105 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     set_values!(p.z, v)
     r = check_consistency(Vol)
     @test r.passed && get_values(p.z) == v
+  end
+
+  @testset "Sensitivity, saturated designs and keywords" begin
+    p = state_problem(; design = :P1)
+    (; θ, S, f, dk, dΩ) = p
+    DJ(c) = (u, w, θ) -> (δ -> ∫(-c * (dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ)
+    C = Functional((u, θ) -> ∫(f * u)dΩ, DJ(1.0), S, S, θ; scale = 1.0)
+    @test _all_passed(check_consistency(C), "gradient")
+    @test !_all_passed(check_consistency(Functional((u, θ) -> ∫(f * u)dΩ, DJ(1.05), S, S, θ; scale = 1.0)), "gradient")
+    @test !_all_passed(check_consistency(C; min_rate = 2.5), "gradient")
+    r = check_consistency(C; ctx = :my_context)
+    @test any(c -> c[2] === :my_context, p.ctxs)
+    # a saturated projection: J does not change along δ, nothing is tested
+    set_beta!(p.H, 512.0)
+    r = check_consistency(C)
+    x = only(_results(r, "gradient"))
+    @test !x.passed && occursin("not tested", x.message)
+  end
+
+  @testset "A missing gradient is not hidden by a large constant" begin
+    q = filter_problem(symmetric_filter)
+    dΩ = q.dΩ
+    F = Functional(θ -> ∫(1.0e8 + θ.ρ)dΩ, θ -> (δ -> ∫(0.0 * δ)dΩ), q.θ; scale = 1.0)
+    @test !_all_passed(check_consistency(F), "gradient")
+    G = Functional(θ -> ∫(1.0e8 + θ.ρ)dΩ, θ -> (δ -> ∫(δ)dΩ), q.θ; scale = 1.0)
+    @test _all_passed(check_consistency(G), "gradient")
+  end
+
+  @testset "Number of solves" begin
+    p = state_problem()
+    (; θ, S, A, f, dk, dΩ, dΓ, nforward, nadjoint) = p
+    C = Functional((u, θ) -> ∫(f * u)dΩ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, S, θ; scale = 1.0)
+    B = Functional((u, θ) -> ∫(u)dΓ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, A, θ; scale = 1.0)
+    functional_gradient!(zeros(length(p.z)), B, nothing)
+    f0, a0 = nforward[], nadjoint[]
+    @test check_consistency(C, B; steps = 5).passed
+    @test nforward[] - f0 <= 5 + 4                  # shared by both functionals
+    @test nadjoint[] - a0 <= 4
+  end
+
+  @testset "Failures of the state and errors in user code" begin
+    for failfrom in (1, 3)                          # fails at the current design, or at a perturbed one
+      p = state_problem()
+      (; z, θ, f, dk, dΩ) = p
+      cnt = Ref(0)
+      S2 = StateOperator(p.S.model; depends = θ, solve = (m, ctx) -> (cnt[] += 1; (solve!(m; Assembly = true), cnt[] < failfrom)))
+      C = Functional((u, θ) -> ∫(f * u)dΩ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S2, S2, θ; scale = :initial)
+      z0 = copy(get_values(z))
+      r = check_consistency(C)
+      @test !r.passed && !_all_passed(r, "gradient")
+      @test get_values(z) == z0 && isnan(C.scale[])
+    end
+    p = state_problem()
+    (; z, θ, S, f, dk, dΩ) = p
+    cnt = Ref(0)
+    C = Functional((u, θ) -> (cnt[] += 1; cnt[] == 4 && error("boom"); ∫(f * u)dΩ),
+                   (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, S, θ; scale = :initial)
+    z0 = copy(get_values(z))
+    @test_throws ErrorException check_consistency(C)
+    @test get_values(z) == z0 && isnan(C.scale[])
+  end
+
+  @testset "Several physical fields, infinite bounds" begin
+    model = CartesianDiscreteModel((0, 1, 0, 1), (5, 5))
+    dΩ = Measure(Triangulation(model), 2)
+    V0 = TestFESpace(model, ReferenceFE(lagrangian, Float64, 0); conformity = :L2)
+    z = OptVariables(ρ = FieldVariable(V0; bounds = (0.0, Inf), init = [0.5 + 0.3 * sin(i) for i in 1:num_free_dofs(V0)]))
+    x = DesignFields(z; ρ = Identity())
+    θ = PhysicalFields(x; ρ = Heaviside(β = 2.0, η = 0.5), E = :ρ => Identity())
+    F = Functional(θ -> ∫(θ.ρ * θ.E)dΩ, θ -> (ρ = δ -> ∫(θ.E * δ)dΩ, E = δ -> ∫(θ.ρ * δ)dΩ), θ; scale = 1.0)
+    r = check_consistency((energy = F,))
+    @test r.passed
+    @test _all_passed(r, "design chain of θ.ρ") && _all_passed(r, "design chain of θ.E")
+  end
+
+  @testset "Tangents: nonlinear residual, Dirichlet values, labels" begin
+    p = state_problem(; gD = 1.0, adjoint_space = :homogeneous)
+    (; θ, S, A, dk, dΩ, dΓ) = p
+    B = Functional((u, θ) -> ∫(u)dΓ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, A, θ; scale = 1.0)
+    res(u, v) = ∫((1 + u * u) * ∇(u) ⋅ ∇(v))dΩ
+    jac(c) = (u, du, v) -> ∫((1 + u * u) * ∇(du) ⋅ ∇(v) + c * u * du * ∇(u) ⋅ ∇(v))dΩ
+    r = check_consistency(B; tangents = (S => (res, jac(2.0)), S => (res, jac(1.9))))
+    @test only(_results(r, "tangent 1")).passed
+    @test !only(_results(r, "tangent 2")).passed
+  end
+
+  @testset "Under-declared state reached through depends" begin
+    p = state_problem()
+    (; θ, U, V, bc, a, l, dΩ) = p
+    # S1 reads θ but declares nothing; S2 reads the state of S1 and declares it
+    for deps1 in ((), θ)
+      S1 = StateOperator(StaticLinearModel(l, a, U, V, bc; ls = LUSolver()); depends = deps1,
+                         solve = (m, ctx) -> solve!(m; Assembly = true))
+      u1 = get_state(S1)
+      S2 = StateOperator(StaticLinearModel(v -> ∫(u1 * v)dΩ, (u, v) -> ∫(∇(u) ⋅ ∇(v))dΩ, U, V, bc; ls = LUSolver());
+                         depends = (θ, S1), solve = (m, ctx) -> solve!(m; Assembly = true))
+      F = Functional((u, θ) -> ∫(u)dΩ, (u, w, θ) -> (δ -> ∫(0.0 * δ)dΩ), S2, S2, θ; scale = 1.0)
+      r = check_consistency(F)
+      @test _all_passed(r, "dependencies") == (deps1 !== ())
+    end
   end
 end

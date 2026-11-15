@@ -129,7 +129,10 @@ wrote and declared, and returns a report (`r.passed`, and one line per check, di
   and filter to assemble and solve again;
 - optionally, the tangent of a state against its residual: `tangents = (S => (res, jac),)`.
 
-z and the scales of the functionals are restored on return. Each Taylor step costs one forward solve per functional.
+z, the fields, the states and the scales of the functionals are restored on return. States shared by several
+functionals are solved once per design: each forward state at most `steps + 4` times. A Taylor test where J does not
+change along the direction (a saturated projection) is reported as not tested. Objects that no declared dependency
+leads to cannot be checked.
 
 ## Methods
 

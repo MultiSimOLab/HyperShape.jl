@@ -69,7 +69,8 @@ and a right-hand side supplied by HyperShape.
   re-assemble, for example `solve = (m, b, ctx, stale) -> solve!(m, b; Assembly = stale)`. Mandatory.
 
 The matrix must be the one the model assembled at construction (no dependency has changed yet). The returned vector
-is copied, so it may be a buffer of the model.
+is copied, so it may be a buffer of the model. [`invalidate!`](@ref) makes the next solve stale whatever the
+dependencies (the consistency checks use it).
 """
 mutable struct LinearOperator{M,F,D} <: AbstractOperator
   model::M
@@ -102,6 +103,17 @@ function solve_linear!(x, op::LinearOperator, b, ctx)
   op.force_stale = false
   copyto!(x, y)
 end
+
+"""
+    invalidate!(obj) -> obj
+
+Forgets what `obj` computed, so that it is computed again on next use: the next solve of a
+[`LinearOperator`](@ref) is stale (the user re-assembles), a [`StateOperator`](@ref) is solved again. Used by
+[`check_consistency`](@ref HyperShape.Checks.check_consistency); physical fields and functionals extend it.
+"""
+function invalidate! end
+
+invalidate!(op::LinearOperator) = (op.force_stale = true; op)
 
 include("StateOperator.jl")
 
