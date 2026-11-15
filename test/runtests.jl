@@ -12,8 +12,10 @@ using Test
         end
     end
 
+    include("common.jl")
     include("Optimizers/runtests.jl")
     include("Variables/runtests.jl")
     include("Functionals/runtests.jl")
+    include("Checks/runtests.jl")
 
 end

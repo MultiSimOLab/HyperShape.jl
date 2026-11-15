@@ -117,6 +117,20 @@ HyperShape then applies the transposed maps down to `z`. Implemented, with `func
 - Design-only functionals (volume): `Functional(Jform, DJform, θ; scale)` with `Jform(θ)` and `DJform(θ)`.
 - `scale` is mandatory: a positive number, `:initial` (absolute value of the first evaluation) or `1.0`.
 
+## Consistency checks
+
+`check_consistency(J1, J2, …; ctx)` (or a named tuple of functionals) checks, at the current design, what the user
+wrote and declared, and returns a report (`r.passed`, and one line per check, displayed as a table):
+
+- the gradient of each functional, by a Taylor test (the error must fall with order 2 as the step is halved);
+- the maps x → θ of each physical field alone, so that a failing gradient is located in `DJform` or in the adjoint;
+- the symmetry of each filter, with the user's solve;
+- the declared dependencies: value and gradient at a new design, as usual and after forcing every reachable state
+  and filter to assemble and solve again;
+- optionally, the tangent of a state against its residual: `tangents = (S => (res, jac),)`.
+
+z and the scales of the functionals are restored on return. Each Taylor step costs one forward solve per functional.
+
 ## Methods
 
 A method is an operator `z ↦ z⁺` over the functionals. All methods share one loop (update the variables, evaluate,

@@ -76,11 +76,12 @@ mutable struct LinearOperator{M,F,D} <: AbstractOperator
   solve::F
   depends::D
   seen::Vector{Int}
+  force_stale::Bool   # the next solve is stale whatever the dependencies (set by the consistency checks)
 end
 
 function LinearOperator(model; depends, solve)
   deps = _check_depends(_as_depends(depends))
-  LinearOperator(model, solve, deps, Int[version(d) for d in deps])
+  LinearOperator(model, solve, deps, Int[version(d) for d in deps], false)
 end
 
 get_model(op::LinearOperator) = op.model
@@ -92,12 +93,13 @@ Solves with the right-hand side `b` through the user's `solve` and copies the so
 """
 function solve_linear!(x, op::LinearOperator, b, ctx)
   _refresh_all!(op.depends, ctx)
-  stale = _any_changed(op.depends, op.seen, 1)
+  stale = op.force_stale || _any_changed(op.depends, op.seen, 1)
   y = op.solve(op.model, b, ctx, stale)
   length(y) == length(x) ||
     throw(DimensionMismatch("the solve function of the LinearOperator returned $(length(y)) values, expected $(length(x))"))
   # the dependencies count as seen only after a successful solve: if the solve throws, the next call is stale again
   _mark_seen!(op.depends, op.seen, 1)
+  op.force_stale = false
   copyto!(x, y)
 end
 
