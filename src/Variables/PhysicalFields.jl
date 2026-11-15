@@ -166,3 +166,19 @@ function design_gradient!(gz, θ::PhysicalFields, forms::NamedTuple, ctx; key = 
   end
   gz
 end
+
+# the next update_fields! recomputes every chain (filters solved again) and the version grows
+invalidate!(θ::PhysicalFields) = (getfield(θ, :seen)[] = -1; θ)
+
+"""
+    filter_operators(θ::PhysicalFields) -> Vector
+
+The `LinearOperator`s of the filters in the maps of the physical fields, each one once.
+"""
+function filter_operators(θ::PhysicalFields)
+  ops = Any[]
+  for chain in getfield(θ, :chains), s in chain
+    s isa FilterStage && !any(o -> o === s.op, ops) && push!(ops, s.op)
+  end
+  ops
+end

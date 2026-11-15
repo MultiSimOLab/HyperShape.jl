@@ -10,6 +10,7 @@ using Gridap
 using Gridap.FESpaces
 using HyperFEM: HyperFEM, get_state, get_spaces
 using ..Operators: StateOperator, apply!, version
+import ..Operators: invalidate!
 using ..Operators: get_model as HyperShape_get_model
 using ..Variables: PhysicalFields, update_fields!, design_gradient!, get_designfields, get_optvariables
 
@@ -175,5 +176,9 @@ function functional_gradient!(gz, F::Functional, ctx)
   gz ./= F.scale[]
   gz
 end
+
+
+# the next value is computed again (not taken from the cache)
+invalidate!(F::Functional) = (F.cache[1] = -1.0; F)
 
 end

@@ -81,3 +81,5 @@ function apply!(S::StateOperator, ctx)
 end
 
 refresh!(S::StateOperator, ctx) = (apply!(S, ctx); S)
+
+invalidate!(S::StateOperator) = (S.solved = false; S)

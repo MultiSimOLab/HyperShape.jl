@@ -31,7 +31,7 @@ using Gridap.Algebra: residual!
 using HyperFEM: get_spaces
 using HyperFEMKernels: KernelOperator, update
 using ..Operators: LinearOperator, solve_linear!
-import ..Operators: version, refresh!
+import ..Operators: version, refresh!, invalidate!
 
 export FieldVariable, OptVariables, DesignFields, PhysicalFields
 export Identity, HelmholtzFilter, Heaviside

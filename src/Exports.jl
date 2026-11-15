@@ -25,6 +25,7 @@ end
 @publish Functionals Functional
 @publish Functionals functional_value
 @publish Functionals functional_gradient!
+@publish Checks check_consistency
 @publish Variables FieldVariable
 @publish Variables OptVariables
 @publish Variables DesignFields
