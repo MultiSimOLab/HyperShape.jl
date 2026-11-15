@@ -19,6 +19,8 @@ What [`step!`](@ref) reports about one design step.
 - `step`: step size (SiMPL) or move limit (OC) used.
 - `violation`: `max(0, aᵀz - V)` of the linear constraint at the returned design (`0` without constraint).
 - `evaluations`: number of calls to `objective` in the step (forward solves).
+- `multiplier`: multiplier of the linear constraint used in the step (`λ` of the bisection in OC, `μ` in SiMPL; `0`
+  if the constraint is inactive, `NaN` if the optimiser does not report one).
 """
 struct StepInfo
   accepted::Bool
@@ -29,6 +31,7 @@ struct StepInfo
   step::Float64
   violation::Float64
   evaluations::Int
+  multiplier::Float64
 end
 
 """

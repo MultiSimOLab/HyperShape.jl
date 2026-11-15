@@ -6,11 +6,15 @@
 Thrown by [`solve!`](@ref) when the optimisation cannot continue: the forward problem does not converge at the
 current design (first iteration or right after a continuation jump), every attempt of a step was rejected, or a
 gradient is not finite (failed adjoint). `z`, the fields and the states are left at the last accepted design, and
-the checkpoint (if any) is written first.
+the checkpoint (if any) is written first. `history` holds the [`OptHistory`](@ref) up to the last accepted
+iteration and `iterations` its number (`nothing` and `0` when thrown outside the loop).
 """
 struct OptimizationFailure <: Exception
   msg::String
+  history::Any
+  iterations::Int
 end
+OptimizationFailure(msg::AbstractString) = OptimizationFailure(String(msg), nothing, 0)
 Base.showerror(io::IO, e::OptimizationFailure) = print(io, "OptimizationFailure: ", e.msg)
 
 _optvariables(F::Functional) = get_optvariables(get_designfields(F.θ))

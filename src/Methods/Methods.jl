@@ -12,6 +12,7 @@ module Methods
 
 using LinearAlgebra
 using TOML
+using Printf
 using Gridap
 using Gridap.FESpaces
 import Gridap: solve!
@@ -29,5 +30,6 @@ export solve!
 
 include("Problem.jl")
 include("Loop.jl")
+include("Output.jl")
 
 end

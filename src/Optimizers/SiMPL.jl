@@ -208,7 +208,7 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
       nev += 1
       s.have_f = true
     end
-    isfinite(s.f) || return StepInfo(false, s.f, NaN, NaN, 0.0, 0.0, _violation(c, s.z), nev)
+    isfinite(s.f) || return StepInfo(false, s.f, NaN, NaN, 0.0, 0.0, _violation(c, s.z), nev, NaN)
     gradient!(s.dF, oracle, s.z)
     riesz!(s.g, oracle, s.dF)
     s.have_grad = true
@@ -233,6 +233,7 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
   α = guess * s.scale
 
   slack = 10 * eps(Float64) * abs(f)
+  μ = c === nothing ? NaN : 0.0
   accepted = false
   f_new = NaN
   kkt = NaN
@@ -241,7 +242,7 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
     if c === nothing
       _set_trial!(s, α, 0.0, lb, ub)
     else
-      _volume_shift!(opt, s, c[1], c[2], α, lb, ub)
+      μ = _volume_shift!(opt, s, c[1], c[2], α, lb, ub)
     end
     if j == 0   # optimality measure at the current design
       @. s.work = (s.ψ_trial - s.ψ) / α
@@ -251,7 +252,7 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
     @. s.work = s.z_trial - s.z
     change = maximum(abs, s.work)
     if change == 0   # nothing left to move at this precision
-      return StepInfo(true, f, f, kkt, 0.0, α, _violation(c, s.z), nev)
+      return StepInfo(true, f, f, kkt, 0.0, α, _violation(c, s.z), nev, μ)
     end
     decrease = dot(s.dF, s.work)
     f_new = objective(oracle, s.z_trial)
@@ -271,7 +272,7 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
   end
 
   # the forward state of the oracle is now at a rejected trial; f, dF and g at z remain valid
-  accepted || return StepInfo(false, f, f_new, kkt, 0.0, α, _violation(c, s.z), nev)
+  accepted || return StepInfo(false, f, f_new, kkt, 0.0, α, _violation(c, s.z), nev, μ)
 
   s.f_back, s.α_prev_back = f, s.α_prev
   s.ψ_prev, s.ψ, s.ψ_trial = s.ψ, s.ψ_trial, s.ψ_prev
@@ -286,7 +287,7 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
   s.retry = false
 
   copyto!(z, s.z)
-  StepInfo(true, f, f_new, kkt, change, α, _violation(c, s.z), nev)
+  StepInfo(true, f, f_new, kkt, change, α, _violation(c, s.z), nev, μ)
 end
 
 # (1, D(z_trial, z))_M for the scaled Fermi–Dirac entropy; uses the latent variables for stability

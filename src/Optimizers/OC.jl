@@ -55,7 +55,7 @@ function step!(opt::OC, s::OCState, z, oracle, ctx)
   s.shrunk || (s.move = opt.move)   # the previous step stood: the reduction is dropped
   s.shrunk = false
   f = objective(oracle, z)
-  isfinite(f) || return StepInfo(false, f, NaN, NaN, 0.0, s.move, 0.0, 1)
+  isfinite(f) || return StepInfo(false, f, NaN, NaN, 0.0, s.move, 0.0, 1, NaN)
   gradient!(s.dF, oracle, z)
   a, V = linear_constraint(oracle)
   lb, ub = bounds(oracle)
@@ -72,6 +72,7 @@ function step!(opt::OC, s::OCState, z, oracle, ctx)
     n += 1
   end
   n = 0
+  λ = λ2
   while (λ2 - λ1) / (λ1 + λ2) > opt.bisection_tol && n < opt.max_bisections
     λ = (λ1 + λ2) / 2
     vol = _oc_update!(z, zo, B, a, lb, ub, λ^(-η), m)   # as in top88, z keeps the update of the last midpoint
@@ -81,5 +82,5 @@ function step!(opt::OC, s::OCState, z, oracle, ctx)
 
   @. B = z - zo   # B is free now: use it as work vector
   change = maximum(abs, B)
-  StepInfo(true, f, NaN, NaN, change, m, max(0.0, vol - V), 1)
+  StepInfo(true, f, NaN, NaN, change, m, max(0.0, vol - V), 1, λ)
 end
