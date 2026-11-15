@@ -7,6 +7,7 @@ version = "0.1.0"
 BlockArrays = "8e7c35d0-a365-5155-bbbb-fb81a777f24e"
 Gridap = "56d4f2e9-7ea1-5844-9cf6-b9c51ca7ce8e"
 HyperFEM = "ddbf423a-3df4-409e-9685-3dc416cae46c"
+HyperFEMKernels = "c52e38e0-a033-47df-8a03-a6c4ac881830"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 TimerOutputs = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
 
@@ -25,8 +26,7 @@ TimerOutputs = "0.5"
 julia = "1.12"
 
 [extras]
-HyperFEMKernels = "c52e38e0-a033-47df-8a03-a6c4ac881830"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["HyperFEMKernels", "Test"]
+test = ["Test"]

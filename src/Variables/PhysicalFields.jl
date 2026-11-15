@@ -1,12 +1,15 @@
 """
-    PhysicalFields(x::DesignFields; name = map, other = :source => map, ...)
+    PhysicalFields(x::DesignFields; name = map, other = :source => map, ..., backend = :compiled)
 
 Physical fields θ, the ones the weak forms read. Each one comes from one design field through a map (a
 [`FieldMap`](@ref), possibly composed with `∘`): `ρ = map` uses the design field `ρ`; `E = :ρ => map` uses the
 design field `ρ` under another name, so several physical fields can come from the same design field (their
 sensitivities are added). Every design field must be used. The constructor brings the fields up to date once,
-calling the solve functions of the operators with `ctx = nothing`. Read a field as `θ.ρ`: a fixed object (an `FEFunction` or
-a `CellField`) updated in place, so the weak forms can capture it.
+calling the solve functions of the operators with `ctx = nothing`. Read a field as `θ.ρ`: a fixed object (an
+`FEFunction` or a `CellField`) updated in place, so the weak forms can capture it.
+
+`backend` (a reserved name: no physical field can be called `backend`) selects who assembles the sensitivities on
+the design spaces: `:compiled` (default, HyperFEMKernels) or `:lazy` (Gridap).
 """
 struct PhysicalFields{X<:DesignFields,N,C<:Tuple,F<:NamedTuple,A<:Tuple}
   x::X
@@ -22,7 +25,9 @@ struct PhysicalFields{X<:DesignFields,N,C<:Tuple,F<:NamedTuple,A<:Tuple}
   version::Base.RefValue{Int}
 end
 
-function PhysicalFields(x::DesignFields; kwargs...)
+function PhysicalFields(x::DesignFields; backend = :compiled, kwargs...)
+  backend isa Symbol || throw(ArgumentError("PhysicalFields: `backend` is a reserved name (it selects :compiled or :lazy) and cannot be the name of a physical field"))
+  _check_backend(backend)
   isempty(kwargs) && throw(ArgumentError("PhysicalFields needs at least one field"))
   xnames = getfield(x, :names)
   names = Tuple(keys(kwargs))
@@ -51,7 +56,7 @@ function PhysicalFields(x::DesignFields; kwargs...)
   spaces = getfield(x, :spaces)
   gx = [zeros(num_free_dofs(V)) for V in spaces]
   gtmp = [zeros(num_free_dofs(V)) for V in spaces]
-  assems = Tuple(SparseMatrixAssembler(V, V) for V in spaces)
+  assems = Tuple(form_assembler(backend, TrialFESpace(V), V) for V in spaces)
   θ = PhysicalFields(x, names, Tuple(sources), chains, fields, gx, gtmp, assems, Ref(-1), fill(-1, length(chains)), Ref(0))
   update_fields!(θ, nothing)
   θ
@@ -117,19 +122,25 @@ _parameter_version(chain::Tuple) = sum(parameter_version, chain; init = 0)
 _update_chain!(chain::Tuple{}, ctx) = nothing
 _update_chain!(chain::Tuple, ctx) = (update_stage!(first(chain), ctx); _update_chain!(Base.tail(chain), ctx))
 
-_pullback_chain(chain::Tuple{}, L, ctx) = L
-_pullback_chain(chain::Tuple, L, ctx) = _pullback_chain(Base.front(chain), pullback(last(chain), L, ctx), ctx)
+_pullback_chain(chain::Tuple{}, L, ctx, key) = L
+_pullback_chain(chain::Tuple, L, ctx, key) = _pullback_chain(Base.front(chain), pullback(last(chain), L, ctx, key), ctx, key)
 
 """
-    design_gradient!(gz, θ::PhysicalFields, forms::NamedTuple, ctx) -> gz
+    design_gradient!(gz, θ::PhysicalFields, forms::NamedTuple, ctx; key = 0) -> gz
 
 Derivative with respect to z of a quantity whose derivative with respect to the physical fields is given as linear
 forms: `forms = (ρ = δ -> ∫(… * δ)dΩ, …)`, one entry per physical field it depends on (missing fields contribute
 nothing). The forms are pulled back through the maps x → θ (transposed filters, derivatives of the projections),
 assembled on the design spaces, added over the physical fields that share a design field, and mapped to z.
 Writes `gz` (a vector of the length of z).
+
+`key` identifies the quantity for the compiled backend, which keeps the compiled forms of the last keys used: with
+a different key for each quantity (objective, each constraint) the forms are only rebound at every call; forms of
+different structure under one key are correct too, their kernels are compiled again at each call (a few
+milliseconds). Avoid creating the `Measure` inside a form or capturing a new `FEFunction` at every call: both change
+the structure of the form.
 """
-function design_gradient!(gz, θ::PhysicalFields, forms::NamedTuple, ctx)
+function design_gradient!(gz, θ::PhysicalFields, forms::NamedTuple, ctx; key = 0)
   update_fields!(θ, ctx)
   x = getfield(θ, :x)
   z = get_optvariables(x)
@@ -145,9 +156,8 @@ function design_gradient!(gz, θ::PhysicalFields, forms::NamedTuple, ctx)
   for (j, name) in enumerate(names)
     haskey(forms, name) || continue
     i = sources[j]
-    L = _pullback_chain(chains[j], forms[name], ctx)
-    fill!(gtmp[i], 0)
-    assemble_vector!(L, gtmp[i], assems[i], spaces[i])
+    L = _pullback_chain(chains[j], forms[name], ctx, (key, j))
+    assemble_form!(gtmp[i], assems[i], L, (key, j))
     gx[i] .+= gtmp[i]
   end
   fill!(gz, 0)

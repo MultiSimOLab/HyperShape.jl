@@ -44,6 +44,12 @@ z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = 0.5,
 - Sensitivities: for linear forms `δ -> ∫(… * δ)dΩ` with respect to each physical field, `design_gradient!` returns
   the derivative with respect to `z` (derivative of the projection inside the integrals, then the transposed filter,
   which is the same solve because the filter form is symmetric).
+- The vectors HyperShape assembles (load vector of the filter, sensitivities) use `backend = :compiled` by default
+  (HyperFEMKernels: forms compiled once into threaded kernels) or `backend = :lazy` (Gridap), chosen in
+  `HelmholtzFilter(Sf; measure, backend)` and `PhysicalFields(x; …, backend)`. Both give the same vectors up to
+  rounding. On 65 000 cells the compiled backend computes a design gradient 1.5 times faster than the lazy one with
+  one thread and 5 to 7 times faster with four (`julia -t N`); on meshes of about a thousand cells both take well
+  under a millisecond.
 - Bounds, initial values and maps are mandatory; write `Identity()` when there is no transformation.
 - Only HyperShape writes `x` and `θ`; the user reads them as Gridap fields.
 

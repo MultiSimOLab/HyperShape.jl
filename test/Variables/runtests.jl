@@ -358,6 +358,89 @@ end
     end
   end
 
+  @testset "Compiled and lazy backends give the same fields and gradients ($(name), $(label))" for (name, V, ρ) in (("P0", p.V0, ρ0), ("P1", p.V1, ρ1)),
+                                                                                                           (label, mk) in (("H ∘ F", (F, H) -> H ∘ F), ("F ∘ H", (F, H) -> F ∘ H), ("H", (F, H) -> H))
+    c = CellField(cfun, p.Ω)
+    dΩ = p.dΩ
+    out = map((:compiled, :lazy)) do backend
+      H = Heaviside(β = 3.0, η = 0.45)
+      z, x, θ = single_field_design(:ρ, V; bounds = (0.0, 1.0), init = ρ, backend,
+                                    physical = mk(HelmholtzFilter(p.Sf; measure = dΩ, backend), H))
+      g1 = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(2 * c * θ.ρ * δ)dΩ,), nothing; key = 1)
+      # another quantity under another key, then the first one again after changing z and β
+      g2 = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(δ)dΩ,), nothing; key = 2)
+      set_values!(z, clamp.(get_values(z) .+ 0.05, 0, 1))
+      set_beta!(H, 6.0)
+      g3 = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(2 * c * θ.ρ * δ)dΩ,), nothing; key = 1)
+      # a form of another structure under a used key: compiled again, still correct
+      g4 = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(c * δ)dΩ,), nothing; key = 1)
+      (g1, g2, g3, g4, sum(∫(θ.ρ)dΩ))
+    end
+    for k in 1:4
+      @test maximum(abs, out[1][k] .- out[2][k]) <= 1e-12 * maximum(abs, out[2][k])
+    end
+    @test out[1][5] ≈ out[2][5] rtol = 1e-13
+  end
+
+  @testset "Compiled forms: captured values, boundary forms and a bounded cache" begin
+    dΩ = p.dΩ
+    dΓ = Measure(BoundaryTriangulation(p.model), 2)
+    Vs = TestFESpace(p.model, ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
+    out = map((:compiled, :lazy)) do backend
+      H = Heaviside(β = 3.0, η = 0.45)
+      z, x, θ = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0, backend,
+                                    physical = H ∘ HelmholtzFilter(p.Sf; measure = dΩ, backend))
+      gs = Vector{Float64}[]
+      for a in (1.0, 2.5)                                  # a number captured by the form
+        push!(gs, design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(a * θ.ρ * δ)dΩ,), nothing; key = 1))
+      end
+      for k in (1.0, 3.0)                                  # a new FE function at every call
+        uh = FEFunction(Vs, [sin(k * i) for i in 1:num_free_dofs(Vs)])
+        push!(gs, design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(uh * uh * δ + ∇(uh) ⋅ ∇(uh) * δ)dΩ,), nothing; key = 2))
+      end
+      push!(gs, design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(δ)dΓ + ∫(θ.ρ * δ)dΩ,), nothing; key = 3))   # boundary term
+      for k in 1:40                                        # many quantities: the cache stays bounded
+        design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(k * δ)dΩ,), nothing; key = 100 + k)
+      end
+      push!(gs, design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(2.5 * θ.ρ * δ)dΩ,), nothing; key = 1))      # an evicted key
+      gs, θ
+    end
+    for k in eachindex(out[1][1])
+      @test maximum(abs, out[1][1][k] .- out[2][1][k]) <= 1e-12 * maximum(abs, out[2][1][k])
+    end
+    @test out[1][1][6] ≈ out[1][1][2]
+    θc = out[1][2]
+    assems = getfield(θc, :assems)
+    @test length(assems[1].ops) <= HyperShape.Variables.MAX_COMPILED_FORMS
+    filter_stage = getfield(θc, :chains)[1][1]
+    @test length(filter_stage.assem.ops) <= HyperShape.Variables.MAX_COMPILED_FORMS
+    # every cached operator shares the tables of the first one
+    @test all(op -> op.fields === assems[1].ops[1].fields && op.colors === assems[1].ops[1].colors, assems[1].ops)
+  end
+
+  @testset "Taylor test with the lazy backend ($(name))" for (name, V, ρ) in (("P0", p.V0, ρ0), ("P1", p.V1, ρ1))
+    z, x, θ = single_field_design(:ρ, V; bounds = (0.0, 1.0), init = ρ, backend = :lazy,
+                                  physical = Heaviside(β = 4.0, η = 0.5) ∘ HelmholtzFilter(p.Sf; measure = p.dΩ, backend = :lazy))
+    c = CellField(cfun, p.Ω)
+    dΩ = p.dΩ
+    J() = (update_fields!(θ, nothing); sum(∫(c * θ.ρ * θ.ρ)dΩ))
+    g = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(2 * c * θ.ρ * δ)dΩ,), nothing)
+    @test all(r -> 1.9 < r < 2.1, taylor_rates(J, g, z, [sin(0.7i) for i in 1:length(z)]))
+  end
+
+  @testset "Backend options" begin
+    zb = OptVariables(ρ = FieldVariable(p.V0; bounds = (0.0, 1.0), init = ρ0))
+    @test_throws ArgumentError PhysicalFields(DesignFields(zb; ρ = Identity()); ρ = Identity(), backend = Identity())
+    @test_throws ArgumentError HelmholtzFilter(p.Sf; measure = p.dΩ, backend = :gpu)
+    z = OptVariables(ρ = FieldVariable(p.V0; bounds = (0.0, 1.0), init = ρ0))
+    x = DesignFields(z; ρ = Identity())
+    @test_throws ArgumentError PhysicalFields(x; ρ = Identity(), backend = :gpu)
+    @test_throws ArgumentError single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = 0.5, physical = Identity(), backend = :gpu)
+    F = HelmholtzFilter(p.Sf; measure = p.dΩ)
+    @test F.backend === :compiled                                    # the default
+    @test HelmholtzFilter(p.Sf; measure = p.dΩ, backend = :lazy).backend === :lazy
+  end
+
   @testset "Exported names do not clash with Gridap and HyperFEM" begin
     M = Module()
     Core.eval(M, :(using Gridap, HyperFEM, HyperShape))
