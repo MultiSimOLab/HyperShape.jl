@@ -25,7 +25,8 @@ struct PhysicalFields{X<:DesignFields,N,C<:Tuple,F<:NamedTuple,A<:Tuple}
   version::Base.RefValue{Int}
 end
 
-function PhysicalFields(x::DesignFields; backend::Symbol = :compiled, kwargs...)
+function PhysicalFields(x::DesignFields; backend = :compiled, kwargs...)
+  backend isa Symbol || throw(ArgumentError("PhysicalFields: `backend` is a reserved name (it selects :compiled or :lazy) and cannot be the name of a physical field"))
   _check_backend(backend)
   isempty(kwargs) && throw(ArgumentError("PhysicalFields needs at least one field"))
   xnames = getfield(x, :names)
@@ -133,9 +134,11 @@ nothing). The forms are pulled back through the maps x → θ (transposed filter
 assembled on the design spaces, added over the physical fields that share a design field, and mapped to z.
 Writes `gz` (a vector of the length of z).
 
-`key` identifies the quantity for the compiled backend, which keeps the compiled forms of each key: use a different
-key for each quantity (objective, each constraint) whose gradient is computed repeatedly; with the same key for
-forms of different structure the result is correct but the forms are compiled again at every call.
+`key` identifies the quantity for the compiled backend, which keeps the compiled forms of the last keys used: with
+a different key for each quantity (objective, each constraint) the forms are only rebound at every call; forms of
+different structure under one key are correct too, their kernels are compiled again at each call (a few
+milliseconds). Avoid creating the `Measure` inside a form or capturing a new `FEFunction` at every call: both change
+the structure of the form.
 """
 function design_gradient!(gz, θ::PhysicalFields, forms::NamedTuple, ctx; key = 0)
   update_fields!(θ, ctx)

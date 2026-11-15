@@ -47,7 +47,8 @@ z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = 0.5,
 - The vectors HyperShape assembles (load vector of the filter, sensitivities) use `backend = :compiled` by default
   (HyperFEMKernels: forms compiled once into threaded kernels) or `backend = :lazy` (Gridap), chosen in
   `HelmholtzFilter(Sf; measure, backend)` and `PhysicalFields(x; …, backend)`. Both give the same vectors up to
-  rounding. The compiled backend pays off with several threads (`julia -t N`); with one thread it is not faster.
+  rounding. The compiled backend pays off with several threads (`julia -t N`): 2 to 4 times faster with four threads
+  on 65 000 cells; with one thread, or on meshes of a few thousand cells, the lazy one is as fast or faster.
 - Bounds, initial values and maps are mandatory; write `Identity()` when there is no transformation.
 - Only HyperShape writes `x` and `θ`; the user reads them as Gridap fields.
 
