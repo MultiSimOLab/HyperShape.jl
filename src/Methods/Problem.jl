@@ -30,6 +30,12 @@ volume of an unprojected density, `Functional(θ -> sum(∫(θ.ρ)dΩ) - Vmax, �
 `θv = PhysicalFields(x; ρ = Identity())`). Its
 linearity in z is checked when the optimisation starts. Nonlinear constraints (`constraints = …`) come in phase 1.
 
+!!! note "Volume and projection"
+    A linear constraint acts on the design, not on the physical density. The Helmholtz filter preserves the volume,
+    but a [`Heaviside`](@ref) projection does not: with projection the physical volume can differ markedly from the
+    constrained one (half MBB beam, 150×50, target 0.5: the projected density ends at 0.64–0.68). Constraining the
+    physical volume needs a nonlinear constraint, planned for the next step.
+
 The problem owns the context `ctx` ([`OptContext`](@ref)) that reaches the solve functions of the user.
 """
 struct Optimization{Z<:OptVariables,J<:Functional,C<:Tuple}

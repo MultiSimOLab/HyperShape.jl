@@ -160,6 +160,10 @@ result  = solve!(problem, SIMP(SiMPL(); metric = LumpedMass(dΩ));
 result.status, result.history.objective
 ```
 
+The linear constraint bounds the volume of the design `x`. The Helmholtz filter preserves it, the Heaviside projection
+does not, so with projection the physical volume can exceed `Vmax` (0.64–0.68 instead of 0.5 on a 150×50 half MBB
+beam). A constraint on the physical volume is nonlinear in `z` and comes with the next step of the plan.
+
 - **Constraint:** in phase 0, at most one linear constraint, a design-only functional. Its vector `a` is computed once
   and its linearity in z is checked at the start; a projected volume is a nonlinear constraint (phase 1).
 - **Metric:** mandatory; `LumpedMass(dΩ)` (cell volumes for P0, lumped mass for P1) or `Euclidean()`.
