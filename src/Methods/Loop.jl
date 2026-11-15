@@ -226,7 +226,8 @@ function _write_checkpoint(c::Checkpoint, problem, opt, zk, hist, k, stage, stag
     "optimizer" => string(nameof(typeof(opt))))
   _atomic_write(io -> TOML.print(io, meta), joinpath(c.path, "checkpoint.toml"))
   for f in readdir(c.path)
-    (startswith(f, "z_") || startswith(f, "history_")) && f != zfile && f != hfile && rm(joinpath(c.path, f); force = true)
+    (occursin(r"^z_\d+\.bin$", f) || occursin(r"^history_\d+\.csv$", f)) && f != zfile && f != hfile &&
+      rm(joinpath(c.path, f); force = true)
   end
 end
 
@@ -355,7 +356,7 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
   zprev = similar(zk)
   state = init(opt, zk, oracle)
   fwd, adj, filters = _counters(problem)
-  run = _LoopState(k0, stage, stage_iters, hist.n)   # what a failure needs to write the checkpoint
+  run = _LoopState(k0, stage, stage_iters, hist.n - stage_iters)   # what a failure needs to write the checkpoint
   status, reason = _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_buf, cont_names, maxiter,
                              on_failure, stop, schedule, checkpoint, post, fwd, adj, filters)
 
@@ -373,10 +374,13 @@ mutable struct _LoopState
 end
 
 function _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint)
-  try
-    _sync!(oracle)                             # fields and forward state at the last accepted design
-  catch
+  synced = try
+    isfinite(_sync!(oracle))                   # fields and forward state at the last accepted design
+  catch e
+    e isa InterruptException && rethrow()
+    false
   end
+  synced || (msg *= " (the forward state could not be solved again at the last accepted design)")
   checkpoint === nothing ||
     _write_checkpoint(checkpoint, problem, opt, zk, hist, run.k, run.stage, run.stage_iters, cont_names)
   throw(OptimizationFailure(msg))
@@ -419,14 +423,17 @@ function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_
           stalled = true
           break
         else
+          jumped && _undo_jump!(schedule, run, ctx, cont_buf, opt, state, oracle)
           fail("the optimiser found no step at which the forward problem converges")
         end
       end
       f_acc = objective(oracle, zk)
       isfinite(f_acc) && break
       copyto!(zk, zprev)
-      ctx.attempt >= on_failure.max &&
+      if ctx.attempt >= on_failure.max
+        jumped && _undo_jump!(schedule, run, ctx, cont_buf, opt, state, oracle)
         fail("the forward problem did not converge at the $(on_failure.max) designs proposed in iteration $k")
+      end
       shrink!(opt, state, on_failure.shrink)
       set_context!(ctx, :attempt, ctx.attempt + 1)
     end

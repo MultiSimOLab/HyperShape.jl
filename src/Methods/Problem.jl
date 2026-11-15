@@ -149,7 +149,7 @@ end
 # rounding: such a design is taken as the current one, so it is neither solved again nor treated as a trial.
 function _near(v, w)
   @inbounds for i in eachindex(v, w)
-    abs(v[i] - w[i]) <= 16 * eps(max(abs(w[i]), 1.0)) || return false
+    abs(v[i] - w[i]) <= 1e-10 * max(abs(w[i]), 1.0) || return false   # SiMPL keeps 1e-12 away from the bounds
   end
   true
 end
@@ -207,7 +207,7 @@ end
 riesz!(g, o::FunctionalOracle{J,Z,Nothing}, dF) where {J,Z} = copyto!(g, dF)
 riesz!(g, o::FunctionalOracle, dF) = (g .= dF ./ o.metric)
 
-# a and V of the linear constraint g(z) = aᵀz − V ≤ 0 (scaled as the functional), with a check of linearity at two
+# a and V of the linear constraint g(z) = aᵀz − V ≤ 0 (scaled as the functional), with a check of linearity at four
 # designs that do not depend on the starting one (relative tolerance 1e-6, so a filter solved iteratively passes)
 function _setup_constraint!(o::FunctionalOracle, c::Functional, ctx)
   z = o.z
@@ -218,8 +218,10 @@ function _setup_constraint!(o::FunctionalOracle, c::Functional, ctx)
   (isfinite(v0) && all(isfinite, a)) || throw(ArgumentError("Optimization: the linear constraint is not finite at the start"))
   V = dot(a, z0) - v0
   w = o.ub .- o.lb
+  # oscillating designs and uniform shifts (a filter damps the oscillations but not the shifts)
   probes = (o.lb .+ w .* [0.5 + 0.25 * sin(1.7i) for i in eachindex(z0)],
-            o.lb .+ w .* [0.5 + 0.25 * cos(2.3i) for i in eachindex(z0)])
+            o.lb .+ w .* [0.5 + 0.25 * cos(2.3i) for i in eachindex(z0)],
+            o.lb .+ 0.25 .* w, o.lb .+ 0.8 .* w)
   for z1 in probes
     set_values!(z, z1)
     v1 = functional_value(c, ctx)

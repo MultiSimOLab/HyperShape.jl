@@ -213,10 +213,10 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
   @testset "Stalled: z, fields and state at the last accepted design" begin
     sign = Ref(1.0)
     q = compliance_problem(; sign)
-    r = solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 10,
+    r = solve!(q.problem, SIMP(SiMPL(max_backtracks = 1); metric = LumpedMass(q.dΩ)); maxiter = 10,
                on_failure = RejectStep(shrink = 0.5, max = 3), post = ctx -> (ctx.iteration == 2 && (sign[] = -1.0)))
     @test r.status === :stalled && r.iterations == 2
-    @test get_values(q.z) == r.state.z || get_values(q.z) ≈ r.state.z
+    @test get_values(q.z) == r.state.z
     @test get_free_dof_values(q.x.ρ) == get_values(q.z)
     @test functional_value(q.C, q.problem.ctx) ≈ r.objective
   end
@@ -226,10 +226,17 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     cnt = Ref(0)
     q = compliance_problem(; solve_flag = () -> (cnt[] += 1; cnt[] <= 2))
     accepted = Vector{Float64}[]
-    @test_throws OptimizationFailure solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 6,
-                                            on_failure = RejectStep(shrink = 0.5, max = 2), checkpoint = Checkpoint(dir; every = 10),
-                                            post = ctx -> push!(accepted, copy(get_values(q.z))))
+    err = try
+      solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 6, on_failure = RejectStep(shrink = 0.5, max = 2),
+             checkpoint = Checkpoint(dir; every = 10), post = ctx -> push!(accepted, copy(get_values(q.z))))
+      nothing
+    catch e
+      e
+    end
+    @test err isa OptimizationFailure
     @test get_free_dof_values(q.x.ρ) == get_values(q.z) == last(accepted)
+    # every solve fails now, also the one at the last accepted design, and the message says so
+    @test !HyperShape.Operators.is_converged(q.S) && occursin("could not be solved again", sprint(showerror, err))
     ck = load_checkpoint(dir)
     @test ck.iteration == 1 && ck.z == last(accepted)
     # an adjoint that fails: non-finite gradient, checkpoint written
@@ -300,5 +307,54 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test (@allocated _stop_reason(st, info, h, 0)) == 0
     @test_throws ArgumentError Continuation(step = q.H => [1.0]; every = 2)    # history column name
     @test_throws ArgumentError Continuation(β = q.H => [1.0, -2.0]; every = 2)
+  end
+
+  @testset "More review cases" begin
+    # a projected volume from a uniform 0.5 start with η = 0.5 on a finer mesh is not linear
+    q = compliance_problem(; n = 40, init = 0.5)
+    set_beta!(q.H, 3.0)
+    Vp = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4, θ -> (δ -> ∫(δ)q.dΩ), q.θ; scale = 0.4)
+    o = FunctionalOracle(Optimization(q.z; objective = q.C, linear_constraints = Vp), Euclidean())
+    @test_throws ArgumentError _setup_constraint!(o, Vp, q.problem.ctx)
+    # a start with values at the bounds: the first solve of SiMPL is the current design
+    phases = Tuple{Int,Int,Symbol}[]
+    q = compliance_problem(; init = [isodd(i) ? 0.0 : 0.8 for i in 1:64], phases)
+    solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 1, on_failure = RejectStep(shrink = 0.5, max = 3))
+    @test phases[findfirst(p -> p[1] == 1, phases)][3] === :optimization
+    # a resumed run stops where the uninterrupted one does
+    dir = mktempdir()
+    stopc = StopCriteria(objective = 2e-2, window = 2)
+    runs(q, maxiter; kwargs...) = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter, stop = stopc,
+                                         on_failure = RejectStep(shrink = 0.5, max = 3), kwargs...)
+    ra = runs(compliance_problem(), 40)
+    @test ra.status === :converged
+    kstop = ra.iterations
+    runs(compliance_problem(), kstop - 1; checkpoint = Checkpoint(dir; every = 100))
+    rc = runs(compliance_problem(), 40; resume = load_checkpoint(dir))
+    @test rc.iterations == kstop
+    # a jump whose first design fails is undone: β and the checkpoint stay in the previous stage
+    hold = Ref{Any}(nothing)
+    qf2 = compliance_problem(; solve_flag = () -> hold[].β != 2.0)
+    hold[] = qf2.H
+    dir2 = mktempdir()
+    @test_throws OptimizationFailure solve!(qf2.problem, SIMP(OC(); metric = Euclidean()); maxiter = 6,
+                                            schedule = Continuation(β = qf2.H => [1.0, 2.0]; every = 2),
+                                            checkpoint = Checkpoint(dir2; every = 100), on_failure = RejectStep(shrink = 0.5, max = 2))
+    ck = load_checkpoint(dir2)
+    @test ck.stage == 1 && ck.iteration == 2 && qf2.H.β == 1.0
+    # a fixed scale is kept on resume
+    q = compliance_problem()
+    rq = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 2, checkpoint = Checkpoint(dir; every = 100),
+                on_failure = RejectStep(shrink = 0.5, max = 3))
+    q2 = compliance_problem()
+    q2.Vol.scale[] = 7.0
+    solve!(q2.problem, SIMP(OC(); metric = Euclidean()); maxiter = 3, resume = load_checkpoint(dir),
+           on_failure = RejectStep(shrink = 0.5, max = 3))
+    @test q2.Vol.scale[] == 7.0
+    # a user's file in the checkpoint folder is not deleted
+    write(joinpath(dir, "z_notes.txt"), "keep")
+    solve!(compliance_problem().problem, SIMP(OC(); metric = Euclidean()); maxiter = 2, checkpoint = Checkpoint(dir; every = 1),
+           on_failure = RejectStep(shrink = 0.5, max = 3))
+    @test isfile(joinpath(dir, "z_notes.txt"))
   end
 end
