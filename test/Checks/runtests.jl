@@ -50,9 +50,12 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     @test _all_passed(r, "tangent") && _all_passed(r, "dependencies")
     @test get_values(z) == z0                       # z restored
     @test get_free_dof_values(p.x.ρ) == z0          # and the fields and states with it
+    ρvol = sum(∫(θ.ρ)dΩ)
     uref = copy(get_free_dof_values(p.uh))
     set_values!(z, z0); apply!(S, nothing)
     @test get_free_dof_values(p.uh) ≈ uref rtol = 1e-12
+    @test HyperShape.Operators.is_converged(S)
+    @test sum(∫(θ.ρ)dΩ) ≈ ρvol rtol = 1e-14
     @test isnan(C.scale[]) && B.scale[] == 2.0      # scales restored
     @test functional_value(C, nothing) ≈ 1.0        # :initial still taken at the first real evaluation
     s = sprint(show, MIME("text/plain"), r)
@@ -126,8 +129,11 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     @test _all_passed(check_consistency(C), "gradient")
     @test !_all_passed(check_consistency(Functional((u, θ) -> ∫(f * u)dΩ, DJ(1.05), S, S, θ; scale = 1.0)), "gradient")
     @test !_all_passed(check_consistency(C; min_rate = 2.5), "gradient")
+    n0 = length(p.ctxs)
     r = check_consistency(C; ctx = :my_context)
-    @test any(c -> c[2] === :my_context, p.ctxs)
+    @test length(p.ctxs) > n0 && all(c -> c[2] === :my_context, p.ctxs[n0+1:end])   # every solve of the call
+    # sensitivity of the verdict (documented): 1 % in DJform is found
+    @test !_all_passed(check_consistency(Functional((u, θ) -> ∫(f * u)dΩ, DJ(1.01), S, S, θ; scale = 1.0)), "gradient")
     # a saturated projection: J does not change along δ, nothing is tested
     set_beta!(p.H, 512.0)
     r = check_consistency(C)
@@ -216,5 +222,31 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
       r = check_consistency(F)
       @test _all_passed(r, "dependencies") == (deps1 !== ())
     end
+  end
+
+  @testset "Nearly linear functional: inconclusive, not passed" begin
+    q = filter_problem(symmetric_filter)
+    dΩ = q.dΩ
+    n = length(q.z)
+    z = OptVariables(ρ = FieldVariable(get_fe_space(q.x.ρ); bounds = (0.0, 1.0), init = 0.5))
+    x = DesignFields(z; ρ = Identity())
+    θ = PhysicalFields(x; ρ = Identity())
+    ε = 3e-6
+    F = Functional(θ -> ∫(θ.ρ + ε * θ.ρ * θ.ρ)dΩ, θ -> (δ -> ∫((1 + 2ε * θ.ρ) * δ)dΩ), θ; scale = 1.0)
+    r = check_consistency(F; direction = fill(0.1, n), h0 = 1e-2)
+    g = only(_results(r, "gradient"))
+    @test !g.passed && occursin("inconclusive", g.message)
+    @test _all_passed(check_consistency(F; direction = fill(1.0, n), h0 = 0.4), "gradient")   # larger steps
+  end
+
+  @testset "Two physical fields through one filter" begin
+    q = filter_problem(symmetric_filter)
+    Sf = HyperShape.Variables.filter_operators(q.θ)[1]
+    dΩ = q.dΩ
+    θ2 = PhysicalFields(q.x; ρ = Heaviside(β = 3.0, η = 0.4) ∘ HelmholtzFilter(Sf; measure = dΩ), E = :ρ => HelmholtzFilter(Sf; measure = dΩ))
+    F = Functional(θ -> ∫(θ.ρ * θ.E)dΩ, θ -> (ρ = δ -> ∫(θ.E * δ)dΩ, E = δ -> ∫(θ.ρ * δ)dΩ), θ2; scale = 1.0)
+    r = check_consistency(F)
+    @test r.passed
+    @test length(_results(r, "design chain")) == 2 && length(_results(r, "symmetry")) == 1
   end
 end

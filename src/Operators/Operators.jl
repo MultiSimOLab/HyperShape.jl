@@ -108,7 +108,8 @@ end
     invalidate!(obj) -> obj
 
 Forgets what `obj` computed, so that it is computed again on next use: the next solve of a
-[`LinearOperator`](@ref) is stale (the user re-assembles), a [`StateOperator`](@ref) is solved again. Used by
+[`LinearOperator`](@ref) is stale (the user re-assembles), a [`StateOperator`](@ref) is solved again (until then
+[`is_converged`](@ref) is `false`), physical fields recompute their maps and a functional its value. Used by
 [`check_consistency`](@ref HyperShape.Checks.check_consistency); physical fields and functionals extend it.
 """
 function invalidate! end

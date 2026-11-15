@@ -79,7 +79,8 @@ Gridap's convention; for HyperFEM's load-factor forms pass `res(Λ)`, `jac(Λ)`)
 A Taylor test passes when two consecutive steps give an observed order of at least `min_rate` (both errors above
 rounding), or when every error is at rounding level while J does change along δ (a functional linear in z). It
 fails, as *not tested*, when J does not change along δ at all (for example a fully saturated projection): choose
-another direction or design. With `h0 = 1e-2` a relative error of about 0.1 % in a gradient can still pass.
+another direction or design. It fails as *inconclusive* when only the largest step gives an error above rounding
+(a nearly linear functional): try a larger `h0`. With `h0 = 1e-2` a relative error of about 0.1 % in a gradient can still pass.
 
 Keyword arguments:
 - `ctx`: passed to the solve functions (default `nothing`).
@@ -253,6 +254,9 @@ function _taylor_verdict(errs, vars, floor, min_rate)
     (errs[k] > tol[k] && errs[k+1] > tol[k+1]) && push!(rates, log2(errs[k] / errs[k+1]))
   end
   ok = any(r -> r >= min_rate, rates)
+  # only the largest step above rounding: the order cannot be measured
+  (!ok && isempty(rates)) && return false, "inconclusive: only the largest step is above rounding (errors " *
+                                           _fmt(first(errs)) * " … " * _fmt(last(errs)) * "); try a larger h0"
   ok, "rates " * (isempty(rates) ? "—" : join((_fmt2(r) for r in rates), " ")) *
       ", errors " * _fmt(first(errs)) * " … " * _fmt(last(errs))
 end
