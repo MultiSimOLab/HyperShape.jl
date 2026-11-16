@@ -20,7 +20,7 @@ using ..Optimizers: Optimizer, OC, SiMPL, constraint_tol, AbstractOracle, StepIn
 import ..Optimizers: objective, gradient!, bounds, linear_constraint, has_constraint, constraint, constraint_gradient!,
                      inner, riesz!
 using ..Operators: OptContext, set_context!, StateOperator, num_solves
-using ..Variables: OptVariables, Heaviside, set_beta!, get_values, get_bounds, set_values!, get_designfields,
+using ..Variables: PhysicalFields, OptVariables, Heaviside, set_beta!, get_values, get_bounds, set_values!, get_designfields,
                    get_optvariables, filter_operators
 using ..Functionals: Functional, functional_value, functional_gradient!
 

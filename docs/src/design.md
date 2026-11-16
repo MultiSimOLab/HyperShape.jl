@@ -196,7 +196,7 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
 - **Stopping:** `maxiter` is mandatory. `stop` defaults to `StopCriteria(objective = 1e-3)` for every optimiser
   (`default_stop`): the range of the objective over the last 10 iterations of the last stage, relative to the
   objective, below 0.1 %. With a Heaviside projection `change` and `kkt` are rarely reached; the objective settles
-  (half MBB beam 150×50: OC stops at iteration 260, SiMPL at 211, within 0.3 % of 350 iterations). Other criteria:
+  (half MBB beam 150×50: OC stops at iteration 257, SiMPL at 210, within 0.3 % of 350 iterations). Other criteria:
   `kkt`, `kkt_rel` (relative to the first iteration), `change`; `stop = nothing` runs `maxiter` iterations. A run that
   oscillates (OC on a thermal problem) or whose physical volume keeps growing (design volume with projection) may still
   end at `maxiter`.

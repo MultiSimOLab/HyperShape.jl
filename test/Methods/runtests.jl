@@ -170,13 +170,13 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     r = solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 12, stop = StopCriteria(change = 1.0),
                schedule = Continuation(β = q.H => [1.0, 2.0, 4.0]; every = 3, close_early = true), verbose = 0,
                on_failure = RejectStep(shrink = 0.5, max = 3))
-    @test r.status === :converged && r.reason === :change && r.iterations == 3
-    @test vec(r.history.continuation) == [1, 2, 4]
+    @test r.status === :converged && r.reason === :change && r.iterations == 6   # not at the first iteration of a stage
+    @test vec(r.history.continuation) == [1, 1, 2, 2, 4, 4]
     # by default the criteria only act in the last stage: the earlier stages run their `every` iterations
     q = compliance_problem()
     r = solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 12, stop = StopCriteria(change = 1.0),
                schedule = Continuation(β = q.H => [1.0, 2.0, 4.0]; every = 3), verbose = 0)
-    @test r.status === :converged && r.iterations == 7 && vec(r.history.continuation) == [1, 1, 1, 2, 2, 2, 4]
+    @test r.status === :converged && r.iterations == 8 && vec(r.history.continuation) == [1, 1, 1, 2, 2, 2, 4, 4]
     # kkt with an optimiser that does not compute it
     q = compliance_problem()
     @test_throws ArgumentError solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 3, stop = StopCriteria(kkt = 1e-3),
@@ -525,16 +525,24 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
       rec!(f)
     end
     @test _stop_reason(st, info(), h, 0) === :objective
-    # an objective about zero: relative to the first iteration
+    # an objective tending to zero: floor 1e-3 |f₁|; a negative objective
     h0 = OptHistory(10, ())
-    for f in (1.0, 1e-15, -1e-15, 2e-15)
+    for f in (1.0, 1e-6, 0.8e-6, 0.6e-6, 0.5e-6)
       _record!(h0, (h0.n + 1, f, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN), ())
     end
-    @test _stop_reason(StopCriteria(objective = 1e-3, window = 3), info(), h0, 0) === :objective
+    @test _stop_reason(StopCriteria(objective = 1e-3, window = 4), info(), h0, 0) === :objective
+    hn = OptHistory(10, ())
+    for f in (-1.0, -2.0, -2.0005, -2.0004)
+      _record!(hn, (hn.n + 1, f, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN), ())
+    end
+    @test _stop_reason(StopCriteria(objective = 1e-3, window = 3), info(), hn, 0) === :objective
+    @test _stop_reason(StopCriteria(objective = 1e-3, window = 4), info(), hn, 0) === nothing
     # kkt relative to the first iteration
     hk = OptHistory(10, ())
     _record!(hk, (1, 1.0, NaN, 10.0, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN), ())
+    _record!(hk, (2, 1.0, NaN, 0.05, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN), ())
     @test _stop_reason(StopCriteria(kkt_rel = 1e-2), info(0.05), hk, 0) === :kkt_rel
+    @test _stop_reason(StopCriteria(kkt_rel = 1e-2), info(0.05), hk, 1) === nothing   # first iteration of a stage
     @test _stop_reason(StopCriteria(kkt_rel = 1e-3), info(0.05), hk, 0) === nothing
     # the default criterion is reached on the small problem
     for (mk, lumped) in ((() -> SiMPL(), true), (() -> OC(), false))
@@ -558,6 +566,19 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     θ2 = PhysicalFields(q.x; ρ = Identity(), E = :ρ => Identity())
     @test_throws ArgumentError Grey(θ2, q.dΩ)
     @test Grey(θ2, q.dΩ; field = :E).field === :E
+    @test_throws MethodError Grey(q.x, q.dΩ)
+    @test_throws ArgumentError Continuation(grey = q.H => [1.0, 2.0]; every = 2)   # a history column
+    # grey through a checkpoint, P1 design
+    dir = mktempdir()
+    q1 = compliance_problem(; design = :P1)
+    r1 = solve!(q1.problem, SIMP(OC()); maxiter = 3, verbose = 0, stop = nothing, grey = Grey(q1.θ, q1.dΩ),
+                checkpoint = Checkpoint(dir; every = 3))
+    @test all(isfinite, r1.history.grey) && load_checkpoint(dir).history.grey == r1.history.grey
+    # banner: no "last stage only" without criteria
+    io = IOBuffer()
+    solve!(compliance_problem().problem, SIMP(OC()); maxiter = 1, io, verbose = 1, stop = StopCriteria(),
+           schedule = Continuation(β = q.H => [1.0, 2.0]; every = 2))
+    @test !occursin("last stage only", String(take!(io)))
   end
 
   @testset "Defaults: metric of OC, stopping criteria, failure handling and the banner" begin

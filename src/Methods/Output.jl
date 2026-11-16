@@ -44,14 +44,15 @@ _rule(p::_Printer) = _styled(p, "  " * "─"^(textwidth(_header(p, ntuple(_ -> "
 function _describe_stop(stop)
   stop === nothing && return "maxiter only"
   parts = String[]
-  stop.objective !== nothing && push!(parts, "objective range < $(stop.objective) over $(stop.window) iterations")
+  stop.objective !== nothing && push!(parts, "relative objective range < $(stop.objective) over $(stop.window) iterations")
   stop.kkt !== nothing && push!(parts, "kkt < $(stop.kkt)")
   stop.kkt_rel !== nothing && push!(parts, "kkt/kkt₁ < $(stop.kkt_rel)")
   stop.change !== nothing && push!(parts, "change < $(stop.change)")
   isempty(parts) ? "maxiter only" : join(parts, " or ")
 end
 
-_stage_rule(stop, schedule) = (stop === nothing || schedule === nothing) ? "" :
+_active(stop) = any(x -> x !== nothing, (stop.objective, stop.kkt, stop.kkt_rel, stop.change))
+_stage_rule(stop, schedule) = (stop === nothing || schedule === nothing || !_active(stop)) ? "" :
                               schedule.close_early ? " · every stage (close_early)" : " · last stage only"
 
 _metric_name(m::Euclidean) = "Euclidean"
@@ -140,7 +141,7 @@ end
 
 const _STOP_TEXT = Dict(:change => "change of z below the tolerance", :kkt => "optimality measure below the tolerance",
                         :kkt_rel => "optimality measure below the tolerance relative to the first iteration",
-                        :objective => "range of the objective below the tolerance over the window")
+                        :objective => "relative range of the objective below the tolerance over the window")
 
 function _print_end(p::_Printer, status, reason, k, f, grey = NaN)
   p.level >= 1 || return

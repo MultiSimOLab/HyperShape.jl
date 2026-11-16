@@ -30,12 +30,16 @@ Convergence criteria; each one is off unless given, and the first one met stops 
 met in an earlier stage ends that stage).
 
 - `objective`: range of the objective over the last `window` iterations of the current stage, `(max - min)`, relative
-  to the largest `|f|` in the window (to `|f|` of the first iteration of the run if that is about zero), below this
-  value. A range, not the difference between the ends of the window, so an oscillation does not pass for convergence.
+  to `max(largest |f| in the window, 1e-3 |f₁|)` (`f₁` the objective of the first iteration of the run, so an
+  objective that tends to zero still converges), below this value. A range, not the difference between the ends of the
+  window, so an oscillation does not pass for convergence.
 - `kkt`: optimality measure of the optimiser below this value (absolute: units of the scaled objective). `kkt_rel`:
-  the same, relative to the one of the first iteration of the run. Only with optimisers that compute it (SiMPL; OC
-  gives an error).
+  the same, relative to the one of the first iteration of the run (off if that one is not a positive number). Only
+  with optimisers that compute it (SiMPL; OC gives an error).
 - `change`: `maximum(abs, Δz)` of the step below this value. With a Heaviside projection it is rarely reached.
+
+`kkt`, `kkt_rel` and `change` are not checked at the first iteration of a stage (after a continuation jump the first
+step restores feasibility and its measures say little).
 """
 struct StopCriteria
   objective::Union{Nothing,Float64}
@@ -68,7 +72,7 @@ struct _DefaultStop end
 struct _DefaultFailure end
 
 const HISTORY_COLUMNS = (:iteration, :objective, :constraint, :kkt, :change, :step, :attempts, :forward, :adjoint, :filter,
-                         :multiplier)
+                         :multiplier, :grey)
 
 """
     Continuation(; every, close_early = false, name = object => values, …)
@@ -150,7 +154,7 @@ end
 Monitor of the measure of grey of a physical density, `M_nd = 4/|Ω| ∫ ρ (1 - ρ) dΩ` (Sigmund 2007): 0 for a 0/1
 design, 1 for a uniform 0.5. Pass it to `solve!(…; grey = Grey(θ, dΩ))` to add it to the history, the table and the
 closing line; it is not a stopping criterion. `field` is mandatory when θ has several fields. Costs one integral per
-iteration.
+iteration (about 90 kB of memory, independent of the mesh).
 """
 struct Grey{T,M}
   θ::T
@@ -159,7 +163,7 @@ struct Grey{T,M}
   volume::Float64
 end
 
-function Grey(θ, dΩ; field = nothing)
+function Grey(θ::PhysicalFields, dΩ; field = nothing)
   names = propertynames(θ)
   f = field === nothing ?
       (length(names) == 1 ? names[1] : throw(ArgumentError("Grey: several fields ($(join(names, ", "))); give field = …"))) :
@@ -350,11 +354,10 @@ function _stop_reason(stop::StopCriteria, info::StepInfo, hist::OptHistory, stag
   if stop.objective !== nothing && hist.n - stage_start >= stop.window
     w = view(hist.objective, hist.n-stop.window+1:hist.n)
     lo, hi = extrema(w)
-    d = maximum(abs, w)
-    f1 = abs(hist.objective[1])
-    d <= 1e-12 * f1 && (d = f1)            # an objective about zero: relative to the first iteration
-    d > 0 && (hi - lo) <= stop.objective * d && return :objective
+    d = max(maximum(abs, w), 1e-3 * abs(hist.objective[1]))   # an objective tending to zero: floor from the first
+    (hi - lo) <= stop.objective * d && return :objective
   end
+  hist.n - stage_start >= 2 || return nothing   # the first iteration of a stage (restoration after a jump)
   stop.kkt !== nothing && info.kkt < stop.kkt && return :kkt
   if stop.kkt_rel !== nothing
     k1 = hist.kkt[1]
