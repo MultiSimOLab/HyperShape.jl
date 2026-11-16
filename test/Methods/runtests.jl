@@ -120,7 +120,8 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     # the third forward solve fails once
     cnt = Ref(0)
     q = compliance_problem(; solve_flag = () -> (cnt[] += 1; cnt[] != 3))
-    r = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 6, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
+    # scalar move limit (adapt = nothing): exact values of the step; the adaptive case is tested in Optimizers
+    r = solve!(q.problem, SIMP(OC(adapt = nothing); metric = Euclidean()); maxiter = 6, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     h = r.history
     k = findfirst(>(1), h.attempts)
     @test k !== nothing && h.attempts[k] == 2
@@ -145,6 +146,40 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     end
     @test err isa OptimizationFailure && occursin("first iteration", sprint(showerror, err))
     @test err.iterations == 0 && isempty(err.history.iteration) && size(err.history.continuation, 2) == 0
+  end
+
+  @testset "OC: move limit per continuation stage, banner" begin
+    for adapt in (nothing, (0.7, 1.2))
+      q = compliance_problem()
+      oc = OC(; adapt)
+      io = IOBuffer()
+      r = solve!(q.problem, SIMP(oc); maxiter = 6, stop = nothing, io, verbose = 1,
+                 schedule = Continuation(β = q.H => [1.0, 2.0, 4.0], move = oc => [0.2, 0.1, 0.05]; every = 2))
+      st = r.history.step
+      if adapt === nothing
+        @test st == [0.2, 0.2, 0.1, 0.1, 0.05, 0.05]
+      else
+        @test all(st[1:2] .<= 0.2 + 1e-12) && all(st[3:4] .<= 0.1 + 1e-12) && all(st[5:6] .<= 0.05 + 1e-12)
+        @test st[3] ≈ 0.1 && st[5] ≈ 0.05      # restored to the new ceiling at the jump
+      end
+      @test oc.move == 0.2                                    # the move of the OC is restored at the end
+      out = String(take!(io))
+      @test occursin(adapt === nothing ? "OC: move 0.2 · fixed (top88)" : "adaptive per entry ×0.7/×1.2, floor 0.001", out)
+    end
+    @test_throws ArgumentError Continuation(move = OC() => [0.2, -0.1]; every = 2)
+    @test_throws ArgumentError Continuation(move = OC() => [0.2, 5e-4]; every = 2)   # below move_min
+    q = compliance_problem()
+    @test_throws ArgumentError solve!(q.problem, SIMP(OC()); maxiter = 2, verbose = 0,
+                                      schedule = Continuation(move = OC() => [0.2, 0.1]; every = 1))
+    # the banner shows the move limit of the first stage
+    oc = OC()
+    io = IOBuffer()
+    solve!(q.problem, SIMP(oc); maxiter = 1, stop = nothing, io, verbose = 1,
+           schedule = Continuation(move = oc => [0.1, 0.05]; every = 2))
+    @test occursin("OC: move 0.1 ·", String(take!(io)))
+    @test_throws ArgumentError (OC().move = 0.1)
+    @test_throws ArgumentError OC(adapt = (1.2, 0.7))
+    @test_throws ArgumentError OC(move_min = 0.5)
   end
 
   @testset "OC: the move limit is restored after a standing step" begin
@@ -195,12 +230,13 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     qb = compliance_problem()
     rb = run(qb, 4; checkpoint = Checkpoint(dir; every = 2))
     @test isfile(joinpath(dir, "checkpoint.toml")) && isfile(joinpath(dir, "z_4.bin")) && isfile(joinpath(dir, "history_4.csv"))
-    @test !isfile(joinpath(dir, "z_2.bin"))                # older files deleted
+    @test !isfile(joinpath(dir, "z_2.bin")) && !isfile(joinpath(dir, "memory_2.bin"))   # older files deleted
     ck = load_checkpoint(dir)
+    @test ck.optimizer == "OC" && length(ck.memory) == 3length(ck.z) + 2   # adaptive move limits saved
     @test ck.iteration == 4 && ck.z == get_values(qb.z) && length(ck.history.objective) == 4
     qc = compliance_problem()
     rc = run(qc, 8; resume = ck)
-    @test get_values(qc.z) ≈ get_values(qa.z) rtol = 1e-12   # OC resumes exactly (up to threaded sums)
+    @test get_values(qc.z) ≈ get_values(qa.z) rtol = 1e-12   # OC with adaptive limits resumes exactly (up to threaded sums)
     @test isapprox(rc.history.objective, ra.history.objective; rtol = 1e-12) && rc.history.iteration == 1:8
     @test qc.C.scale[] == qa.C.scale[]                    # the scale fixed in the first run
     # SiMPL resumes (not bit-identical) and the checks on the checkpoint
@@ -421,7 +457,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     j = findfirst(==("multiplier"), lines[1])
     write(hfile, join((join(deleteat!(copy(l), j), ",") for l in lines), "\n") * "\n")
     tfile = joinpath(dir, "checkpoint.toml")
-    write(tfile, replace(read(tfile, String), "format = 3" => "format = 1"))
+    write(tfile, replace(read(tfile, String), "format = 4" => "format = 1"))
     ck1 = load_checkpoint(dir)
     @test all(isnan, ck1.history.multiplier) && ck1.history.objective == ck.history.objective
     r1 = solve!(compliance_problem().problem, SIMP(OC(); metric = Euclidean()); maxiter = 4, verbose = 0, resume = ck1,
@@ -481,8 +517,9 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     qc = compliance_problem()
     rc = run(qc, 8; resume = load_checkpoint(dir))
     @test rc.history.iteration == 1:8 && rc.history.objective[1:4] == ra.history.objective[1:4]
-    @test abs(rc.history.constraint[end]) <= 1e-4                     # the shift restarts at zero, the constraint holds
-    @test rc.history.objective[end] ≈ ra.history.objective[end] rtol = 1e-3
+    @test abs(rc.history.constraint[end]) <= 1e-4
+    # move limits and correction shift are saved: the resumed run is the uninterrupted one (up to threaded sums)
+    @test rc.history.objective ≈ ra.history.objective rtol = 1e-10
   end
 
   @testset "Volume of the projected density: Taylor test (P1)" begin

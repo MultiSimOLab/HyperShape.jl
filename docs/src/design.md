@@ -196,16 +196,15 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
 - **Stopping:** `maxiter` is mandatory. `stop` defaults to `StopCriteria(objective = 1e-3)` for every optimiser
   (`default_stop`): the range of the objective over the last 10 iterations of the last stage, relative to the
   objective, below 0.1 %. With a Heaviside projection `change` and `kkt` are rarely reached; the objective settles
-  (half MBB beam 150×50: OC stops at iteration 257, SiMPL at 210, within 0.3 % of 350 iterations). Other criteria:
+  (half MBB beam 150×50: OC with adaptive move limits stops at iteration 214, 0.4 % above its value at 500 iterations; SiMPL at 210, within 0.3 % of 350 iterations). Other criteria:
   `kkt`, `kkt_rel` (relative to the first iteration), `change`; `stop = nothing` runs `maxiter` iterations. A run that
-  oscillates (OC on a thermal problem) or whose physical volume keeps growing (design volume with projection) may still
-  end at `maxiter`.
+  oscillates or whose physical volume keeps growing may still end at `maxiter`.
 - **Grey monitor:** `solve!(…; grey = Grey(θ, dΩ))` adds the measure of grey `4/|Ω| ∫ρ(1 − ρ)` to the history, the
   table and the closing line. It is fixed mostly by β, so it is a measure of quality, not a stopping criterion.
 - **Context:** `OptContext` (iteration, attempt, trial, phase, continuation values) reaches every solve function of
   the user; phases `:setup`, `:check`, `:optimization` and `:linesearch`.
 - **Checkpoint:** `checkpoint.toml`, `z_<k>.bin` and `history_<k>.csv` in a folder; resume with
-  `solve!(…; resume = load_checkpoint(path))`. The optimiser memory is not saved (OC resumes exactly).
+  `solve!(…; resume = load_checkpoint(path))`. OC saves its memory (adaptive move limits, correction shift; `memory`/`restore_memory!`) and resumes exactly; SiMPL restarts its step size. An `OC` continued by `schedule` gets its `move` back at the end of `solve!`.
 - **Start:** a starting design that violates the constraint is scaled towards the lower bound (a linear constraint:
   on the entries it acts on, with equality; a nonlinear one: by regula falsi to `-1e-6 ≤ g ≤ 0`); the factor is in
   `result.start_scaling`. A resumed design is not touched, nor the design at a continuation jump.
@@ -234,7 +233,7 @@ shrink!(opt, state, factor)                      # roll back the last step, redu
 
 The oracle is the only thing an optimiser may ask: value and derivative of the objective, value at a trial point
 (forward problem only), bounds, the linear (volume) constraint and the inner product of the design metric.
-Implemented: `OC` (optimality criteria, as in top88) and `SiMPL` (mirror descent with a latent variable, Armijo or
+Implemented: `OC` (optimality criteria of top88, with adaptive move limits per entry by default) and `SiMPL` (mirror descent with a latent variable, Armijo or
 Bregman line search). `FunctionOracle` builds an oracle from plain functions:
 
 ```julia

@@ -83,7 +83,9 @@ acceptable step; with `close_early = true`, also when the [`StopCriteria`](@ref)
 the last stage: early stages can look converged on a grey plateau before the topology forms). The optimisation can
 only stop in the last stage. At each jump the memory of the
 optimiser is forgotten (`reset!`), which costs one more forward solve. All value lists have the same length (the
-number of stages). Supported objects: [`Heaviside`](@ref) (β, through `set_beta!`).
+number of stages). Supported objects: [`Heaviside`](@ref) (β, through `set_beta!`) and `OC` (its move limit, through
+`set_move!`: `Continuation(β = H => [1, 2, 4, 8, 16], move = oc => [0.2, 0.2, 0.1, 0.05, 0.025]; every = 50)`, the
+same `oc` given to `SIMP`).
 """
 struct Continuation{N,O<:Tuple,V<:Tuple}
   names::NTuple{N,Symbol}
@@ -119,6 +121,8 @@ end
 
 _set_parameter!(h::Heaviside, v) = set_beta!(h, v)
 _valid_parameter(h::Heaviside, v) = isfinite(v) && v > 0
+_set_parameter!(o::OC, v) = set_move!(o, v)
+_valid_parameter(o::OC, v) = _valid_move(o, v)
 
 function _apply_stage!(c::Continuation, s, buf)
   foreach((o, v) -> _set_parameter!(o, v[s]), c.objects, c.values)
@@ -180,7 +184,7 @@ grey_value(g::Grey) = (ρ = getproperty(g.θ, g.field); 4 * sum(∫(ρ * (1 - ρ
 History of an optimisation, one entry per accepted iteration (vectors): `iteration`, `objective` (scaled value at
 the accepted design), `constraint` (scaled value of the constraint, `NaN` without one), `kkt` (optimality
 measure, `NaN` if the optimiser does not compute it), `change` (`maximum(abs, Δz)`), `step` (step size or move
-limit), `attempts`, `forward`, `adjoint`, `filter` (solves in the iteration), `multiplier` (of the constraint,
+limit, the mean over the entries with adaptive limits), `attempts`, `forward`, `adjoint`, `filter` (solves in the iteration), `multiplier` (of the constraint,
 as reported by the optimiser), `grey` (measure of grey of the [`Grey`](@ref) monitor, `NaN` without one) and
 `continuation` (one column per iteration, one row per continued parameter, names in
 `names`).
@@ -262,10 +266,13 @@ function _atomic_write(f, file)
   mv(tmp, file; force = true)
 end
 
-function _write_checkpoint(c::Checkpoint, problem, opt, zk, hist, k, stage, stage_iters, cont_names)
+# `state === nothing` (a failure): the memory of the optimiser is not saved, a resumed run starts from `init`
+function _write_checkpoint(c::Checkpoint, problem, opt, state, zk, hist, k, stage, stage_iters, cont_names)
   mkpath(c.path)
-  zfile, hfile = "z_$k.bin", "history_$k.csv"
+  zfile, hfile, mfile = "z_$k.bin", "history_$k.csv", "memory_$k.bin"
   _atomic_write(io -> write(io, zk), joinpath(c.path, zfile))
+  mem = state === nothing ? nothing : memory(opt, state, zk)
+  mem === nothing || _atomic_write(io -> write(io, mem), joinpath(c.path, mfile))
   _atomic_write(joinpath(c.path, hfile)) do io
     println(io, join(vcat(String[String(c) for c in HISTORY_COLUMNS], String[String(c) for c in cont_names]), ","))
     for j in 1:hist.n
@@ -275,7 +282,7 @@ function _write_checkpoint(c::Checkpoint, problem, opt, zk, hist, k, stage, stag
     end
   end
   meta = Dict{String,Any}(
-    "format" => 3,
+    "format" => 4,
     "iteration" => k,
     "stage" => stage,
     "stage_iterations" => stage_iters,
@@ -286,9 +293,10 @@ function _write_checkpoint(c::Checkpoint, problem, opt, zk, hist, k, stage, stag
     "z_file" => zfile,
     "history_file" => hfile,
     "optimizer" => string(nameof(typeof(opt))))
+  mem === nothing || (meta["memory_file"] = mfile; meta["memory_length"] = length(mem))
   _atomic_write(io -> TOML.print(io, meta), joinpath(c.path, "checkpoint.toml"))
   for f in readdir(c.path)
-    (occursin(r"^z_\d+\.bin$", f) || occursin(r"^history_\d+\.csv$", f)) && f != zfile && f != hfile &&
+    (occursin(r"^(z|memory)_\d+\.bin$", f) || occursin(r"^history_\d+\.csv$", f)) && f ∉ (zfile, hfile, mfile) &&
       rm(joinpath(c.path, f); force = true)
   end
 end
@@ -297,13 +305,14 @@ end
     load_checkpoint(path) -> NamedTuple
 
 Reads a checkpoint written by [`Checkpoint`](@ref): `z`, `iteration`, `stage`, `stage_iterations`, `scales`,
-`blocks`, `continuation` (names) and `history` (named tuple of columns). Pass it to `solve!(…; resume = …)`. The
-memory of the optimiser is not saved: OC resumes exactly (with a nonlinear constraint, up to the correction shift,
-which restarts at zero), SiMPL restarts its step size.
+`blocks`, `continuation` (names), `history` (named tuple of columns), `optimizer` (its name) and `memory` (the
+memory of the optimiser, see [`memory`](@ref HyperShape.Optimizers.memory), or `nothing`). Pass it to
+`solve!(…; resume = …)`. OC saves its adaptive move limits and correction shift and resumes exactly; SiMPL does not
+save its memory and restarts its step size. A checkpoint written after a failure does not save the memory.
 """
 function load_checkpoint(path::AbstractString)
   meta = TOML.parsefile(joinpath(path, "checkpoint.toml"))
-  meta["format"] in (1, 2, 3) || throw(ArgumentError("load_checkpoint: unknown format $(meta["format"])"))
+  meta["format"] in (1, 2, 3, 4) || throw(ArgumentError("load_checkpoint: unknown format $(meta["format"])"))
   n = meta["length"]
   z = Vector{Float64}(undef, n)
   open(io -> read!(io, z), joinpath(path, meta["z_file"]))
@@ -311,13 +320,19 @@ function load_checkpoint(path::AbstractString)
   header = Symbol.(split(first(lines), ","))
   rows = [parse.(Float64, split(l, ",")) for l in lines[2:end]]
   cols = NamedTuple{Tuple(header)}(Tuple([r[j] for r in rows] for j in eachindex(header)))
+  mem = nothing
+  if haskey(meta, "memory_file")                # format 4
+    mem = Vector{Float64}(undef, meta["memory_length"])
+    open(io -> read!(io, mem), joinpath(path, meta["memory_file"]))
+  end
   # format 1 (before the multiplier column): the multiplier is unknown
   haskey(cols, :multiplier) || (cols = merge(cols, (multiplier = fill(NaN, length(rows)),)))
   # formats 1 and 2 (before the grey column)
   haskey(cols, :grey) || (cols = merge(cols, (grey = fill(NaN, length(rows)),)))
   (z = z, iteration = Int(meta["iteration"]), stage = Int(meta["stage"]),
    stage_iterations = Int(meta["stage_iterations"]), scales = Float64.(meta["scales"]),
-   blocks = Symbol.(meta["blocks"]), continuation = Symbol.(meta["continuation"]), history = cols)
+   blocks = Symbol.(meta["blocks"]), continuation = Symbol.(meta["continuation"]), history = cols,
+   optimizer = get(meta, "optimizer", ""), memory = mem)
 end
 
 function _prefill!(hist::OptHistory, r)
@@ -380,7 +395,8 @@ the last stage; `stop = nothing` runs `maxiter` iterations), `schedule` ([`Conti
 `post(ctx)` called after each accepted iteration, with the fields and the forward state at the accepted design; the
 adjoint state is still the one of the previous design) and
 `resume` (the result of [`load_checkpoint`](@ref)), `grey` (a [`Grey`](@ref) monitor: the measure of grey in the
-history, the table and the closing line), `verbose` and `io`.
+history, the table and the closing line), `verbose` and `io`. An `OC` whose `move` is continued by `schedule` gets
+its own `move` back when `solve!` returns or throws.
 
 Screen output (`verbose`, default `2`, printed to `io`): `0` nothing; `1` a banner (variables, constraint, metric,
 continuation, stopping criteria and failure handling, each marked when it is a default), the events (continuation
@@ -416,6 +432,8 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
   on_failure isa RejectStep || throw(ArgumentError("solve!: on_failure must be a RejectStep"))
   stop === nothing || stop isa StopCriteria || throw(ArgumentError("solve!: stop must be a StopCriteria"))
   schedule === nothing || schedule isa Continuation || throw(ArgumentError("solve!: schedule must be a Continuation"))
+  schedule === nothing || all(o -> !(o isa OC) || o === opt, schedule.objects) ||
+    throw(ArgumentError("solve!: a Continuation of move must act on the OC given to SIMP"))
   checkpoint === nothing || checkpoint isa Checkpoint || throw(ArgumentError("solve!: checkpoint must be a Checkpoint"))
   maxiter >= 1 || throw(ArgumentError("solve!: maxiter must be at least 1"))
   pr = _Printer(io, verbose, schedule, grey !== nothing)
@@ -445,12 +463,16 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
     _prefill!(hist, resume)
   end
 
+  # an OC whose move limit the schedule continues gets its own value back at the end (the stages change it)
+  move0 = opt isa OC ? opt.move : 0.0
+  try
+  # the parameters of the first stage are applied before the banner, which shows them
+  cont_buf = zeros(length(cont_names))
+  set_context!(ctx, :continuation, schedule === nothing ? NamedTuple() : _apply_stage!(schedule, stage, cont_buf))
   _print_banner(pr, problem, method, maxiter, stop, on_failure, defaults, schedule, resume, grey)
   set_context!(ctx, :iteration, k0)
   set_context!(ctx, :attempt, 0)
   set_context!(ctx, :trial, 0)
-  cont_buf = zeros(length(cont_names))
-  set_context!(ctx, :continuation, schedule === nothing ? NamedTuple() : _apply_stage!(schedule, stage, cont_buf))
 
   oracle = FunctionalOracle(problem, method.metric)
   ops = _counters(problem)
@@ -467,6 +489,13 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
   end
   zprev = similar(zk)
   state = init(opt, zk, oracle)
+  if resume !== nothing && get(resume, :memory, nothing) !== nothing
+    if resume.optimizer == string(nameof(typeof(opt)))
+      restore_memory!(opt, state, zk, resume.memory)
+    else
+      _print_event(pr, "· the memory of the optimiser was not restored (checkpoint written by $(resume.optimizer))", :yellow)
+    end
+  end
   fwd, adj, filters = ops
   run = _LoopState(k0, stage, stage_iters, hist.n - stage_iters, cstart, k0)   # what a failure needs
   status, reason = _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_buf, cont_names, maxiter,
@@ -476,8 +505,11 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
   _print_end(pr, status, reason, run.k, f_final, grey === nothing ? NaN : grey_value(grey))
   _print_summary(pr, map(_count, ops) .- cstart, run.k - k0)
   checkpoint === nothing ||
-    _write_checkpoint(checkpoint, problem, opt, zk, hist, run.k, run.stage, run.stage_iters, cont_names)
+    _write_checkpoint(checkpoint, problem, opt, state, zk, hist, run.k, run.stage, run.stage_iters, cont_names)
   OptResult(status, reason, run.k, f_final, _trim!(hist), state, t_start)
+  finally
+    opt isa OC && set_move!(opt, move0)
+  end
 end
 
 # A start that violates the constraint is scaled towards the lower bound, z = lb + t (z - lb), so that it holds (with
@@ -558,7 +590,7 @@ function _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint,
   _print_failure(pr, msg, run.k)
   _print_summary(pr, map(_count, ops) .- run.cstart, run.k - run.k0)
   checkpoint === nothing ||
-    _write_checkpoint(checkpoint, problem, opt, zk, hist, run.k, run.stage, run.stage_iters, cont_names)
+    _write_checkpoint(checkpoint, problem, opt, nothing, zk, hist, run.k, run.stage, run.stage_iters, cont_names)
   throw(OptimizationFailure(msg, _trim!(deepcopy(hist)), run.k))
 end
 
@@ -653,7 +685,7 @@ function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_
       end
     end
     checkpoint === nothing || k % checkpoint.every == 0 &&
-      _write_checkpoint(checkpoint, problem, opt, zk, hist, k, run.stage, run.stage_iters, cont_names)
+      _write_checkpoint(checkpoint, problem, opt, state, zk, hist, k, run.stage, run.stage_iters, cont_names)
     done && return :converged, r
   end
   :maxiter, nothing

@@ -16,7 +16,7 @@ using Printf
 using Gridap
 using Gridap.FESpaces
 import Gridap: solve!
-using ..Optimizers: Optimizer, OC, SiMPL, constraint_tol, AbstractOracle, StepInfo, init, step!, reset!, shrink!
+using ..Optimizers: Optimizer, OC, SiMPL, constraint_tol, set_move!, _valid_move, memory, restore_memory!, AbstractOracle, StepInfo, init, step!, reset!, shrink!
 import ..Optimizers: objective, gradient!, bounds, linear_constraint, has_constraint, constraint, constraint_gradient!,
                      inner, riesz!
 using ..Operators: OptContext, set_context!, StateOperator, num_solves

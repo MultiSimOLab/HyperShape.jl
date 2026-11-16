@@ -16,7 +16,7 @@ What [`step!`](@ref) reports about one design step.
 - `f_new`: objective at the new design, if the optimiser evaluated it (`NaN` otherwise).
 - `kkt`: optimality measure at the design before the step, if the optimiser computes one (`NaN` otherwise).
 - `change`: `maximum(abs, z_new - z_old)`.
-- `step`: step size (SiMPL) or move limit (OC) used.
+- `step`: step size (SiMPL) or move limit (OC) used; with adaptive move limits, their mean over all entries.
 - `violation`: `max(0, g(z))` of the constraint at the returned design (`0` without constraint).
 - `evaluations`: number of calls to `objective` in the step (forward solves).
 - `multiplier`: multiplier of the constraint (linearised at the current design if it is nonlinear) used in the
@@ -42,6 +42,21 @@ Tolerance to which the optimiser meets a nonlinear constraint; the loop only dec
 holds to it. Default `Inf` (no requirement); `OC` and `SiMPL` return their `constraint_tol`.
 """
 constraint_tol(::Optimizer) = Inf
+
+"""
+    memory(opt::Optimizer, state, z) -> Vector{Float64} or nothing
+
+Memory of the optimiser after an accepted step to `z`, saved in a checkpoint so that a resumed run continues as the
+uninterrupted one. Default `nothing`: not saved, the resumed run starts from `init`.
+"""
+memory(::Optimizer, state, z) = nothing
+
+"""
+    restore_memory!(opt::Optimizer, state, z, v) -> state
+
+Restores into `state`, just created by `init(opt, z, oracle)`, the memory `v` returned by [`memory`](@ref).
+"""
+restore_memory!(::Optimizer, state, z, v) = state
 
 """
     init(opt::Optimizer, z, oracle) -> state
