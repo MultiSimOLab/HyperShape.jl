@@ -16,6 +16,10 @@ end
 @publish Functionals functional_value
 @publish Functionals functional_gradient!
 @publish Checks check_consistency
+@publish PostProcess OptPostProcessor
+@publish PostProcess write_step
+@publish PostProcess extend_field
+@publish PostProcess get_pvd
 @publish Optimizers OC
 @publish Optimizers SiMPL
 @publish Methods Optimization
