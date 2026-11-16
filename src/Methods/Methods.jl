@@ -25,7 +25,7 @@ using ..Variables: OptVariables, Heaviside, set_beta!, get_values, get_bounds, s
 using ..Functionals: Functional, functional_value, functional_gradient!
 
 export Optimization, SIMP, LumpedMass, Euclidean
-export Continuation, StopCriteria, RejectStep, Checkpoint, load_checkpoint
+export Continuation, StopCriteria, RejectStep, Checkpoint, load_checkpoint, Grey
 export OptHistory, OptResult, OptimizationFailure
 export solve!
 

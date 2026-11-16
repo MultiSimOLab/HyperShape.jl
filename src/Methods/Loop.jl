@@ -23,43 +23,45 @@ function RejectStep(; shrink = 0.5, max = 5)
 end
 
 """
-    StopCriteria(; change = nothing, kkt = nothing, objective = nothing, window = nothing)
+    StopCriteria(; objective = nothing, window = 10, kkt = nothing, kkt_rel = nothing, change = nothing)
 
-Convergence criteria; each one is off unless given, and the first one met stops the optimisation (in the last stage of
-the continuation). `change`: `maximum(abs, Δz)` of the step below this value. `kkt`: optimality measure of the
-optimiser below this value (SiMPL; an optimiser that does not compute it, such as OC, gives an error). `objective`:
-relative change of the objective over the last `window` iterations (mandatory with `objective`) below this value,
-counting only iterations of the current continuation stage.
+Convergence criteria; each one is off unless given, and the first one met stops the optimisation. With a
+[`Continuation`](@ref) they only act in the last stage, unless it was built with `close_early = true` (then a criterion
+met in an earlier stage ends that stage).
+
+- `objective`: range of the objective over the last `window` iterations of the current stage, `(max - min)`, relative
+  to the largest `|f|` in the window (to `|f|` of the first iteration of the run if that is about zero), below this
+  value. A range, not the difference between the ends of the window, so an oscillation does not pass for convergence.
+- `kkt`: optimality measure of the optimiser below this value (absolute: units of the scaled objective). `kkt_rel`:
+  the same, relative to the one of the first iteration of the run. Only with optimisers that compute it (SiMPL; OC
+  gives an error).
+- `change`: `maximum(abs, Δz)` of the step below this value. With a Heaviside projection it is rarely reached.
 """
 struct StopCriteria
-  change::Union{Nothing,Float64}
-  kkt::Union{Nothing,Float64}
   objective::Union{Nothing,Float64}
   window::Int
+  kkt::Union{Nothing,Float64}
+  kkt_rel::Union{Nothing,Float64}
+  change::Union{Nothing,Float64}
 end
 
-function StopCriteria(; change = nothing, kkt = nothing, objective = nothing, window = nothing)
-  for (k, v) in ((:change, change), (:kkt, kkt), (:objective, objective))
+function StopCriteria(; objective = nothing, window = 10, kkt = nothing, kkt_rel = nothing, change = nothing)
+  for (k, v) in ((:objective, objective), (:kkt, kkt), (:kkt_rel, kkt_rel), (:change, change))
     v === nothing || v > 0 || throw(ArgumentError("StopCriteria: $k must be positive"))
   end
-  objective === nothing || window !== nothing || throw(ArgumentError("StopCriteria: objective needs a window"))
-  window = window === nothing ? 1 : window
-  window >= 1 || throw(ArgumentError("StopCriteria: window must be at least 1"))
-  StopCriteria(change === nothing ? nothing : Float64(change), kkt === nothing ? nothing : Float64(kkt),
-               objective === nothing ? nothing : Float64(objective), Int(window))
+  window >= 2 || throw(ArgumentError("StopCriteria: window must be at least 2"))
+  f(v) = v === nothing ? nothing : Float64(v)
+  StopCriteria(f(objective), Int(window), f(kkt), f(kkt_rel), f(change))
 end
 
 """
     default_stop(optimizer) -> Union{StopCriteria,Nothing}
 
-Stopping criteria of [`solve!`](@ref) when `stop` is not given: `StopCriteria(change = 1e-4)` for OC (which has no
-optimality measure), `StopCriteria(kkt = 1e-4)` for SiMPL (a small step after backtracking is not convergence),
-and `nothing` (only `maxiter`) for any
-other optimiser.
+Stopping criteria of [`solve!`](@ref) when `stop` is not given: `StopCriteria(objective = 1e-3)` (range of the
+objective below 0.1 % over the last 10 iterations of the last stage), for every optimiser. With a projection, `kkt`
+and `change` are rarely reached; the objective settles.
 """
-default_stop(::OC) = StopCriteria(change = 1e-4)
-default_stop(::SiMPL) = StopCriteria(kkt = 1e-4)
-default_stop(::Optimizer) = nothing
+default_stop(::Optimizer) = StopCriteria(objective = 1e-3)
 
 # `stop` and `on_failure` not given (`stop = nothing` means maxiter only; `on_failure` must be a RejectStep)
 struct _DefaultStop end
@@ -69,11 +71,13 @@ const HISTORY_COLUMNS = (:iteration, :objective, :constraint, :kkt, :change, :st
                          :multiplier)
 
 """
-    Continuation(; every, name = object => values, …)
+    Continuation(; every, close_early = false, name = object => values, …)
 
 Continuation of parameters in stages: `Continuation(β = H => [1, 2, 4, 8, 16, 32]; every = 40)` uses `β = 1` in the
-first stage, `2` in the second, and so on. A stage ends after `every` iterations, or earlier when the
-[`StopCriteria`](@ref) are met; the optimisation can only stop in the last stage. At each jump the memory of the
+first stage, `2` in the second, and so on. A stage ends after `every` iterations, or when the optimiser finds no
+acceptable step; with `close_early = true`, also when the [`StopCriteria`](@ref) are met (by default they only act in
+the last stage: early stages can look converged on a grey plateau before the topology forms). The optimisation can
+only stop in the last stage. At each jump the memory of the
 optimiser is forgotten (`reset!`), which costs one more forward solve. All value lists have the same length (the
 number of stages). Supported objects: [`Heaviside`](@ref) (β, through `set_beta!`).
 """
@@ -83,9 +87,10 @@ struct Continuation{N,O<:Tuple,V<:Tuple}
   values::V
   every::Int
   nstages::Int
+  close_early::Bool
 end
 
-function Continuation(; every::Integer, kwargs...)
+function Continuation(; every::Integer, close_early::Bool = false, kwargs...)
   isempty(kwargs) && throw(ArgumentError("Continuation: give at least one parameter, for example β = H => [1, 2, 4]"))
   every >= 1 || throw(ArgumentError("Continuation: every must be at least 1"))
   names = Tuple(keys(kwargs))
@@ -105,7 +110,7 @@ function Continuation(; every::Integer, kwargs...)
   n = length(first(vals))
   n >= 1 && all(v -> length(v) == n, vals) ||
     throw(ArgumentError("Continuation: every parameter needs the same number of values (stages)"))
-  Continuation(names, objects, vals, Int(every), n)
+  Continuation(names, objects, vals, Int(every), n, close_early)
 end
 
 _set_parameter!(h::Heaviside, v) = set_beta!(h, v)
@@ -140,13 +145,40 @@ function Checkpoint(path::AbstractString; every::Integer)
 end
 
 """
+    Grey(θ::PhysicalFields, dΩ; field = nothing)
+
+Monitor of the measure of grey of a physical density, `M_nd = 4/|Ω| ∫ ρ (1 - ρ) dΩ` (Sigmund 2007): 0 for a 0/1
+design, 1 for a uniform 0.5. Pass it to `solve!(…; grey = Grey(θ, dΩ))` to add it to the history, the table and the
+closing line; it is not a stopping criterion. `field` is mandatory when θ has several fields. Costs one integral per
+iteration.
+"""
+struct Grey{T,M}
+  θ::T
+  field::Symbol
+  measure::M
+  volume::Float64
+end
+
+function Grey(θ, dΩ; field = nothing)
+  names = propertynames(θ)
+  f = field === nothing ?
+      (length(names) == 1 ? names[1] : throw(ArgumentError("Grey: several fields ($(join(names, ", "))); give field = …"))) :
+      field
+  f in names || throw(ArgumentError("Grey: no field named $f"))
+  Grey(θ, f, dΩ, Float64(sum(∫(1.0)dΩ)))
+end
+
+grey_value(g::Grey) = (ρ = getproperty(g.θ, g.field); 4 * sum(∫(ρ * (1 - ρ))g.measure) / g.volume)
+
+"""
     OptHistory
 
 History of an optimisation, one entry per accepted iteration (vectors): `iteration`, `objective` (scaled value at
 the accepted design), `constraint` (scaled value of the constraint, `NaN` without one), `kkt` (optimality
 measure, `NaN` if the optimiser does not compute it), `change` (`maximum(abs, Δz)`), `step` (step size or move
 limit), `attempts`, `forward`, `adjoint`, `filter` (solves in the iteration), `multiplier` (of the constraint,
-as reported by the optimiser) and `continuation` (one column per iteration, one row per continued parameter, names in
+as reported by the optimiser), `grey` (measure of grey of the [`Grey`](@ref) monitor, `NaN` without one) and
+`continuation` (one column per iteration, one row per continued parameter, names in
 `names`).
 """
 mutable struct OptHistory
@@ -162,6 +194,7 @@ mutable struct OptHistory
   adjoint::Vector{Int}
   filter::Vector{Int}
   multiplier::Vector{Float64}
+  grey::Vector{Float64}
   names::Vector{Symbol}
   continuation::Matrix{Float64}
 end
@@ -169,7 +202,8 @@ end
 function OptHistory(cap::Integer, names)
   f() = fill(NaN, cap)
   i() = zeros(Int, cap)
-  OptHistory(0, i(), f(), f(), f(), f(), f(), i(), i(), i(), i(), f(), collect(Symbol, names), fill(NaN, length(names), cap))
+  OptHistory(0, i(), f(), f(), f(), f(), f(), i(), i(), i(), i(), f(), f(), collect(Symbol, names),
+             fill(NaN, length(names), cap))
 end
 
 Base.length(h::OptHistory) = h.n
@@ -177,7 +211,7 @@ Base.length(h::OptHistory) = h.n
 function _record!(h::OptHistory, row, cont)
   k = h.n += 1
   h.iteration[k], h.objective[k], h.constraint[k], h.kkt[k], h.change[k], h.step[k], h.attempts[k], h.forward[k],
-    h.adjoint[k], h.filter[k], h.multiplier[k] = row
+    h.adjoint[k], h.filter[k], h.multiplier[k], h.grey[k] = row
   for (j, v) in enumerate(cont)
     h.continuation[j, k] = v
   end
@@ -187,7 +221,7 @@ end
 function _trim!(h::OptHistory)
   n = h.n
   for v in (h.iteration, h.objective, h.constraint, h.kkt, h.change, h.step, h.attempts, h.forward, h.adjoint, h.filter,
-            h.multiplier)
+            h.multiplier, h.grey)
     resize!(v, n)
   end
   h.continuation = h.continuation[:, 1:n]
@@ -237,7 +271,7 @@ function _write_checkpoint(c::Checkpoint, problem, opt, zk, hist, k, stage, stag
     end
   end
   meta = Dict{String,Any}(
-    "format" => 2,
+    "format" => 3,
     "iteration" => k,
     "stage" => stage,
     "stage_iterations" => stage_iters,
@@ -265,7 +299,7 @@ which restarts at zero), SiMPL restarts its step size.
 """
 function load_checkpoint(path::AbstractString)
   meta = TOML.parsefile(joinpath(path, "checkpoint.toml"))
-  meta["format"] in (1, 2) || throw(ArgumentError("load_checkpoint: unknown format $(meta["format"])"))
+  meta["format"] in (1, 2, 3) || throw(ArgumentError("load_checkpoint: unknown format $(meta["format"])"))
   n = meta["length"]
   z = Vector{Float64}(undef, n)
   open(io -> read!(io, z), joinpath(path, meta["z_file"]))
@@ -275,6 +309,8 @@ function load_checkpoint(path::AbstractString)
   cols = NamedTuple{Tuple(header)}(Tuple([r[j] for r in rows] for j in eachindex(header)))
   # format 1 (before the multiplier column): the multiplier is unknown
   haskey(cols, :multiplier) || (cols = merge(cols, (multiplier = fill(NaN, length(rows)),)))
+  # formats 1 and 2 (before the grey column)
+  haskey(cols, :grey) || (cols = merge(cols, (grey = fill(NaN, length(rows)),)))
   (z = z, iteration = Int(meta["iteration"]), stage = Int(meta["stage"]),
    stage_iterations = Int(meta["stage_iterations"]), scales = Float64.(meta["scales"]),
    blocks = Symbol.(meta["blocks"]), continuation = Symbol.(meta["continuation"]), history = cols)
@@ -284,7 +320,8 @@ function _prefill!(hist::OptHistory, r)
   cols = r.history
   for k in eachindex(cols.iteration)
     row = (Int(cols.iteration[k]), cols.objective[k], cols.constraint[k], cols.kkt[k], cols.change[k], cols.step[k],
-           Int(cols.attempts[k]), Int(cols.forward[k]), Int(cols.adjoint[k]), Int(cols.filter[k]), cols.multiplier[k])
+           Int(cols.attempts[k]), Int(cols.forward[k]), Int(cols.adjoint[k]), Int(cols.filter[k]), cols.multiplier[k],
+           cols.grey[k])
     _record!(hist, row, Tuple(getproperty(cols, n)[k] for n in hist.names))
   end
   hist
@@ -310,31 +347,41 @@ _count(ops) = sum(num_solves, ops; init = 0)
 # The loop
 
 function _stop_reason(stop::StopCriteria, info::StepInfo, hist::OptHistory, stage_start)
-  stop.change !== nothing && info.change < stop.change && return :change
-  stop.kkt !== nothing && info.kkt < stop.kkt && return :kkt
-  if stop.objective !== nothing && hist.n - stop.window > stage_start
-    f, f0 = hist.objective[hist.n], hist.objective[hist.n-stop.window]
-    abs(f - f0) <= stop.objective * abs(f) && return :objective
+  if stop.objective !== nothing && hist.n - stage_start >= stop.window
+    w = view(hist.objective, hist.n-stop.window+1:hist.n)
+    lo, hi = extrema(w)
+    d = maximum(abs, w)
+    f1 = abs(hist.objective[1])
+    d <= 1e-12 * f1 && (d = f1)            # an objective about zero: relative to the first iteration
+    d > 0 && (hi - lo) <= stop.objective * d && return :objective
   end
+  stop.kkt !== nothing && info.kkt < stop.kkt && return :kkt
+  if stop.kkt_rel !== nothing
+    k1 = hist.kkt[1]
+    isfinite(k1) && k1 > 0 && info.kkt < stop.kkt_rel * k1 && return :kkt_rel
+  end
+  stop.change !== nothing && info.change < stop.change && return :change
   nothing
 end
 _stop_reason(::Nothing, info, hist, stage_start) = nothing
 
 """
     solve!(problem::Optimization, method::SIMP; maxiter, on_failure = RejectStep(), stop = default_stop(optimizer),
-           schedule = nothing, checkpoint = nothing, post = nothing, resume = nothing, verbose = 2, io = stdout)
-        -> OptResult
+           schedule = nothing, checkpoint = nothing, post = nothing, resume = nothing, grey = nothing, verbose = 2,
+           io = stdout) -> OptResult
 
 Runs the optimisation from the current values of `z`. Mandatory: `maxiter` (total iterations, resumed ones included).
 Optional: `on_failure` ([`RejectStep`](@ref), default `RejectStep(shrink = 0.5, max = 5)`), `stop`
-([`StopCriteria`](@ref); default [`default_stop`](@ref) of the optimiser; `stop = nothing` runs `maxiter`
-iterations), `schedule` ([`Continuation`](@ref)), `checkpoint` ([`Checkpoint`](@ref)), `post` (a function
+([`StopCriteria`](@ref); default [`default_stop`](@ref): range of the objective below 0.1 % over 10 iterations of
+the last stage; `stop = nothing` runs `maxiter` iterations), `schedule` ([`Continuation`](@ref)), `checkpoint` ([`Checkpoint`](@ref)), `post` (a function
 `post(ctx)` called after each accepted iteration, with the fields and the forward state at the accepted design; the
 adjoint state is still the one of the previous design) and
-`resume` (the result of [`load_checkpoint`](@ref)), `verbose` and `io`.
+`resume` (the result of [`load_checkpoint`](@ref)), `grey` (a [`Grey`](@ref) monitor: the measure of grey in the
+history, the table and the closing line), `verbose` and `io`.
 
 Screen output (`verbose`, default `2`, printed to `io`): `0` nothing; `1` a banner (variables, constraint, metric,
-continuation, stopping criteria and failure handling, each marked when it is a default), the events (continuation jumps, rejected steps, stalls, a scaled start), a closing
+continuation, stopping criteria and failure handling, each marked when it is a default), the events (continuation
+jumps, rejected steps, stalls, a scaled start), a closing
 ✓/⚠/✗ line and a summary of solves and time; `2` also a row per iteration: objective, its relative change,
 constraint (red above 1e-3), optimality measure, change of z, step, multiplier, continued parameters, forward,
 adjoint and filter solves, and time. `true` is `2`, `false` is `0`. The summary counts every solve of the call
@@ -356,8 +403,10 @@ for its derivative and one filter per correction (see `OC` and `SiMPL`), and no 
 constraint the run only converges when the constraint also holds to the `constraint_tol` of the optimiser.
 """
 function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failure = _DefaultFailure(), stop = _DefaultStop(),
-                schedule = nothing, checkpoint = nothing, post = nothing, resume = nothing, verbose = 2, io::IO = stdout)
+                schedule = nothing, checkpoint = nothing, post = nothing, resume = nothing, grey = nothing, verbose = 2,
+                io::IO = stdout)
   z, ctx, opt = problem.z, problem.ctx, method.optimizer
+  grey === nothing || grey isa Grey || throw(ArgumentError("solve!: grey must be a Grey monitor, Grey(θ, dΩ)"))
   defaults = (stop = stop isa _DefaultStop, on_failure = on_failure isa _DefaultFailure)
   defaults.stop && (stop = default_stop(opt))
   defaults.on_failure && (on_failure = RejectStep())
@@ -366,7 +415,7 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
   schedule === nothing || schedule isa Continuation || throw(ArgumentError("solve!: schedule must be a Continuation"))
   checkpoint === nothing || checkpoint isa Checkpoint || throw(ArgumentError("solve!: checkpoint must be a Checkpoint"))
   maxiter >= 1 || throw(ArgumentError("solve!: maxiter must be at least 1"))
-  pr = _Printer(io, verbose, schedule)
+  pr = _Printer(io, verbose, schedule, grey !== nothing)
   # a nonlinear constraint is met to the tolerance of the optimiser: above it, the value is shown in red
   any(c -> !c.linear, problem.constraints) && (pr.red = min(_RED_CONSTRAINT, constraint_tol(opt)))
   lb, ub = get_bounds(z)
@@ -393,7 +442,7 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
     _prefill!(hist, resume)
   end
 
-  _print_banner(pr, problem, method, maxiter, stop, on_failure, defaults, schedule, resume)
+  _print_banner(pr, problem, method, maxiter, stop, on_failure, defaults, schedule, resume, grey)
   set_context!(ctx, :iteration, k0)
   set_context!(ctx, :attempt, 0)
   set_context!(ctx, :trial, 0)
@@ -418,10 +467,10 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
   fwd, adj, filters = ops
   run = _LoopState(k0, stage, stage_iters, hist.n - stage_iters, cstart, k0)   # what a failure needs
   status, reason = _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_buf, cont_names, maxiter,
-                             on_failure, stop, schedule, checkpoint, post, fwd, adj, filters, pr)
+                             on_failure, stop, schedule, checkpoint, post, grey, fwd, adj, filters, pr)
 
   f_final = _sync!(oracle)                     # fields and forward state at the final design
-  _print_end(pr, status, reason, run.k, f_final)
+  _print_end(pr, status, reason, run.k, f_final, grey === nothing ? NaN : grey_value(grey))
   _print_summary(pr, map(_count, ops) .- cstart, run.k - k0)
   checkpoint === nothing ||
     _write_checkpoint(checkpoint, problem, opt, zk, hist, run.k, run.stage, run.stage_iters, cont_names)
@@ -511,7 +560,7 @@ function _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint,
 end
 
 function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_buf, cont_names, maxiter, on_failure,
-                   stop, schedule, checkpoint, post, fwd, adj, filters, pr)
+                   stop, schedule, checkpoint, post, grey, fwd, adj, filters, pr)
   fail(msg) = _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint, pr, (fwd, adj, filters))
   while run.k < maxiter
     k = run.k + 1
@@ -578,14 +627,15 @@ function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_
       run.stage_iters = 0
       run.stage_start = hist.n
     end
-    if stop !== nothing && stop.kkt !== nothing && isnan(info.kkt)
+    if stop !== nothing && (stop.kkt !== nothing || stop.kkt_rel !== nothing) && isnan(info.kkt)
       throw(ArgumentError("StopCriteria: kkt needs an optimiser that computes an optimality measure ($(nameof(typeof(opt))) does not)"))
     end
     run.k = k
     run.stage_iters += 1
     c1 = (_count(fwd), _count(adj), _count(filters))
     _record!(hist, (k, f_acc, _constraint_value(oracle, zk), info.kkt, info.change, info.step, ctx.attempt,
-                    c1[1] - c0[1], c1[2] - c0[2], c1[3] - c0[3], info.multiplier), cont_buf)
+                    c1[1] - c0[1], c1[2] - c0[2], c1[3] - c0[3], info.multiplier,
+                    grey === nothing ? NaN : grey_value(grey)), cont_buf)
     _print_row(pr, hist)
     post === nothing || post(ctx)
     r = _stop_reason(stop, info, hist, run.stage_start)
@@ -595,7 +645,7 @@ function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_
     if r !== nothing
       if schedule === nothing || run.stage == schedule.nstages
         done = true
-      else
+      elseif schedule.close_early
         run.stage_iters = schedule.every       # end of the stage: jump at the next iteration
       end
     end

@@ -11,16 +11,17 @@ mutable struct _Printer{IO_}
   header::Bool          # the column header is pending: printed before the next row
   widths::Vector{Int}   # widths of the continuation columns
   red::Float64          # a constraint value above this is shown in red
+  grey::Bool            # a column with the measure of grey
 end
 
 _verbose_level(v::Bool) = v ? 2 : 0
 _verbose_level(v::Integer) = (0 <= v <= 2 || throw(ArgumentError("solve!: verbose must be 0, 1, 2 or a Bool")); Int(v))
 _verbose_level(v) = throw(ArgumentError("solve!: verbose must be 0, 1, 2 or a Bool"))
 
-function _Printer(io, verbose, schedule)
+function _Printer(io, verbose, schedule, grey::Bool = false)
   widths = schedule === nothing ? Int[] :
            [max(6, textwidth(string(n)), maximum(x -> textwidth(_g(x)), v)) for (n, v) in zip(schedule.names, schedule.values)]
-  _Printer(io, _verbose_level(verbose), time(), time(), false, widths, _RED_CONSTRAINT)
+  _Printer(io, _verbose_level(verbose), time(), time(), false, widths, _RED_CONSTRAINT, grey)
 end
 
 # a constraint value above this (scaled) is shown in red; OC meets the constraint only to its bisection tolerance
@@ -35,7 +36,7 @@ _pad(s, w) = " "^max(0, w - textwidth(s)) * s
 function _header(p::_Printer, names)
   cont = join(("  " * _pad(string(n), w) for (n, w) in zip(names, p.widths)))
   @sprintf("  %5s  %13s  %9s  %10s  %9s  %9s  %9s  %9s", "it", "objective", "Δobj", "constraint", "kkt", "change",
-           "step", "μ") * cont * @sprintf("  %11s  %8s", "f/a/F", "t[s]")
+           "step", "μ") * cont * (p.grey ? @sprintf("  %7s", "grey") : "") * @sprintf("  %11s  %8s", "f/a/F", "t[s]")
 end
 
 _rule(p::_Printer) = _styled(p, "  " * "─"^(textwidth(_header(p, ntuple(_ -> "", length(p.widths)))) - 2) * "\n", :light_black)
@@ -43,11 +44,15 @@ _rule(p::_Printer) = _styled(p, "  " * "─"^(textwidth(_header(p, ntuple(_ -> "
 function _describe_stop(stop)
   stop === nothing && return "maxiter only"
   parts = String[]
-  stop.change !== nothing && push!(parts, "change < $(stop.change)")
+  stop.objective !== nothing && push!(parts, "objective range < $(stop.objective) over $(stop.window) iterations")
   stop.kkt !== nothing && push!(parts, "kkt < $(stop.kkt)")
-  stop.objective !== nothing && push!(parts, "Δobjective < $(stop.objective) over $(stop.window)")
-  isempty(parts) ? "maxiter only" : join(parts, ", ")
+  stop.kkt_rel !== nothing && push!(parts, "kkt/kkt₁ < $(stop.kkt_rel)")
+  stop.change !== nothing && push!(parts, "change < $(stop.change)")
+  isempty(parts) ? "maxiter only" : join(parts, " or ")
 end
+
+_stage_rule(stop, schedule) = (stop === nothing || schedule === nothing) ? "" :
+                              schedule.close_early ? " · every stage (close_early)" : " · last stage only"
 
 _metric_name(m::Euclidean) = "Euclidean"
 _constraint_label(problem, opt) = only(problem.constraints).linear ? "linear" :
@@ -58,7 +63,7 @@ _metric_label(method) = method.optimizer isa OC ? "not used by OC" :
 _metric_name(m::LumpedMass) = "lumped mass"
 _metric_name(m::NamedTuple) = join(("$k: $(_metric_name(v))" for (k, v) in pairs(m)), ", ")
 
-function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, defaults, schedule, resume)
+function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, defaults, schedule, resume, grey = nothing)
   p.level >= 1 || return
   opt = method.optimizer
   z = problem.z
@@ -74,7 +79,7 @@ function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, 
       println(p.io, "  continuation $n: ", join((_g(x) for x in v), " → "), " (every $(schedule.every) iterations)")
     end
   end
-  println(p.io, "  stop: ", _describe_stop(stop), defaults.stop ? " (default for $(nameof(typeof(opt))))" : "",
+  println(p.io, "  stop: ", _describe_stop(stop), defaults.stop ? " (default)" : "", _stage_rule(stop, schedule),
           " · maxiter $maxiter", resume === nothing ? "" : " · resumed at iteration $(resume.iteration)")
   println(p.io, "  on failure: reject step, shrink $(_g(on_failure.shrink)), at most $(on_failure.max) attempts",
           defaults.on_failure ? " (default)" : "")
@@ -114,6 +119,7 @@ function _print_row(p::_Printer, hist::OptHistory)
   for j in axes(hist.continuation, 1)
     print(p.io, "  ", _pad(_g(hist.continuation[j, k]), p.widths[j]))
   end
+  p.grey && print(p.io, "  ", isfinite(hist.grey[k]) ? @sprintf("%7.4f", hist.grey[k]) : "      —")
   @printf(p.io, "  %11s  %8.3f", "$(hist.forward[k])/$(hist.adjoint[k])/$(hist.filter[k])", dt)
   hist.attempts[k] > 1 && _styled(p, "  ($(hist.attempts[k]) attempts)", :yellow)
   println(p.io)
@@ -133,22 +139,25 @@ function _print_jump(p::_Printer, schedule, stage)
 end
 
 const _STOP_TEXT = Dict(:change => "change of z below the tolerance", :kkt => "optimality measure below the tolerance",
-                        :objective => "relative change of the objective below the tolerance")
+                        :kkt_rel => "optimality measure below the tolerance relative to the first iteration",
+                        :objective => "range of the objective below the tolerance over the window")
 
-function _print_end(p::_Printer, status, reason, k, f)
+function _print_end(p::_Printer, status, reason, k, f, grey = NaN)
   p.level >= 1 || return
   p.level >= 2 && (p.header = false; _rule(p))
   if status === :converged
     _styled(p, "  ✓ ", :green; bold = true)
-    println(p.io, "converged: ", get(_STOP_TEXT, reason, string(reason)), " after $k iterations, objective ",
-            @sprintf("%.6e", f))
+    print(p.io, "converged: ", get(_STOP_TEXT, reason, string(reason)), " after $k iterations, objective ",
+          @sprintf("%.6e", f))
   elseif status === :maxiter
     _styled(p, "  ⚠ ", :yellow; bold = true)
-    println(p.io, "maximum number of iterations ($k), objective ", @sprintf("%.6e", f))
+    print(p.io, "maximum number of iterations ($k), objective ", @sprintf("%.6e", f))
   else
     _styled(p, "  ⚠ ", :yellow; bold = true)
-    println(p.io, "stalled: no acceptable step after $k iterations, objective ", @sprintf("%.6e", f))
+    print(p.io, "stalled: no acceptable step after $k iterations, objective ", @sprintf("%.6e", f))
   end
+  isfinite(grey) && print(p.io, @sprintf(", grey %.4f", grey))
+  println(p.io)
 end
 
 function _print_failure(p::_Printer, msg, k)
