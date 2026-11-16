@@ -383,6 +383,44 @@ end
     @test so.shift == 0
     @test_throws ArgumentError OC(constraint_tol = 0)
     @test_throws ArgumentError SiMPL(max_corrections = -1)
+    @test constraint_tol(OC()) == 1e-4 && constraint_tol(SiMPL()) == 1e-6
+    # a rejected step (shrink!) scales the shift with the square of the factor
+    st = init(SiMPL(), fill(0.3, n), mk())
+    st.shift = 0.5
+    shrink!(SiMPL(), st, 0.5)
+    @test st.shift == 0.125
+  end
+
+  @testset "Nonlinear constraint: review cases" begin
+    lb = 1e-3
+    F(z) = sum(c ./ z)
+    dF!(dF, z) = (dF .= -c ./ z .^ 2)
+    # restoration where the linearised target lies below aᵀlb (g concave): no error, feasibility reached
+    gs(z) = sum(sqrt, z) / n - 0.3
+    o = FunctionOracle(F, dF!; lb, ub = 1.0, constraint = (gs, (dG, z) -> (dG .= 0.5 ./ (n .* sqrt.(z)))))
+    z = fill(0.9, n)
+    st = init(SiMPL(), z, o)
+    for _ in 1:30
+      step!(SiMPL(), st, z, o, nothing).accepted || break
+    end
+    @test gs(z) <= 0
+    # corrections exhausted: an infeasible trial is not accepted (every accepted iterate stays feasible)
+    gc(z) = sum(z .^ 3) / n - 0.2
+    o = FunctionOracle(F, dF!; lb, ub = 1.0, constraint = (gc, (dG, z) -> (dG .= 3 .* z .^ 2 ./ n)))
+    for mc in (0, 1)
+      z = fill(0.3, n)
+      st = init(SiMPL(max_corrections = mc), z, o)
+      for _ in 1:40
+        info = step!(SiMPL(max_corrections = mc), st, z, o, nothing)
+        info.accepted || break
+        @test gc(z) <= 0
+      end
+    end
+    # OC needs a constraint that acts on every entry
+    gh(z) = sum(z[1:n÷2]) / n - 0.2
+    o = FunctionOracle(F, dF!; lb, ub = 1.0, constraint = (gh, (dG, z) -> (dG .= 0; dG[1:n÷2] .= 1 / n; dG)))
+    z = fill(0.3, n)
+    @test_throws ArgumentError step!(OC(), init(OC(), z, o), z, o, nothing)
   end
 
 end

@@ -260,7 +260,8 @@ end
 
 Reads a checkpoint written by [`Checkpoint`](@ref): `z`, `iteration`, `stage`, `stage_iterations`, `scales`,
 `blocks`, `continuation` (names) and `history` (named tuple of columns). Pass it to `solve!(…; resume = …)`. The
-memory of the optimiser is not saved: OC resumes exactly, SiMPL restarts its step size.
+memory of the optimiser is not saved: OC resumes exactly (with a nonlinear constraint, up to the correction shift,
+which restarts at zero), SiMPL restarts its step size.
 """
 function load_checkpoint(path::AbstractString)
   meta = TOML.parsefile(joinpath(path, "checkpoint.toml"))
@@ -340,8 +341,8 @@ adjoint and filter solves, and time. `true` is `2`, `false` is `0`. The summary 
 (those of rejected or stalled trials, the setup and the final synchronisation included).
 
 If the starting design (not a resumed one) violates the constraint, it is scaled towards the lower bound,
-`z = lb + t (z − lb)` (a linear constraint: on the entries it acts on, so that it holds with equality; a nonlinear
-one: every entry, with `t` found by regula falsi so that `-1e-6 ≤ g ≤ 0`); `t` is returned in `result.start_scaling`
+`z = lb + t (z − lb)` on the entries the constraint acts on (a linear constraint: so that it holds with equality; a
+nonlinear one: with `t` found by regula falsi so that `-1e-6 ≤ g ≤ 0`); `t` is returned in `result.start_scaling`
 and reported as an event when `verbose ≥ 1`. At a continuation jump the design is not touched: an optimiser that
 finds it infeasible restores feasibility in its next step.
 
@@ -443,14 +444,16 @@ function _make_feasible!(o, zk)
   t
 end
 
-# t by regula falsi (Illinois) on g(lb + t (z - lb)) = -tol/2 in (0, 1]; each evaluation costs the filter solves
+# t by regula falsi (Illinois) on g(lb + t (z - lb)) = -tol/2 in (0, 1], on the entries the constraint depends on (a
+# nonzero derivative at the start); each evaluation costs the filter solves
 function _make_feasible_nonlinear!(o, zk; tol = 1e-6, maxit = 60)
   g1 = constraint(o, zk)
   isfinite(g1) || throw(ArgumentError("Optimization: the constraint is not finite at the starting design"))
   g1 <= 0 && return nothing
+  acts = constraint_gradient!(similar(zk), o, zk) .!= 0
   z0 = copy(zk)
   zt = similar(zk)
-  gt(t) = (@. zt = o.lb + t * (z0 - o.lb); constraint(o, zt) + tol / 2)
+  gt(t) = (@. zt = ifelse(acts, o.lb + t * (z0 - o.lb), z0); constraint(o, zt) + tol / 2)
   t0, t1 = 0.0, 1.0
   h0, h1 = gt(t0), g1 + tol / 2
   h0 < 0 || throw(ArgumentError("Optimization: the constraint cannot be met within the bounds (it is violated at the lower bound)"))
@@ -469,7 +472,7 @@ function _make_feasible_nonlinear!(o, zk; tol = 1e-6, maxit = 60)
       side = 1
     end
   end
-  constraint(o, zt) <= 0 || (t = t0; @. zt = o.lb + t * (z0 - o.lb))   # end on the feasible side
+  constraint(o, zt) <= 0 || (t = t0; @. zt = ifelse(acts, o.lb + t * (z0 - o.lb), z0))   # end on the feasible side
   copyto!(zk, zt)
   set_values!(o.z, zk)
   t
@@ -579,7 +582,7 @@ function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_
     post === nothing || post(ctx)
     r = _stop_reason(stop, info, hist, run.stage_start)
     # with a nonlinear constraint, convergence also needs the constraint met to the tolerance of the optimiser
-    (r !== nothing && !_is_linear(oracle) && has_constraint(oracle) && info.violation > _constraint_tol(opt)) && (r = nothing)
+    (r !== nothing && !_is_linear(oracle) && has_constraint(oracle) && info.violation > constraint_tol(opt)) && (r = nothing)
     done = false
     if r !== nothing
       if schedule === nothing || run.stage == schedule.nstages

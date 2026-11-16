@@ -217,7 +217,6 @@ bounds(o::FunctionalOracle) = (o.lb, o.ub)
 linear_constraint(o::FunctionalOracle) = o.a === nothing ? nothing : (o.a, o.V)
 has_constraint(o::FunctionalOracle) = o.C !== nothing
 _is_linear(o::FunctionalOracle) = o.C !== nothing && o.C.linear
-_constraint_tol(opt) = hasproperty(opt, :constraint_tol) ? opt.constraint_tol : Inf
 
 function constraint(o::FunctionalOracle, v)
   o.a === nothing || return dot(o.a, v) - o.V

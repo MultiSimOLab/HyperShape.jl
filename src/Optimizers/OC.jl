@@ -57,6 +57,7 @@ function init(opt::OC, z, oracle)
 end
 
 reset!(opt::OC, s::OCState) = (s.move = opt.move; s.shrunk = false; s.shift = 0.0; s)
+constraint_tol(opt::OC) = opt.constraint_tol
 shrink!(opt::OC, s::OCState, factor) = (s.move *= factor; s.shrunk = true; s)
 
 _oc_power(x, η) = η == 0.5 ? sqrt(x) : x^η
@@ -67,8 +68,9 @@ function _oc_update!(z, zo, B, a, lb, ub, κ, m)
   dot(a, z)
 end
 
-# Bisection of λ on aᵀz = V; z keeps the update of the last midpoint (top88). Returns (aᵀz, λ, reached): `reached` is
-# false when even λ = 1e69 leaves aᵀz > V (the move limit does not allow meeting the target)
+# Bisection of λ on aᵀz = V; z keeps the update of the last midpoint (top88). Returns (aᵀz, λ, reached, active):
+# `reached` is false when even λ = 1e69 leaves aᵀz > V (the move limit does not allow meeting the target), `active`
+# is false when no λ tried left aᵀz > V (the constraint is inactive: λ → 0)
 function _oc_bisect!(z, zo, B, a, lb, ub, V, m, η, tol, max_bisections)
   λ1, λ2 = 0.0, 1e9
   n = 0
@@ -87,7 +89,7 @@ function _oc_bisect!(z, zo, B, a, lb, ub, V, m, η, tol, max_bisections)
     vol > V ? (λ1 = λ) : (λ2 = λ)
     n += 1
   end
-  vol, λ, reached
+  vol, λ, reached, λ1 > 0
 end
 
 function step!(opt::OC, s::OCState, z, oracle, ctx)
@@ -103,7 +105,7 @@ function step!(opt::OC, s::OCState, z, oracle, ctx)
   copyto!(s.z_old, z)
   zo, B, η, m = s.z_old, s.dF, opt.damping, s.move
   @. B = _oc_power(max(zero(B), -B) / a, η)
-  vol, λ, _ = _oc_bisect!(z, zo, B, a, lb, ub, V, m, η, opt.bisection_tol, opt.max_bisections)
+  vol, λ, _, _ = _oc_bisect!(z, zo, B, a, lb, ub, V, m, η, opt.bisection_tol, opt.max_bisections)
   @. B = z - zo   # B is free now: use it as work vector
   change = maximum(abs, B)
   StepInfo(true, f, NaN, NaN, change, m, max(0.0, vol - V), 1, λ)
@@ -130,6 +132,9 @@ function _oc_step_nonlinear!(opt::OC, s::OCState, z, oracle, f)
   a = constraint_gradient!(s.a, oracle, z)
   amax = maximum(a)
   amax > 0 || throw(ArgumentError("OC: the derivative of the constraint has no positive entry"))
+  # an entry the constraint does not depend on at all has no OC update (Bᵢ would be infinite)
+  any(iszero, a) && throw(ArgumentError("OC: the constraint does not depend on some entries of z (zero derivative); " *
+                                        "OC needs a constraint that acts on every entry"))
   @. a = max(a, 1e-12 * amax)
   lb, ub = bounds(oracle)
   copyto!(s.z_old, z)
@@ -138,17 +143,18 @@ function _oc_step_nonlinear!(opt::OC, s::OCState, z, oracle, f)
   tol = min(opt.bisection_tol, 1e-7)
   Vlin = dot(a, zo) - g
   sh = s.shift
-  _, λ, reached = _oc_bisect!(z, zo, B, a, lb, ub, Vlin - sh, m, η, tol, opt.max_bisections)
+  _, λ, reached, active = _oc_bisect!(z, zo, B, a, lb, ub, Vlin - sh, m, η, tol, opt.max_bisections)
   G = constraint(oracle, z)
   lo, hi, prev = (-Inf, NaN), (Inf, NaN), (NaN, NaN)
   for _ in 1:opt.max_corrections
     (isfinite(G) && abs(G) > opt.constraint_tol) || break
     (!reached && G > 0) && break   # the move limit does not allow getting closer in this step
+    (!active && G < 0) && break    # inactive constraint: the step is the unconstrained one
     G > 0 ? (lo = (sh, G)) : (hi = (sh, G))
     sn = _next_shift(sh, G, lo, hi, prev)
     prev = (sh, G)
     sh = sn
-    _, λ, reached = _oc_bisect!(z, zo, B, a, lb, ub, Vlin - sh, m, η, tol, opt.max_bisections)
+    _, λ, reached, active = _oc_bisect!(z, zo, B, a, lb, ub, Vlin - sh, m, η, tol, opt.max_bisections)
     G = constraint(oracle, z)
   end
   s.shift = isfinite(sh) ? sh : 0.0

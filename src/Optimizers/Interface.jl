@@ -36,6 +36,14 @@ struct StepInfo
 end
 
 """
+    constraint_tol(opt::Optimizer) -> Float64
+
+Tolerance to which the optimiser meets a nonlinear constraint; the loop only declares convergence when the constraint
+holds to it. Default `Inf` (no requirement); `OC` and `SiMPL` return their `constraint_tol`.
+"""
+constraint_tol(::Optimizer) = Inf
+
+"""
     init(opt::Optimizer, z, oracle) -> state
 
 Creates the memory of the optimiser for the starting design `z`.

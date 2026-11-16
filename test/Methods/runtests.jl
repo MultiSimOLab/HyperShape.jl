@@ -461,6 +461,11 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test sum(∫(q.θ.ρ)q.dΩ) ≈ 0.4 * vol rtol = name === :OC ? 2e-4 : 2e-6
   end
 
+  @testset "Volume of the projected density: Taylor test (P1)" begin
+    q = compliance_problem(; design = :P1)
+    @test check_consistency(Volume(q.θ, q.dΩ; max = 0.4 * sum(∫(1.0)q.dΩ))).passed
+  end
+
   @testset "Volume: infeasible start, linear volume of the design, errors" begin
     q = compliance_problem(; init = 0.9)
     vol = sum(∫(1.0)q.dΩ)

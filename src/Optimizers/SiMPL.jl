@@ -154,9 +154,12 @@ function shrink!(opt::SiMPL, s::SiMPLState, factor)
     s.can_rollback = false
   end
   s.scale *= factor
+  s.shift *= factor^2   # the linearisation error falls with the square of the step
   s.shrunk = true
   s
 end
+
+constraint_tol(opt::SiMPL) = opt.constraint_tol
 
 # Sets ψ_trial = ψ - α (g + μ ga) and z_trial
 function _set_trial!(s, α, μ, lb, ub)
@@ -245,8 +248,10 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
     @. s.a = max(s.a, 1e-12 * amax)
     riesz!(s.ga, oracle, s.a)
     Vlin = dot(s.a, s.z) - gk
+    alb = lb isa Number ? lb * sum(s.a) : dot(s.a, lb)   # aᵀlb: the linearised target must stay above it
     restoration = gk > opt.constraint_tol   # infeasible design (start, continuation jump): feasibility first
   end
+  shift0 = s.shift
   violation_k = nonlinear ? max(0.0, gk) : _violation(c, s.z)
 
   if s.retry
@@ -275,7 +280,7 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
   change = 0.0
   for j in 0:opt.max_backtracks
     if nonlinear
-      μ, G = _corrected_shift!(opt, s, oracle, Vlin, α, lb, ub)
+      μ, G = _corrected_shift!(opt, s, oracle, Vlin, alb, α, lb, ub)
     elseif c === nothing
       _set_trial!(s, α, 0.0, lb, ub)
     else
@@ -294,11 +299,12 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
     decrease = dot(s.dF, s.work)
     f_new = objective(oracle, s.z_trial)
     nev += 1
-    if isfinite(f_new) && restoration && isfinite(G)
-      accepted = true   # restoration step: the first trial with a finite objective
+    if isfinite(f_new) && restoration && isfinite(G) && G < gk
+      accepted = true   # restoration step: the first trial with a finite objective that reduces the violation
       break
     end
-    if isfinite(f_new) && (!nonlinear || isfinite(G))
+    # a nonlinear constraint that could not be met at the trial (corrections exhausted) makes the trial fail
+    if isfinite(f_new) && !restoration && (!nonlinear || (isfinite(G) && G <= 0))
       bound = if opt.linesearch === :armijo
         f + opt.c1 * decrease
       else
@@ -314,7 +320,7 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
   end
 
   # the forward state of the oracle is now at a rejected trial; f, dF and g at z remain valid
-  accepted || return StepInfo(false, f, f_new, kkt, 0.0, α, violation_k, nev, μ)
+  accepted || (s.shift = shift0; return StepInfo(false, f, f_new, kkt, 0.0, α, violation_k, nev, μ))
 
   s.f_back, s.α_prev_back = f, s.α_prev
   s.ψ_prev, s.ψ, s.ψ_trial = s.ψ, s.ψ_trial, s.ψ_prev
@@ -335,9 +341,12 @@ end
 # Multiplier of the linearised constraint aᵀz ≤ Vlin - s for the step α, with the shift s corrected until the true
 # constraint at the trial satisfies -tol ≤ g ≤ 0 (or holds with μ = 0), aiming at -tol/2. Returns (μ, g(z_trial)) and
 # leaves ψ_trial and z_trial at the returned multiplier.
-function _corrected_shift!(opt, s, oracle, Vlin, α, lb, ub)
+function _corrected_shift!(opt, s, oracle, Vlin, alb, α, lb, ub)
   tol = opt.constraint_tol
-  sh = s.shift
+  # the target aᵀz = Vlin - s must stay above aᵀlb, or the multiplier has no root (the trial then goes to the bounds)
+  smax = Vlin - alb - 1e-12 * max(abs(Vlin), 1.0)
+  cap(x) = isfinite(x) ? min(x, smax) : smax
+  sh = cap(s.shift)
   μ = _volume_shift!(opt, s, s.a, Vlin - sh, α, lb, ub)
   G = constraint(oracle, s.z_trial)
   lo, hi, prev = (-Inf, NaN), (Inf, NaN), (NaN, NaN)
@@ -346,7 +355,8 @@ function _corrected_shift!(opt, s, oracle, Vlin, α, lb, ub)
     (G <= 0 && (μ == 0 || G >= -tol)) && break
     t = G + tol / 2
     G > 0 ? (lo = (sh, t)) : (hi = (sh, t))
-    sn = _next_shift(sh, t, lo, hi, prev)
+    sn = cap(_next_shift(sh, t, lo, hi, prev))
+    sn == sh && break   # pinned at the bounds: no correction can do more
     prev = (sh, t)
     sh = sn
     μ = _volume_shift!(opt, s, s.a, Vlin - sh, α, lb, ub)

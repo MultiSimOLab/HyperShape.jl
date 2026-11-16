@@ -50,7 +50,7 @@ end
 
 _metric_name(m::Euclidean) = "Euclidean"
 _constraint_label(problem, opt) = only(problem.constraints).linear ? "linear" :
-                                  "nonlinear (tol $(_g_or_e(_constraint_tol(opt))))"
+                                  "nonlinear (tol $(_g_or_e(constraint_tol(opt))))"
 _g_or_e(x) = isfinite(x) ? @sprintf("%.0e", x) : "—"
 _metric_label(method) = method.optimizer isa OC ? "not used by OC" :
                         _metric_name(method.metric) * (method.default_metric ? " (default)" : "")
