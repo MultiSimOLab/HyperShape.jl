@@ -114,13 +114,16 @@ values (checked here for the HyperFEM models that expose their spaces). It is so
 One adjoint covers one forward state: if `S` depends on another state `S0` (for example through a field computed by
 `S0`), the sensitivity through `S0` needs its own adjoint and is not included in the gradient of a
 [`Functional`](@ref HyperShape.Functionals.Functional) built on `S`; [`check_consistency`](@ref
-HyperShape.Checks.check_consistency) detects it.
+HyperShape.Checks.check_consistency) detects it. A warning is given when this adjoint is built.
 """
 function AdjointOperator(S::StateOperator, model, deps = _Unset(); depends = _Unset(),
                          solve = default_solve(StateOperator, model))
   d = _dependencies("AdjointOperator", deps, depends)
   extra = d isa _Unset ? () : _as_depends(d)
   _check_homogeneous_trial(model, "AdjointOperator")
+  any(d -> d isa StateOperator, S.depends) &&
+    @warn "AdjointOperator: the forward state depends on another state; the sensitivity through it is not included " *
+          "in the gradient of a Functional built on this adjoint (check_consistency detects it)"
   StateOperator(model, _unique_deps((S.depends..., S, extra...)); solve)
 end
 

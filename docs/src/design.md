@@ -188,7 +188,7 @@ beam). A constraint on the physical volume is nonlinear in `z` and comes with th
 - **Continuation:** explicit list of values per stage, a jump every `every` iterations or when the stopping criteria
   are met; the optimiser forgets its memory at each jump; the optimisation only stops in the last stage.
 - **Stopping:** `maxiter` is mandatory. `stop` defaults to `StopCriteria(change = 1e-4)` for OC and
-  `StopCriteria(kkt = 1e-4, change = 1e-4)` for SiMPL (`default_stop`); `stop = nothing` runs `maxiter` iterations.
+  `StopCriteria(kkt = 1e-4)` for SiMPL (`default_stop`); `stop = nothing` runs `maxiter` iterations.
 - **Context:** `OptContext` (iteration, attempt, trial, phase, continuation values) reaches every solve function of
   the user; phases `:setup`, `:check`, `:optimization` and `:linesearch`.
 - **Checkpoint:** `checkpoint.toml`, `z_<k>.bin` and `history_<k>.csv` in a folder; resume with

@@ -53,11 +53,12 @@ end
     default_stop(optimizer) -> Union{StopCriteria,Nothing}
 
 Stopping criteria of [`solve!`](@ref) when `stop` is not given: `StopCriteria(change = 1e-4)` for OC (which has no
-optimality measure), `StopCriteria(kkt = 1e-4, change = 1e-4)` for SiMPL, and `nothing` (only `maxiter`) for any
+optimality measure), `StopCriteria(kkt = 1e-4)` for SiMPL (a small step after backtracking is not convergence),
+and `nothing` (only `maxiter`) for any
 other optimiser.
 """
 default_stop(::OC) = StopCriteria(change = 1e-4)
-default_stop(::SiMPL) = StopCriteria(kkt = 1e-4, change = 1e-4)
+default_stop(::SiMPL) = StopCriteria(kkt = 1e-4)
 default_stop(::Optimizer) = nothing
 
 # `stop` and `on_failure` not given (`stop = nothing` means maxiter only; `on_failure` must be a RejectStep)

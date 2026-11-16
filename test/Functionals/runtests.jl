@@ -353,6 +353,10 @@ struct _NoSpaces <: HyperFEM.ComputationalModels.ComputationalModel end   # a mo
     vals = HyperShape.Operators.dirichlet_values(multi1)
     @test vals !== nothing && any(!iszero, vals)
     @test_throws ArgumentError AdjointOperator(Sd, multi1; solve = (m, ctx) -> solve!(m))
+    # an adjoint of a state that depends on another state warns that its sensitivity is not included
+    Sc = StateOperator(Sd.model, (θ, Sd))
+    @test_logs (:warn, r"depends on another state") AdjointOperator(Sc, Ad.model)
+    @test_logs AdjointOperator(Sd, Ad.model)
     @test HyperShape.Operators.dirichlet_values(_NoSpaces()) === nothing
   end
 

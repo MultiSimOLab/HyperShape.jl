@@ -441,7 +441,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test SIMP(OC()).default_metric && !SIMP(OC(); metric = Euclidean()).default_metric
     @test RejectStep() === RejectStep(shrink = 0.5, max = 5)
     @test default_stop(OC()).change == 1e-4 && default_stop(OC()).kkt === nothing
-    @test default_stop(SiMPL()).kkt == 1e-4 && default_stop(SiMPL()).change == 1e-4
+    @test default_stop(SiMPL()).kkt == 1e-4 && default_stop(SiMPL()).change === nothing
     # the defaults give the same run as the same values written explicitly
     for (mkopt, lumped) in ((() -> OC(), false), (() -> SiMPL(), true))
       runs = map((true, false)) do dflt
