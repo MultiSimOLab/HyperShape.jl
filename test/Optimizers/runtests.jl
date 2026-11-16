@@ -426,6 +426,45 @@ end
     s2 = init(o2, z2, o)
     @test step!(o2, s2, z2, o, nothing).step == 0.2
     @test set_move!(o2, 0.1).move == 0.1
+    @test set_move!(o2, 5e-4).move == 5e-4                 # no floor without adapt
+    @test_throws ArgumentError set_move!(OC(), 5e-4)       # below move_min
+    # a rejected step: the retry only rescales, and the next step tests the sign against the last accepted step
+    t = [0.9, 0.7, 0.5, 0.3]                                # optimum t .- 0.2: the entries move both ways
+    o3 = FunctionOracle(z -> sum(i -> abs2(z[i] - t[i]), eachindex(z)) / 2, (d, z) -> (d .= z .- t);
+                        constraint = (ones(4), 1.6))
+    opt = OC()
+    z = fill(0.4, 4)
+    s = init(opt, z, o3)
+    for _ in 1:3; step!(opt, s, z, o3, nothing); end
+    d1, m1 = copy(s.dprev), copy(s.m)
+    @test any(!iszero, d1)
+    copyto!(z, s.z_old)                                    # the loop rolls the step back
+    shrink!(opt, s, 0.5)
+    info = step!(opt, s, z, o3, nothing)
+    @test s.m == m1 && s.dprev == d1 && s.meff ≈ 0.5 .* m1 && info.step ≈ sum(m1) / 8
+    zr, zr_old = copy(z), copy(s.z_old)
+    step!(opt, s, z, o3, nothing)
+    @test s.dprev == zr .- zr_old && s.meff == s.m           # the reduction is dropped once the step stood
+    # set_move! without reset!: the limits are capped from the next step
+    set_move!(opt, 0.05)
+    @test step!(opt, s, z, o3, nothing).step <= 0.05 + 1e-12
+    # memory for a checkpoint: a state restored from it takes the same next step
+    v = memory(opt, s, z)
+    s2 = init(opt, copy(z), o3)
+    restore_memory!(opt, s2, z, v)
+    za, zb = copy(z), copy(z)
+    step!(opt, s, za, o3, nothing); step!(opt, s2, zb, o3, nothing)
+    @test za == zb && s.m == s2.m && s.dprev == s2.dprev
+    @test_throws ArgumentError restore_memory!(opt, s2, z, v[1:end-1])
+    # no allocations with adaptive limits and a nonlinear constraint
+    W = 1.0
+    onl = FunctionOracle(z -> sum(x -> abs2(x - 0.9), z) / 2, (d, z) -> (d .= z .- 0.9);
+                         constraint = (z -> sum(abs2, z) / W - 1, (d, z) -> (d .= 2 .* z ./ W)))
+    opt = OC()
+    z = fill(0.4, 4)
+    s = init(opt, z, onl)
+    step!(opt, s, z, onl, nothing); step!(opt, s, z, onl, nothing)
+    @test step_allocations(opt, s, z, onl) == 0
   end
 
   @testset "Nonlinear constraint: review cases" begin
