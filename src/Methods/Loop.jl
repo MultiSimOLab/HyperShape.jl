@@ -544,7 +544,9 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
     set_context!(ctx, :iteration, run.k)       # after a stall, the iteration tried was run.k + 1
     _postprocess!(post, oracle, hist)
   end
-  post === nothing || _post_close!(post)      # pending writes finished; an error of a write is thrown here
+  # pending writes finished; a write that fails now is reported, not thrown: the optimisation has finished and its
+  # result is returned (decided by Claude, delegated by Jesús, 2026-11-16)
+  post === nothing || _post_close!(post; quiet = true)
   OptResult(status, reason, run.k, f_final, _trim!(hist), state, t_start)
   finally
     opt isa OC && set_move!(opt, move0)

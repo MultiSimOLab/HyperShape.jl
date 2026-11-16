@@ -226,4 +226,17 @@ vtu_npoints(file) = parse(Int, match(r"NumberOfPoints=\"(\d+)\"", read(file, Str
                                       stop = nothing, post = opts)
     @test_throws ArgumentError OptPostProcessor((p, c) -> nothing; every = 1, maxpending = 0)
   end
+
+  @testset "A write that fails at the end does not lose the result" begin
+    q = compliance_problem()
+    Ωq = get_triangulation(q.uh)
+    out = joinpath(mktempdir(), "gone")
+    post = OptPostProcessor(every = 1, filepath = out, async = true, format = :vtkhdf, history = false) do p, ctx
+      ctx.iteration == 3 && rm(out; recursive = true)          # the folder disappears before the last write
+      write_step(p, Ωq, "rho" => q.θ.ρ)
+    end
+    r = @test_logs (:error, r"a write failed") match_mode = :any solve!(q.problem, SIMP(OC(); metric = Euclidean());
+                                                                       maxiter = 3, verbose = 0, stop = nothing, post)
+    @test r isa OptResult && r.iterations == 3
+  end
 end

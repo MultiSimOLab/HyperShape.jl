@@ -167,7 +167,8 @@ The collection file is created with its first entry (none with `format = :vtkhdf
 `format`, `precision`, `compress`, `async` and `maxpending` are the options of the [`FieldWriter`](@ref)s that
 [`write_step`](@ref) builds (with `async`, the collection lags behind the loop by the queued steps): `format = :vtkhdf` (one file per triangulation and name with every iteration; needs `using HDF5`) suits large
 3D runs, `:vtu` (default) any ParaView. The writers are closed (their pending writes finished) when `solve!` returns,
-fails or is interrupted.
+fails or is interrupted. An error of a write during the run stops it (it is thrown by the next `write_step`); one that
+appears when the writers are closed at the end is logged with `@error` and `solve!` still returns its result.
 After a stall in a continuation stage whose last iteration was already written, the result of `solve!` is at the new
 stage but that iteration is not written again.
 
