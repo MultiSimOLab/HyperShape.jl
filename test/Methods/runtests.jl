@@ -24,8 +24,8 @@ function compliance_problem(; design = :P0, n = 8, dim = 2, init = 0.4, fraction
   C = Functional((u, θ) -> ∫(f * u)dΩ, Sc; derivative = (u, w, θ) -> (δ -> ∫(-sign[] * (dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = :self, fields = θ, scale = :initial)
   θv = PhysicalFields(x; ρ = Identity())
   vol = sum(∫(1.0)dΩ)
-  Vol = Functional(θ -> sum(∫(θ.ρ)dΩ) - fraction * vol, θv; derivative = θ -> (δ -> ∫(δ)dΩ), scale = fraction * vol)
-  (; p..., C, Vol, θv, S = Sc, problem = Optimization(z; objective = C, linear_constraints = (Vol,)))
+  Vol = Functional(θ -> sum(∫(θ.ρ)dΩ) - fraction * vol, θv; derivative = θ -> (δ -> ∫(δ)dΩ), scale = fraction * vol, linear = true)
+  (; p..., C, Vol, θv, S = Sc, problem = Optimization(z; objective = C, constraints = (Vol,)))
 end
 
 nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
@@ -42,29 +42,29 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test o.a ≈ m ./ (0.4 * sum(m))
     @test o.V ≈ 1.0 atol = 1e-12            # (∫ρ - 0.4|Ω|)/(0.4|Ω|) ≤ 0  ⇔  aᵀz ≤ 1
     # a projected volume is not linear in z
-    Vp = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4, q.θ; derivative = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4)
-    bad = Optimization(q.z; objective = q.C, linear_constraints = (Vp,))
+    Vp = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4, q.θ; derivative = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4, linear = true)
+    bad = Optimization(q.z; objective = q.C, constraints = (Vp,))
     @test_throws ArgumentError solve!(bad, SIMP(OC(); metric = Euclidean()); maxiter = 2, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     @test FunctionalOracle(q.problem, Euclidean()).metric === nothing
     # a uniform start at 0.3 used to hide a nonlinear constraint
     q3 = compliance_problem(; design, init = 0.3)
-    Vp3 = Functional(θ -> sum(∫(θ.ρ)q3.dΩ) - 0.4, q3.θ; derivative = θ -> (δ -> ∫(δ)q3.dΩ), scale = 0.4)
-    @test_throws ArgumentError solve!(Optimization(q3.z; objective = q3.C, linear_constraints = Vp3),
+    Vp3 = Functional(θ -> sum(∫(θ.ρ)q3.dΩ) - 0.4, q3.θ; derivative = θ -> (δ -> ∫(δ)q3.dΩ), scale = 0.4, linear = true)
+    @test_throws ArgumentError solve!(Optimization(q3.z; objective = q3.C, constraints = Vp3),
                                       SIMP(OC(); metric = Euclidean()); maxiter = 2, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     @test get_values(q3.z) == fill(0.3, length(q3.z))     # z restored after the probes
     # the filtered, unprojected volume is linear and has the same vector (Neumann filter)
     θf = PhysicalFields(q.x; ρ = HelmholtzFilter(q.Sf; measure = q.dΩ))
-    Vf = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4 * sum(m), θf; derivative = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4 * sum(m))
-    of = FunctionalOracle(Optimization(q.z; objective = q.C, linear_constraints = Vf), Euclidean())
+    Vf = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4 * sum(m), θf; derivative = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4 * sum(m), linear = true)
+    of = FunctionalOracle(Optimization(q.z; objective = q.C, constraints = Vf), Euclidean())
     _setup_constraint!(of, Vf, q.problem.ctx)
     @test of.a ≈ m ./ (0.4 * sum(m)) rtol = 1e-10
   end
 
   @testset "Problem and method arguments" begin
     q = compliance_problem()
-    @test_throws ArgumentError Optimization(q.z; objective = q.C, constraints = (q.Vol,))
-    @test_throws ArgumentError Optimization(q.z; objective = q.C, linear_constraints = (q.Vol, q.Vol))
-    @test_throws ArgumentError Optimization(q.z; objective = q.C, linear_constraints = (q.C,))   # has states
+    @test Optimization(q.z; objective = q.C, constraints = q.Vol).constraints === (q.Vol,)
+    @test_throws ArgumentError Optimization(q.z; objective = q.C, constraints = (q.Vol, q.Vol))
+    @test_throws ArgumentError Optimization(q.z; objective = q.C, constraints = (q.C,))   # has states
     @test SIMP(OC()).metric isa Euclidean           # default metric of OC (which does not use it)
     @test_throws ArgumentError SIMP(SiMPL())         # SiMPL needs one
     @test_throws ArgumentError SIMP(OC(); metric = :lumped)
@@ -110,7 +110,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     q = compliance_problem()
     (; z, θ, S, A, dk, dΩ, dΓ) = q
     B = Functional((u, θ) -> ∫(u)dΓ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = A, fields = θ, scale = :initial)
-    r = solve!(Optimization(z; objective = B, linear_constraints = q.Vol), SIMP(OC(); metric = Euclidean());
+    r = solve!(Optimization(z; objective = B, constraints = q.Vol), SIMP(OC(); metric = Euclidean());
                maxiter = 6, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     @test all(==(1), r.history.adjoint[2:end])
     @test r.history.objective[end] < r.history.objective[1]
@@ -250,7 +250,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     Abad = StateOperator(A.model; depends = (θ, S), solve = (m, ctx) -> (solve!(m; Assembly = true), false))
     B = Functional((u, θ) -> ∫(u)dΓ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = Abad, fields = θ, scale = 1.0)
     dir2 = mktempdir()
-    @test_throws OptimizationFailure solve!(Optimization(z; objective = B, linear_constraints = q.Vol),
+    @test_throws OptimizationFailure solve!(Optimization(z; objective = B, constraints = q.Vol),
                                             SIMP(OC(); metric = Euclidean()); maxiter = 3,
                                             verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 2), checkpoint = Checkpoint(dir2; every = 10), stop = nothing)
     @test isfile(joinpath(dir2, "checkpoint.toml"))
@@ -319,8 +319,8 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     # a projected volume from a uniform 0.5 start with η = 0.5 on a finer mesh is not linear
     q = compliance_problem(; n = 40, init = 0.5)
     set_beta!(q.H, 3.0)
-    Vp = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4, q.θ; derivative = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4)
-    o = FunctionalOracle(Optimization(q.z; objective = q.C, linear_constraints = Vp), Euclidean())
+    Vp = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4, q.θ; derivative = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4, linear = true)
+    o = FunctionalOracle(Optimization(q.z; objective = q.C, constraints = Vp), Euclidean())
     @test_throws ArgumentError _setup_constraint!(o, Vp, q.problem.ctx)
     # a start with values at the bounds: the first solve of SiMPL is the current design
     phases = Tuple{Int,Int,Symbol}[]
@@ -425,7 +425,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     a = ones(nz); a[1:5] .= 0
     lb = zeros(nz)
     zk = fill(0.6, nz)
-    t = HyperShape.Methods._make_feasible!((a = a, V = 0.4 * sum(a), lb = lb, z = q.z), zk)
+    t = HyperShape.Methods._make_feasible!((C = q.Vol, a = a, V = 0.4 * sum(a), lb = lb, z = q.z), zk)
     @test t ≈ 0.4 / 0.6 && all(==(0.6), zk[1:5]) && dot(a, zk) ≈ 0.4 * sum(a)
     # printing at level 0 allocates nothing
     h = OptHistory(4, (:β,))
@@ -434,6 +434,51 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     HyperShape.Methods._print_row(p0, h); HyperShape.Methods._print_event(p0, "x", :red)
     @test (@allocated HyperShape.Methods._print_row(p0, h)) == 0
     @test (@allocated HyperShape.Methods._print_event(p0, "x", :red)) == 0
+  end
+
+  @testset "Volume of the physical density: nonlinear constraint ($(name))" for name in (:OC, :SiMPL)
+    q = compliance_problem()
+    vol = sum(∫(1.0)q.dΩ)
+    V = Volume(q.θ, q.dΩ; max = 0.4 * vol)
+    @test !V.linear && Volume(q.x, q.dΩ; max = 0.4 * vol).linear
+    @test HyperShape.Variables.is_linear_field(q.θv, :ρ) && !HyperShape.Variables.is_linear_field(q.θ, :ρ)
+    @test check_consistency(V).passed                           # Taylor test of the projected volume
+    method = name === :OC ? SIMP(OC()) : SIMP(SiMPL(); metric = LumpedMass(q.dΩ))
+    io = IOBuffer()
+    r = solve!(Optimization(q.z; objective = q.C, constraints = V), method; maxiter = 30, io, verbose = 1,
+               schedule = Continuation(β = q.H => [3.0, 8.0]; every = 15), stop = nothing)
+    out = String(take!(io))
+    gs = r.history.constraint
+    @test occursin("constraint: nonlinear (tol $(name === :OC ? "1e-04" : "1e-06"))", out)
+    @test r.status === :maxiter && length(gs) == 30
+    if name === :OC
+      @test abs(gs[end]) <= 1e-4 && maximum(abs, gs[5:end]) <= 1e-3
+    else
+      @test all(<=(0), gs) && gs[end] >= -1e-6    # every accepted iterate feasible (the jump is restored at once)
+    end
+    @test all(isfinite, r.history.objective)
+    # the physical volume in the fields at the end is the constrained one
+    @test sum(∫(q.θ.ρ)q.dΩ) ≈ 0.4 * vol rtol = name === :OC ? 2e-4 : 2e-6
+  end
+
+  @testset "Volume: infeasible start, linear volume of the design, errors" begin
+    q = compliance_problem(; init = 0.9)
+    vol = sum(∫(1.0)q.dΩ)
+    V = Volume(q.θ, q.dΩ; max = 0.4 * vol)
+    r = solve!(Optimization(q.z; objective = q.C, constraints = V), SIMP(SiMPL(); metric = LumpedMass(q.dΩ));
+               maxiter = 3, verbose = 0, stop = nothing)
+    @test r.start_scaling !== nothing && 0 < r.start_scaling < 1
+    @test all(<=(0), r.history.constraint)
+    # the volume of the design is linear: the same run as the hand-written linear functional
+    runs = map((:volume, :hand)) do kind
+      q = compliance_problem()
+      C = kind === :volume ? Volume(q.x, q.dΩ; max = 0.4 * vol) : q.Vol
+      solve!(Optimization(q.z; objective = q.C, constraints = C), SIMP(OC()); maxiter = 6, verbose = 0, stop = nothing)
+    end
+    @test runs[1].history.objective ≈ runs[2].history.objective rtol = 1e-12
+    @test_throws ArgumentError Volume(q.θ, q.dΩ; max = -1.0)
+    @test_throws ArgumentError Volume(q.θ, q.dΩ; max = 1.0, field = :E)
+    @test_throws ArgumentError Optimization(q.z; objective = q.C, constraints = (V, V))
   end
 
   @testset "Defaults: metric of OC, stopping criteria, failure handling and the banner" begin

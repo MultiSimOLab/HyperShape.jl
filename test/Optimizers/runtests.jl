@@ -27,6 +27,17 @@ function reciprocal_solution(c, V, lb)
   z(hi)
 end
 
+# min Σ cᵢ/zᵢ  s.t.  g(z) = Σ zᵢ²/W - 1 ≤ 0, lb ≤ z ≤ 1   →   z = clamp((cᵢ W / (2λ))^(1/3), lb, 1)
+function nonlinear_solution(c, W, lb)
+  z(λ) = clamp.(cbrt.(c .* W ./ (2λ)), lb, 1)
+  lo, hi = 1e-12, 1e12
+  for _ in 1:300
+    λ = sqrt(lo * hi)
+    sum(abs2, z(λ)) > W ? (lo = λ) : (hi = λ)
+  end
+  z(hi)
+end
+
 step_allocations(opt, state, z, oracle) = @allocated step!(opt, state, z, oracle, nothing)
 
 function run!(opt, z, oracle; iterations, tol = 0.0)
@@ -326,6 +337,52 @@ end
     z = fill(0.3, n)
     @test_throws ArgumentError init(SiMPL(), z, quadratic(0.3n) |> o -> FunctionOracle(o.f, o.df!; constraint = (-a, 1.0)))
     @test !(:inner in names(HyperShape.Optimizers))   # Gridap exports another `inner`
+  end
+
+  @testset "Nonlinear constraint: OC and SiMPL (feasible and infeasible start)" begin
+    lb = 1e-3
+    W = 0.1n
+    F(z) = sum(c ./ z)
+    g(z) = sum(abs2, z) / W - 1
+    mk() = FunctionOracle(F, (dF, z) -> (dF .= -c ./ z .^ 2); lb, ub = 1.0,
+                          constraint = (g, (dG, z) -> (dG .= 2 .* z ./ W)))
+    exact = nonlinear_solution(c, W, lb)
+    @test !has_constraint(FunctionOracle(F, (dF, z) -> dF)) && has_constraint(mk())
+    @test linear_constraint(mk()) === nothing
+    @test_throws ArgumentError FunctionOracle(F, (dF, z) -> dF; constraint = (1.0, 2.0))
+    # OC: linearised constraint corrected to |g| ≤ constraint_tol
+    z = fill(0.3, n)
+    s, info = run!(OC(), z, mk(); iterations = 300)
+    @test abs(g(z)) <= 1e-4 && info.violation <= 1e-4
+    @test maximum(abs, z .- exact) < 1e-2
+    # SiMPL: every accepted iterate feasible, -tol ≤ g ≤ 0
+    for z0 in (0.3, 0.6)   # 0.6: infeasible start, restoration steps first
+      z = fill(z0, n)
+      o = mk()
+      st = init(SiMPL(), z, o)
+      gs = Float64[]
+      for _ in 1:300
+        info = step!(SiMPL(), st, z, o, nothing)
+        info.accepted || break
+        push!(gs, g(z))
+      end
+      @test length(gs) == 300
+      @test -1e-6 <= gs[end] <= 0
+      @test all(<=(1e-12), gs[20:end])
+      @test maximum(abs, z .- exact) < 1e-3
+      @test 0 <= F(z) - F(exact) <= 1e-5 * F(exact)
+    end
+    # the shift is forgotten by reset!
+    st = init(SiMPL(), fill(0.3, n), mk())
+    st.shift = 0.5
+    reset!(SiMPL(), st)
+    @test st.shift == 0
+    so = init(OC(), fill(0.3, n), mk())
+    so.shift = 0.5
+    reset!(OC(), so)
+    @test so.shift == 0
+    @test_throws ArgumentError OC(constraint_tol = 0)
+    @test_throws ArgumentError SiMPL(max_corrections = -1)
   end
 
 end

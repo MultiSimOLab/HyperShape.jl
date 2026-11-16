@@ -49,6 +49,9 @@ function _describe_stop(stop)
 end
 
 _metric_name(m::Euclidean) = "Euclidean"
+_constraint_label(problem, opt) = only(problem.constraints).linear ? "linear" :
+                                  "nonlinear (tol $(_g_or_e(_constraint_tol(opt))))"
+_g_or_e(x) = isfinite(x) ? @sprintf("%.0e", x) : "—"
 _metric_label(method) = method.optimizer isa OC ? "not used by OC" :
                         _metric_name(method.metric) * (method.default_metric ? " (default)" : "")
 _metric_name(m::LumpedMass) = "lumped mass"
@@ -62,8 +65,8 @@ function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, 
   W = textwidth(_header(p, ntuple(_ -> "", length(p.widths))))   # as wide as the table
   _styled(p, "━━" * title * "━"^max(3, W - 2 - textwidth(title)) * "\n", :cyan; bold = true)
   blocks = join(("$n ($(length(r)))" for (n, r) in zip(z.names, z.ranges)), ", ")
-  nc = length(problem.linear_constraints)
-  println(p.io, "  design variables $(length(z)): $blocks · constraint: ", nc == 0 ? "none" : "linear", " · metric: ",
+  nc = length(problem.constraints)
+  println(p.io, "  design variables $(length(z)): $blocks · constraint: ", nc == 0 ? "none" : _constraint_label(problem, opt), " · metric: ",
           _metric_label(method))
   if schedule !== nothing
     for (n, v) in zip(schedule.names, schedule.values)

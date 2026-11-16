@@ -17,11 +17,11 @@ What [`step!`](@ref) reports about one design step.
 - `kkt`: optimality measure at the design before the step, if the optimiser computes one (`NaN` otherwise).
 - `change`: `maximum(abs, z_new - z_old)`.
 - `step`: step size (SiMPL) or move limit (OC) used.
-- `violation`: `max(0, aᵀz - V)` of the linear constraint at the returned design (`0` without constraint).
+- `violation`: `max(0, g(z))` of the constraint at the returned design (`0` without constraint).
 - `evaluations`: number of calls to `objective` in the step (forward solves).
-- `multiplier`: multiplier of the linear constraint used in the step: in OC the `λ` of the last bisection (never
-  `0`), in SiMPL the shift `μ` of the volume projection (`0` if the constraint is inactive); `NaN` without a
-  constraint or when the step fails.
+- `multiplier`: multiplier of the constraint (linearised at the current design if it is nonlinear) used in the
+  step: in OC the `λ` of the last bisection (never `0`), in SiMPL the shift `μ` of the volume projection (`0` if the
+  constraint is inactive); `NaN` without a constraint or when the step fails.
 """
 struct StepInfo
   accepted::Bool

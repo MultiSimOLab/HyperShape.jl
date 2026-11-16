@@ -1,6 +1,6 @@
 """
     SiMPL(; linesearch = :armijo, c1 = 1e-4, max_backtracks = 30, max_growth = 10.0, root_tol = 1e-12,
-            max_root_iterations = 100)
+            max_root_iterations = 100, constraint_tol = 1e-6, max_corrections = 8)
 
 Sigmoidal mirror descent with a projected latent variable (Keith, Kim, Lazarov and Surowiec, arXiv:2409.19341;
 Kim, Lazarov, Surowiec and Keith, arXiv:2411.19421).
@@ -32,6 +32,17 @@ Optimality measure (`kkt` in [`StepInfo`](@ref)): `(1, η)_M` with `λ = (ψ_tri
 step and `η = max(-(z - lb) λ, (ub - z) λ)` (eq. 23a of arXiv:2411.19421).
 
 Requires `a ≥ 0` (not all zero) in the linear constraint.
+
+Nonlinear constraint `g(z) ≤ 0` (for example the volume of a projected density; an extension of the method, which
+the references only state for a linear volume): at each step `a = ∂g/∂z` at the current design (floored at
+`1e-12 maximum(a)`) and the linearised constraint `aᵀz ≤ aᵀzₖ - g(zₖ) - s` takes the place of `aᵀz ≤ V`. For each
+trial, the shift `s` is corrected (chord, then bounded secant steps, at most `max_corrections`, one evaluation of the
+true `g` each) until `-constraint_tol ≤ g(z_trial) ≤ 0`, aiming at `-constraint_tol/2`, so every accepted iterate is
+feasible; `s` is kept between steps (`reset!` clears it) and divided by 4 each time the line search halves the step
+(the linearisation error falls with the square of the step). A tolerance much larger than `1e-6` can stall the line
+search, because the slack of the constraint then moves the objective more than the expected decrease. At an
+infeasible design (`g > constraint_tol`: a start or a continuation jump) the step restores feasibility: the first
+trial with a finite objective is accepted, without the Armijo test.
 """
 struct SiMPL <: Optimizer
   linesearch::Symbol
@@ -40,20 +51,25 @@ struct SiMPL <: Optimizer
   max_growth::Float64
   root_tol::Float64
   max_root_iterations::Int
+  constraint_tol::Float64
+  max_corrections::Int
 end
 
 function SiMPL(; linesearch = :armijo, c1 = 1e-4, max_backtracks = 30, max_growth = 10.0, root_tol = 1e-12,
-               max_root_iterations = 100)
+               max_root_iterations = 100, constraint_tol = 1e-6, max_corrections = 8)
   linesearch in (:armijo, :bregman) || throw(ArgumentError("linesearch must be :armijo or :bregman"))
   0 < c1 < 1 || throw(ArgumentError("c1 must be in (0, 1)"))
   max_growth >= 1 || throw(ArgumentError("max_growth must be at least 1"))
-  SiMPL(linesearch, c1, max_backtracks, max_growth, root_tol, max_root_iterations)
+  0 < constraint_tol || throw(ArgumentError("constraint_tol must be positive"))
+  max_corrections >= 0 || throw(ArgumentError("max_corrections must be non-negative"))
+  SiMPL(linesearch, c1, max_backtracks, max_growth, root_tol, max_root_iterations, constraint_tol, max_corrections)
 end
 
 mutable struct SiMPLState{V}
   ψ::V; z::V; dF::V; g::V; ga::V          # current latent variable, design, derivative, gradient, M⁻¹a
   ψ_prev::V; z_prev::V; g_prev::V         # previous iterate (Barzilai–Borwein)
   ψ_trial::V; z_trial::V; work::V; one::V
+  a::V                   # derivative of a nonlinear constraint at z
   k::Int
   μ::Float64             # last multiplier of the linear constraint (starting guess of the next search)
   α_prev::Float64        # accepted step of the previous iteration
@@ -68,6 +84,7 @@ mutable struct SiMPLState{V}
   shrunk::Bool           # shrink! was called since the last step!
   can_rollback::Bool
   retry::Bool            # the next step repeats a rolled-back step
+  shift::Float64         # correction of the linearised nonlinear constraint, kept between steps
 end
 
 _σ(x) = inv(one(x) + exp(-x))
@@ -84,8 +101,8 @@ _to_design!(z, ψ, lb, ub) = (@. z = lb + (ub - lb) * _σ(ψ))
 
 function init(opt::SiMPL, z, oracle)
   v() = similar(z)
-  s = SiMPLState(v(), v(), v(), v(), v(), v(), v(), v(), v(), v(), v(), v(),
-                 0, 0.0, NaN, NaN, NaN, NaN, NaN, 1.0, true, false, false, false, false, false)
+  s = SiMPLState(v(), v(), v(), v(), v(), v(), v(), v(), v(), v(), v(), v(), v(),
+                 0, 0.0, NaN, NaN, NaN, NaN, NaN, 1.0, true, false, false, false, false, false, 0.0)
   fill!(s.one, 1)
   _sync!(s, z, oracle)
   s
@@ -97,7 +114,7 @@ function _sync!(s::SiMPLState, z, oracle)
   _to_design!(s.z, s.ψ, lb, ub)
   c = linear_constraint(oracle)
   if c === nothing
-    fill!(s.ga, 0)
+    fill!(s.ga, 0)   # a nonlinear constraint sets it at every step
   else
     (minimum(c[1]) >= 0 && maximum(c[1]) > 0) ||
       throw(ArgumentError("SiMPL needs a linear constraint with a ≥ 0, not all zero"))
@@ -117,6 +134,7 @@ function reset!(opt::SiMPL, s::SiMPLState)
   s.shrunk = false
   s.can_rollback = false
   s.retry = false
+  s.shift = 0.0
   s.resync = true   # the latent variable is rebuilt from z at the next step
   s
 end
@@ -215,6 +233,22 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
   end
   f = s.f
 
+  # nonlinear constraint: linearised at z (aᵀz ≤ Vlin, then corrected per trial)
+  nonlinear = c === nothing && has_constraint(oracle)
+  gk, Vlin, restoration = NaN, NaN, false
+  if nonlinear
+    gk = constraint(oracle, s.z)
+    isfinite(gk) || return StepInfo(false, f, NaN, NaN, 0.0, 0.0, Inf, nev, NaN)
+    constraint_gradient!(s.a, oracle, s.z)
+    amax = maximum(s.a)
+    amax > 0 || throw(ArgumentError("SiMPL: the derivative of the constraint has no positive entry"))
+    @. s.a = max(s.a, 1e-12 * amax)
+    riesz!(s.ga, oracle, s.a)
+    Vlin = dot(s.a, s.z) - gk
+    restoration = gk > opt.constraint_tol   # infeasible design (start, continuation jump): feasibility first
+  end
+  violation_k = nonlinear ? max(0.0, gk) : _violation(c, s.z)
+
   if s.retry
     guess = s.α_guess
   elseif s.k == 0 || !isfinite(s.α_prev)
@@ -233,13 +267,16 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
   α = guess * s.scale
 
   slack = 10 * eps(Float64) * abs(f)
-  μ = c === nothing ? NaN : 0.0
+  μ = (c === nothing && !nonlinear) ? NaN : 0.0
+  G = gk
   accepted = false
   f_new = NaN
   kkt = NaN
   change = 0.0
   for j in 0:opt.max_backtracks
-    if c === nothing
+    if nonlinear
+      μ, G = _corrected_shift!(opt, s, oracle, Vlin, α, lb, ub)
+    elseif c === nothing
       _set_trial!(s, α, 0.0, lb, ub)
     else
       μ = _volume_shift!(opt, s, c[1], c[2], α, lb, ub)
@@ -252,12 +289,16 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
     @. s.work = s.z_trial - s.z
     change = maximum(abs, s.work)
     if change == 0   # nothing left to move at this precision
-      return StepInfo(true, f, f, kkt, 0.0, α, _violation(c, s.z), nev, μ)
+      return StepInfo(true, f, f, kkt, 0.0, α, violation_k, nev, μ)
     end
     decrease = dot(s.dF, s.work)
     f_new = objective(oracle, s.z_trial)
     nev += 1
-    if isfinite(f_new)
+    if isfinite(f_new) && restoration && isfinite(G)
+      accepted = true   # restoration step: the first trial with a finite objective
+      break
+    end
+    if isfinite(f_new) && (!nonlinear || isfinite(G))
       bound = if opt.linesearch === :armijo
         f + opt.c1 * decrease
       else
@@ -269,10 +310,11 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
       end
     end
     α /= 2
+    nonlinear && (s.shift /= 4)   # the linearisation error, and so the shift, falls with α²
   end
 
   # the forward state of the oracle is now at a rejected trial; f, dF and g at z remain valid
-  accepted || return StepInfo(false, f, f_new, kkt, 0.0, α, _violation(c, s.z), nev, μ)
+  accepted || return StepInfo(false, f, f_new, kkt, 0.0, α, violation_k, nev, μ)
 
   s.f_back, s.α_prev_back = f, s.α_prev
   s.ψ_prev, s.ψ, s.ψ_trial = s.ψ, s.ψ_trial, s.ψ_prev
@@ -287,7 +329,31 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
   s.retry = false
 
   copyto!(z, s.z)
-  StepInfo(true, f, f_new, kkt, change, α, _violation(c, s.z), nev, μ)
+  StepInfo(true, f, f_new, kkt, change, α, nonlinear ? max(0.0, G) : _violation(c, s.z), nev, μ)
+end
+
+# Multiplier of the linearised constraint aᵀz ≤ Vlin - s for the step α, with the shift s corrected until the true
+# constraint at the trial satisfies -tol ≤ g ≤ 0 (or holds with μ = 0), aiming at -tol/2. Returns (μ, g(z_trial)) and
+# leaves ψ_trial and z_trial at the returned multiplier.
+function _corrected_shift!(opt, s, oracle, Vlin, α, lb, ub)
+  tol = opt.constraint_tol
+  sh = s.shift
+  μ = _volume_shift!(opt, s, s.a, Vlin - sh, α, lb, ub)
+  G = constraint(oracle, s.z_trial)
+  lo, hi, prev = (-Inf, NaN), (Inf, NaN), (NaN, NaN)
+  for _ in 1:opt.max_corrections
+    isfinite(G) || break
+    (G <= 0 && (μ == 0 || G >= -tol)) && break
+    t = G + tol / 2
+    G > 0 ? (lo = (sh, t)) : (hi = (sh, t))
+    sn = _next_shift(sh, t, lo, hi, prev)
+    prev = (sh, t)
+    sh = sn
+    μ = _volume_shift!(opt, s, s.a, Vlin - sh, α, lb, ub)
+    G = constraint(oracle, s.z_trial)
+  end
+  s.shift = isfinite(sh) ? sh : 0.0
+  μ, G
 end
 
 # (1, D(z_trial, z))_M for the scaled Fermi–Dirac entropy; uses the latent variables for stability

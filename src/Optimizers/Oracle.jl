@@ -9,8 +9,13 @@ What an optimiser may ask about the problem. Methods to implement for a subtype 
   only call it for the `z` of their last call to `objective` on this oracle, so an implementation can reuse the
   forward state of that call and only pay for the adjoint.
 - `bounds(o::O)`: `(lb, ub)`, the bounds of `z` (scalars or vectors of the length of `z`), with `lb < ub`.
-- `linear_constraint(o::O)`: `(a, V)` for the constraint `aᵀz ≤ V` (`a ≥ 0` is a dual vector, for example the
-  derivative of the volume), or `nothing` if there is none.
+- The constraint `g(z) ≤ 0`, if there is one (at most one), in either of two ways:
+  - linear: `linear_constraint(o::O)` returns `(a, V)` for `aᵀz ≤ V` (`a ≥ 0` is a dual vector, for example the
+    derivative of the volume); the optimisers then use `a` and `V` exactly;
+  - nonlinear: `linear_constraint(o::O)` returns `nothing` and the oracle implements `has_constraint(o::O) = true`,
+    `constraint(o::O, z)` (the value of `g`, scaled, `≤ 0` when feasible; `NaN` or `Inf` if it cannot be computed)
+    and `constraint_gradient!(dG, o::O, z)` (`∂g/∂z` at the `z` of the last call to `constraint`).
+  For a linear constraint the last three have defaults built from `(a, V)`.
 
 Methods with a default (Euclidean metric); they are not exported, extend them as `Optimizers.inner`:
 
@@ -51,6 +56,37 @@ Linear constraint `aᵀz ≤ V`. See [`AbstractOracle`](@ref).
 function linear_constraint end
 
 """
+    has_constraint(oracle) -> Bool
+
+Whether the problem has a constraint. Default: `linear_constraint(oracle) !== nothing`. See [`AbstractOracle`](@ref).
+"""
+has_constraint(o::AbstractOracle) = linear_constraint(o) !== nothing
+
+"""
+    constraint(oracle, z) -> Float64
+
+Value of the constraint `g(z)` (`≤ 0` when feasible). Default, for a linear constraint: `aᵀz - V`. See
+[`AbstractOracle`](@ref).
+"""
+function constraint(o::AbstractOracle, z)
+  c = linear_constraint(o)
+  c === nothing && throw(ArgumentError("constraint: the oracle has no linear constraint; implement constraint for it"))
+  dot(c[1], z) - c[2]
+end
+
+"""
+    constraint_gradient!(dG, oracle, z) -> dG
+
+Writes `∂g/∂z` into `dG`, for the `z` of the last call to [`constraint`](@ref). Default, for a linear constraint:
+`a`. See [`AbstractOracle`](@ref).
+"""
+function constraint_gradient!(dG, o::AbstractOracle, z)
+  c = linear_constraint(o)
+  c === nothing && throw(ArgumentError("constraint_gradient!: the oracle has no linear constraint; implement it"))
+  copyto!(dG, c[1])
+end
+
+"""
     inner(oracle, x, y)
 
 Inner product of two primal vectors in the metric of the design. Default: `dot(x, y)`. Not exported (Gridap exports
@@ -72,7 +108,8 @@ Oracle built from plain functions, for analytical tests and small problems.
 
 - `f(z)`: objective value.
 - `df!(dF, z)`: writes `∂F/∂z` into `dF`.
-- `constraint = (a, V)`: linear constraint `aᵀz ≤ V`.
+- `constraint = (a, V)` with a vector `a`: linear constraint `aᵀz ≤ V`.
+- `constraint = (g, dg!)` with functions: nonlinear constraint `g(z) ≤ 0`, `dg!(dG, z)` writes `∂g/∂z`.
 - `metric = m`: diagonal metric, `inner(x, y) = Σ mᵢ xᵢ yᵢ` and `riesz!(g, dF) = dF ./ m` (cell volumes for P0
   designs, lumped mass for P1 designs). `nothing` is the Euclidean metric.
 
@@ -90,6 +127,8 @@ mutable struct FunctionOracle{F,G,L,U,C,M} <: AbstractOracle
 end
 
 function FunctionOracle(f, df!; lb = 0.0, ub = 1.0, constraint = nothing, metric = nothing)
+  constraint === nothing || constraint isa Tuple{AbstractVector,Real} || constraint isa Tuple{Function,Function} ||
+    throw(ArgumentError("FunctionOracle: constraint must be (a, V) or (g, dg!)"))
   FunctionOracle(f, df!, lb, ub, constraint, metric, 0, 0)
 end
 
@@ -105,7 +144,11 @@ function gradient!(dF, o::FunctionOracle, z)
 end
 
 bounds(o::FunctionOracle) = (o.lb, o.ub)
-linear_constraint(o::FunctionOracle) = o.constraint
+linear_constraint(o::FunctionOracle) = o.constraint isa Tuple{AbstractVector,Real} ? o.constraint : nothing
+has_constraint(o::FunctionOracle) = o.constraint !== nothing
+constraint(o::FunctionOracle{F,G,L,U,<:Tuple{Function,Function}}, z) where {F,G,L,U} = o.constraint[1](z)
+constraint_gradient!(dG, o::FunctionOracle{F,G,L,U,<:Tuple{Function,Function}}, z) where {F,G,L,U} =
+  (o.constraint[2](dG, z); dG)
 
 inner(o::FunctionOracle{F,G,L,U,C,Nothing}, x, y) where {F,G,L,U,C} = dot(x, y)
 inner(o::FunctionOracle, x, y) = sum(i -> o.metric[i] * x[i] * y[i], eachindex(x, y, o.metric))

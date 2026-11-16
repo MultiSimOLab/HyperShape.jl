@@ -34,7 +34,7 @@ OptVariables z ─► DesignFields x ─► PhysicalFields θ ─► weak forms 
 | `OptVariables`, `DesignFields`, `PhysicalFields` | Three linked levels of variables: what the optimiser sees, the design fields (nodal or cell-wise), and the physical fields read by the weak forms |
 | `StateOperator`, `AdjointOperator` | Forward and adjoint states over HyperFEM computational models (default `solve` for linear models) |
 | `LinearOperator` | Auxiliary linear solves (filter, reaction–diffusion step, velocity extension) |
-| `Functional` | Objective and constraints, with their derivative with respect to the physical fields |
+| `Functional`, `Volume` | Objective and constraints, with their derivative with respect to the physical fields; `Volume(θ, dΩ; max)` for the volume of the physical density |
 | Methods | `SIMP`, `ReactionDiffusion`, `LevelSet`: a common loop where only the step differs |
 | `Optimizers` | Optimisers independent of finite elements (optimality criteria, SiMPL, …) |
 | `OptPostProcessor` | User-written output at each design iteration |
