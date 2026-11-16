@@ -17,5 +17,6 @@ using Test
     include("Variables/runtests.jl")
     include("Functionals/runtests.jl")
     include("Checks/runtests.jl")
+    include("Methods/runtests.jl")
 
 end

@@ -28,6 +28,7 @@ end
 
 mutable struct OCState{V}
   move::Float64
+  shrunk::Bool   # shrink! was called since the last step!
   dF::V
   z_old::V
 end
@@ -36,11 +37,11 @@ function init(opt::OC, z, oracle)
   c = linear_constraint(oracle)
   c === nothing && throw(ArgumentError("OC needs a linear constraint aᵀz ≤ V"))
   minimum(c[1]) > 0 || throw(ArgumentError("OC needs a linear constraint with a > 0"))
-  OCState(opt.move, similar(z), similar(z))
+  OCState(opt.move, false, similar(z), similar(z))
 end
 
-reset!(opt::OC, s::OCState) = (s.move = opt.move; s)
-shrink!(opt::OC, s::OCState, factor) = (s.move *= factor; s)
+reset!(opt::OC, s::OCState) = (s.move = opt.move; s.shrunk = false; s)
+shrink!(opt::OC, s::OCState, factor) = (s.move *= factor; s.shrunk = true; s)
 
 _oc_power(x, η) = η == 0.5 ? sqrt(x) : x^η
 
@@ -51,8 +52,10 @@ function _oc_update!(z, zo, B, a, lb, ub, κ, m)
 end
 
 function step!(opt::OC, s::OCState, z, oracle, ctx)
+  s.shrunk || (s.move = opt.move)   # the previous step stood: the reduction is dropped
+  s.shrunk = false
   f = objective(oracle, z)
-  isfinite(f) || return StepInfo(false, f, NaN, NaN, 0.0, s.move, 0.0, 1)
+  isfinite(f) || return StepInfo(false, f, NaN, NaN, 0.0, s.move, 0.0, 1, NaN)
   gradient!(s.dF, oracle, z)
   a, V = linear_constraint(oracle)
   lb, ub = bounds(oracle)
@@ -69,6 +72,7 @@ function step!(opt::OC, s::OCState, z, oracle, ctx)
     n += 1
   end
   n = 0
+  λ = λ2
   while (λ2 - λ1) / (λ1 + λ2) > opt.bisection_tol && n < opt.max_bisections
     λ = (λ1 + λ2) / 2
     vol = _oc_update!(z, zo, B, a, lb, ub, λ^(-η), m)   # as in top88, z keeps the update of the last midpoint
@@ -78,5 +82,5 @@ function step!(opt::OC, s::OCState, z, oracle, ctx)
 
   @. B = z - zo   # B is free now: use it as work vector
   change = maximum(abs, B)
-  StepInfo(true, f, NaN, NaN, change, m, max(0.0, vol - V), 1)
+  StepInfo(true, f, NaN, NaN, change, m, max(0.0, vol - V), 1, λ)
 end

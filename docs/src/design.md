@@ -136,17 +136,57 @@ leads to cannot be checked.
 
 ## Methods
 
-A method is an operator `z ↦ z⁺` over the functionals. All methods share one loop (update the variables, evaluate,
-differentiate, step, accept or reject, continuation and stopping); only the step is specific.
+A method is an operator `z ↦ z⁺` over the functionals. All methods share one loop (evaluate, differentiate, step,
+accept or reject, continuation, stopping, checkpoint); only the step is specific.
 
 | Method | Design field | Step |
 |---|---|---|
-| `SIMP(optimizer)` | density in [0, 1] | any `Optimizer` |
-| `ReactionDiffusion` | level set in [−1, 1] | one linear solve, then clipping |
-| `LevelSet` | signed distance | velocity extension, advection, reinitialisation |
+| `SIMP(optimizer; metric)` | density in [0, 1] | any `Optimizer` (OC, SiMPL) |
+| `ReactionDiffusion` (phase 2) | level set in [−1, 1] | one linear solve, then clipping |
+| `LevelSet` (phase 2) | signed distance | velocity extension, advection, reinitialisation |
 
-If the forward problem does not converge for a design, the step is rejected and shortened; after a maximum number of
-attempts the optimisation stops with a checkpoint.
+Implemented: `Optimization` and `SIMP` with the common loop.
+
+```julia
+θv  = PhysicalFields(x; ρ = Identity())                    # unprojected density: the volume is linear in z
+Vol = Functional(θ -> sum(∫(θ.ρ)dΩ) - Vmax, θ -> (δ -> ∫(δ)dΩ), θv; scale = Vmax)   # g(z) ≤ 0
+problem = Optimization(z; objective = J, linear_constraints = (Vol,))
+result  = solve!(problem, SIMP(SiMPL(); metric = LumpedMass(dΩ));
+                 maxiter = 300, on_failure = RejectStep(shrink = 0.5, max = 5),
+                 stop = StopCriteria(kkt = 1e-5),
+                 schedule = Continuation(β = H => [1, 2, 4, 8, 16, 32]; every = 40),
+                 checkpoint = Checkpoint("results/ckpt"; every = 10),
+                 post = ctx -> nothing)
+result.status, result.history.objective
+```
+
+The linear constraint bounds the volume of the design `x`. The Helmholtz filter preserves it, the Heaviside projection
+does not, so with projection the physical volume can exceed `Vmax` (0.64–0.68 instead of 0.5 on a 150×50 half MBB
+beam). A constraint on the physical volume is nonlinear in `z` and comes with the next step of the plan.
+
+- **Constraint:** in phase 0, at most one linear constraint, a design-only functional. Its vector `a` is computed once
+  and its linearity in z is checked at the start; a projected volume is a nonlinear constraint (phase 1).
+- **Metric:** mandatory; `LumpedMass(dΩ)` (cell volumes for P0, lumped mass for P1) or `Euclidean()`.
+- **Rejection:** if the forward problem does not converge at the new design, the loop restores the previous one,
+  calls `shrink!` and tries again, at most `max` times; then it throws `OptimizationFailure` (checkpoint written).
+  SiMPL handles failures inside its line search; if it finds no step, the current continuation stage ends (in the last stage, or without continuation, the result is `:stalled`).
+- **Continuation:** explicit list of values per stage, a jump every `every` iterations or when the stopping criteria
+  are met; the optimiser forgets its memory at each jump; the optimisation only stops in the last stage.
+- **Stopping:** `maxiter` is mandatory; `StopCriteria(change, kkt, objective)` are off unless given.
+- **Context:** `OptContext` (iteration, attempt, trial, phase, continuation values) reaches every solve function of
+  the user; phases `:setup`, `:check`, `:optimization` and `:linesearch`.
+- **Checkpoint:** `checkpoint.toml`, `z_<k>.bin` and `history_<k>.csv` in a folder; resume with
+  `solve!(…; resume = load_checkpoint(path))`. The optimiser memory is not saved (OC resumes exactly).
+- **Start:** a starting design that violates the linear constraint is scaled towards the lower bound on the entries
+  the constraint acts on; the factor is in `result.start_scaling`. A resumed design is not touched.
+- **Screen output:** `verbose = 2` (default) prints a banner, a row per iteration (objective, its relative change,
+  constraint, optimality measure, change, step, multiplier, continued parameters, solves, time), the events and a
+  closing line with the solves of the call; `1` omits the rows; `0` prints nothing. The output goes to `io`.
+- **Failures:** `OptimizationFailure` carries the message, the history up to the last accepted iteration and its
+  number; the history also records the multiplier of the linear constraint.
+- **Solves per iteration:** OC one filter, one forward, one adjoint (none if self-adjoint) and one transposed filter;
+  SiMPL one filter and one forward per line-search trial (usually one), one adjoint and one transposed filter. After
+  a rejected step the previous design is not solved again.
 
 ## Optimisers
 

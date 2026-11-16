@@ -26,7 +26,7 @@ function DesignFields(z::OptVariables; kwargs...)
   spaces = Tuple(b.space for b in z.blocks)
   fields = NamedTuple{z.names}(Tuple(FEFunction(b.space, copy(b.init)) for b in z.blocks))
   x = DesignFields(z, z.names, fields, spaces, Ref(-1), Ref(0))
-  update_fields!(x, nothing)
+  update_fields!(x, OptContext(:setup))
   x
 end
 

@@ -83,3 +83,4 @@ end
 refresh!(S::StateOperator, ctx) = (apply!(S, ctx); S)
 
 invalidate!(S::StateOperator) = (S.solved = false; S)
+num_solves(S::StateOperator) = S.version

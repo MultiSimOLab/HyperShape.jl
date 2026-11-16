@@ -5,7 +5,7 @@ Physical fields θ, the ones the weak forms read. Each one comes from one design
 [`FieldMap`](@ref), possibly composed with `∘`): `ρ = map` uses the design field `ρ`; `E = :ρ => map` uses the
 design field `ρ` under another name, so several physical fields can come from the same design field (their
 sensitivities are added). Every design field must be used. The constructor brings the fields up to date once,
-calling the solve functions of the operators with `ctx = nothing`. Read a field as `θ.ρ`: a fixed object (an
+calling the solve functions of the operators with `ctx = OptContext(:setup)`. Read a field as `θ.ρ`: a fixed object (an
 `FEFunction` or a `CellField`) updated in place, so the weak forms can capture it.
 
 `backend` (a reserved name: no physical field can be called `backend`) selects who assembles the sensitivities on
@@ -58,7 +58,7 @@ function PhysicalFields(x::DesignFields; backend = :compiled, kwargs...)
   gtmp = [zeros(num_free_dofs(V)) for V in spaces]
   assems = Tuple(form_assembler(backend, TrialFESpace(V), V) for V in spaces)
   θ = PhysicalFields(x, names, Tuple(sources), chains, fields, gx, gtmp, assems, Ref(-1), fill(-1, length(chains)), Ref(0))
-  update_fields!(θ, nothing)
+  update_fields!(θ, OptContext(:setup))
   θ
 end
 
