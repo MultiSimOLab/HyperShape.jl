@@ -87,7 +87,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
       metric = opt isa OC ? Euclidean() : LumpedMass(q.dΩ)
       seen = Tuple[]
       r = solve!(q.problem, SIMP(opt; metric); maxiter = 15, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3),
-                 post = ctx -> push!(seen, (ctx.iteration, ctx.attempt, ctx.phase)), stop = nothing)
+                 post = OptPostProcessor((_, ctx) -> push!(seen, (ctx.iteration, ctx.attempt, ctx.phase)); every = 1, initial = false), stop = nothing)
       h = r.history
       @test r.status === :maxiter && r.iterations == 15 && length(h) == 15
       @test h.objective[end] < 0.9 * h.objective[1]
@@ -134,7 +134,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     accepted = Vector{Float64}[]
     @test_throws OptimizationFailure solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 6,
                                             verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 2),
-                                            post = ctx -> push!(accepted, copy(get_values(q.z))), stop = nothing)
+                                            post = OptPostProcessor((_, ctx) -> push!(accepted, copy(get_values(q.z))); every = 1, initial = false), stop = nothing)
     @test get_values(q.z) == last(accepted)
     # the forward problem fails at the start
     q = compliance_problem(; solve_flag = () -> false)
@@ -260,7 +260,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     sign = Ref(1.0)
     q = compliance_problem(; sign)
     r = solve!(q.problem, SIMP(SiMPL(max_backtracks = 1); metric = LumpedMass(q.dΩ)); maxiter = 10,
-               verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), post = ctx -> (ctx.iteration == 2 && (sign[] = -1.0)), stop = nothing)
+               verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), post = OptPostProcessor((_, ctx) -> (ctx.iteration == 2 && (sign[] = -1.0)); every = 1, initial = false), stop = nothing)
     @test r.status === :stalled && r.iterations == 2
     @test get_values(q.z) == r.state.z
     @test get_free_dof_values(q.x.ρ) == get_values(q.z)
@@ -274,7 +274,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     accepted = Vector{Float64}[]
     err = try
       solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 6, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 2),
-             checkpoint = Checkpoint(dir; every = 10), post = ctx -> push!(accepted, copy(get_values(q.z))), stop = nothing)
+             checkpoint = Checkpoint(dir; every = 10), post = OptPostProcessor((_, ctx) -> push!(accepted, copy(get_values(q.z))); every = 1, initial = false), stop = nothing)
       nothing
     catch e
       e
@@ -414,7 +414,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     q = compliance_problem(; sign)
     r = solve!(q.problem, SIMP(SiMPL(max_backtracks = 1); metric = LumpedMass(q.dΩ)); maxiter = 10,
                schedule = Continuation(β = q.H => [1.0, 2.0]; every = 5), verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3),
-               post = ctx -> (ctx.iteration == 2 && (sign[] = -1.0)), stop = nothing)
+               post = OptPostProcessor((_, ctx) -> (ctx.iteration == 2 && (sign[] = -1.0)); every = 1, initial = false), stop = nothing)
     @test r.status === :stalled && r.iterations == 2 && q.H.β == 2.0
     # an infeasible start is scaled towards the lower bound and SiMPL runs
     q = compliance_problem(; init = 0.6)

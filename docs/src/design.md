@@ -169,7 +169,8 @@ result  = solve!(problem, SIMP(SiMPL(); metric = LumpedMass(dΩ));
                  maxiter = 300, stop = StopCriteria(kkt = 1e-5),
                  schedule = Continuation(β = H => [1, 2, 4, 8, 16, 32]; every = 40),
                  checkpoint = Checkpoint("results/ckpt"; every = 10),
-                 post = ctx -> nothing)
+                 post = OptPostProcessor((post, ctx) -> write_step(post, Ω, "rho" => θ.ρ); every = 10,
+                                         filepath = "results/opt"))
 result.status, result.history.objective
 ```
 
@@ -254,9 +255,27 @@ end
 
 ## Post-processing
 
-`OptPostProcessor(problem, driver; every, filepath)` calls the user-written `driver(post, ctx)` every `every` design
-iterations, following the pattern of HyperFEM's `PostProcessor`. The user decides which fields are written and on
-which triangulation, including domains larger than the design region.
+`OptPostProcessor(driver; every, filepath)` calls the user-written `driver(post, ctx)` at the starting design, every
+`every` accepted iterations, at the end and after a failure, following the pattern of HyperFEM's `PostProcessor`.
+It does not take the problem: `solve!` passes it (`post.problem`), so it can be built before or after it. The user
+decides which fields are written and on which triangulation; `extend(f, Ω; outside)` takes a field of the design
+zone to a larger domain with a fixed value outside.
+
+```julia
+post = OptPostProcessor(every = 10, filepath = "results/mbb") do post, ctx
+  write_step(post, Ω, "rho" => extend(θ.ρ, Ω; outside = 1.0), "u" => get_state(S))
+end
+```
+
+- `write_step` writes with `createvtk` (options such as `compress = true` pass through); any other file can be added
+  with `get_pvd(post)[ctx.iteration] = file`.
+- The `.pvd` collection (iteration as time) is written again after every entry, so ParaView can open it during the
+  run and it stays valid after an interruption; a resumed run keeps the entries up to its checkpoint.
+- `filepath/history.csv` holds the history of the run, written again at every call.
+- No extra solves: the forward solve of the starting design is the one of the first iteration, done earlier.
+
+Planned (`fast-output`): a writer with the mesh written once and the degrees of freedom written directly, VTKHDF,
+asynchronous writing, MPI and GPU (see HyperFEM issue #257).
 
 ## Defaults and how to replace them
 

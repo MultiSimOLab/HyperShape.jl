@@ -37,7 +37,7 @@ OptVariables z ─► DesignFields x ─► PhysicalFields θ ─► weak forms 
 | `Functional`, `Volume` | Objective and constraints, with their derivative with respect to the physical fields; `Volume(θ, dΩ; max_fraction)` for the volume of the physical density |
 | Methods | `SIMP`, `ReactionDiffusion`, `LevelSet`: a common loop where only the step differs |
 | `Optimizers` | Optimisers independent of finite elements (optimality criteria, SiMPL, …) |
-| `OptPostProcessor` | User-written output at each design iteration |
+| `OptPostProcessor`, `write_step`, `extend` | User-written output at each design iteration, with a ParaView collection readable during the run |
 
 See the documentation for the design in more detail.
 

@@ -266,6 +266,27 @@ function _atomic_write(f, file)
   mv(tmp, file; force = true)
 end
 
+# the history as CSV: the columns of OptHistory, then one per continued parameter
+function _write_history(io, hist::OptHistory)
+  println(io, join(vcat(String[String(c) for c in HISTORY_COLUMNS], String[String(c) for c in hist.names]), ","))
+  for j in 1:hist.n
+    row = Any[getfield(hist, f)[j] for f in HISTORY_COLUMNS]
+    append!(row, view(hist.continuation, :, j))
+    println(io, join(string.(row), ","))
+  end
+end
+
+# a call of the post-processor at the loop's design (synced if a trial or a constraint correction left other values)
+function _postprocess!(post::OptPostProcessor, oracle, hist)
+  ctx = oracle.ctx
+  get_values(oracle.z) == oracle.zk || _sync!(oracle)
+  set_context!(ctx, :phase, :optimization)
+  _post_call!(post, ctx)
+  post.filepath !== nothing && post.history &&
+    _atomic_write(io -> _write_history(io, hist), joinpath(post.filepath, "history.csv"))
+  nothing
+end
+
 # `state === nothing` (a failure): the memory of the optimiser is not saved, a resumed run starts from `init`
 function _write_checkpoint(c::Checkpoint, problem, opt, state, zk, hist, k, stage, stage_iters, cont_names)
   mkpath(c.path)
@@ -273,14 +294,7 @@ function _write_checkpoint(c::Checkpoint, problem, opt, state, zk, hist, k, stag
   _atomic_write(io -> write(io, zk), joinpath(c.path, zfile))
   mem = state === nothing ? nothing : memory(opt, state, zk)
   mem === nothing || _atomic_write(io -> write(io, mem), joinpath(c.path, mfile))
-  _atomic_write(joinpath(c.path, hfile)) do io
-    println(io, join(vcat(String[String(c) for c in HISTORY_COLUMNS], String[String(c) for c in cont_names]), ","))
-    for j in 1:hist.n
-      row = Any[getfield(hist, f)[j] for f in HISTORY_COLUMNS]
-      append!(row, hist.continuation[:, j])
-      println(io, join(string.(row), ","))
-    end
-  end
+  _atomic_write(io -> _write_history(io, hist), joinpath(c.path, hfile))
   meta = Dict{String,Any}(
     "format" => 4,
     "iteration" => k,
@@ -391,9 +405,10 @@ _stop_reason(::Nothing, info, hist, stage_start) = nothing
 Runs the optimisation from the current values of `z`. Mandatory: `maxiter` (total iterations, resumed ones included).
 Optional: `on_failure` ([`RejectStep`](@ref), default `RejectStep(shrink = 0.5, max = 5)`), `stop`
 ([`StopCriteria`](@ref); default [`default_stop`](@ref): range of the objective below 0.1 % over 10 iterations of
-the last stage; `stop = nothing` runs `maxiter` iterations), `schedule` ([`Continuation`](@ref)), `checkpoint` ([`Checkpoint`](@ref)), `post` (a function
-`post(ctx)` called after each accepted iteration, with the fields and the forward state at the accepted design; the
-adjoint state is still the one of the previous design) and
+the last stage; `stop = nothing` runs `maxiter` iterations), `schedule` ([`Continuation`](@ref)), `checkpoint` ([`Checkpoint`](@ref)), `post` (an
+[`OptPostProcessor`](@ref HyperShape.PostProcess.OptPostProcessor): its driver is called at the starting design, every
+`every` accepted iterations, at the end and after a failure, with the fields and the forward state at the accepted
+design; the adjoint state is still the one of the previous design) and
 `resume` (the result of [`load_checkpoint`](@ref)), `grey` (a [`Grey`](@ref) monitor: the measure of grey in the
 history, the table and the closing line), `verbose` and `io`. An `OC` whose `move` is continued by `schedule` gets
 its own `move` back when `solve!` returns or throws.
@@ -435,6 +450,8 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
   schedule === nothing || all(o -> !(o isa OC) || o === opt, schedule.objects) ||
     throw(ArgumentError("solve!: a Continuation of move must act on the OC given to SIMP"))
   checkpoint === nothing || checkpoint isa Checkpoint || throw(ArgumentError("solve!: checkpoint must be a Checkpoint"))
+  post === nothing || post isa OptPostProcessor ||
+    throw(ArgumentError("solve!: post must be an OptPostProcessor, for example OptPostProcessor((post, ctx) -> …; every = 1)"))
   maxiter >= 1 || throw(ArgumentError("solve!: maxiter must be at least 1"))
   pr = _Printer(io, verbose, schedule, grey !== nothing)
   # a nonlinear constraint is met to the tolerance of the optimiser: above it, the value is shown in red
@@ -496,12 +513,27 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
       _print_event(pr, "· the memory of the optimiser was not restored (checkpoint written by $(resume.optimizer))", :yellow)
     end
   end
+  if post !== nothing
+    _post_start!(post, problem, k0, resume !== nothing)
+    if post.initial && post.last != k0
+      # the forward solve of the first iteration, done now (the first step takes it from the value cache)
+      if isfinite(_sync!(oracle))
+        _postprocess!(post, oracle, hist)
+      else
+        _print_event(pr, "· the forward problem does not converge at the starting design: it is not post-processed", :yellow)
+      end
+    end
+  end
   fwd, adj, filters = ops
   run = _LoopState(k0, stage, stage_iters, hist.n - stage_iters, cstart, k0)   # what a failure needs
   status, reason = _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_buf, cont_names, maxiter,
                              on_failure, stop, schedule, checkpoint, post, grey, fwd, adj, filters, pr)
 
   f_final = _sync!(oracle)                     # fields and forward state at the final design
+  if post !== nothing && post.last != run.k && isfinite(f_final)
+    set_context!(ctx, :iteration, run.k)       # after a stall, the iteration tried was run.k + 1
+    _postprocess!(post, oracle, hist)
+  end
   _print_end(pr, status, reason, run.k, f_final, grey === nothing ? NaN : grey_value(grey))
   _print_summary(pr, map(_count, ops) .- cstart, run.k - k0)
   checkpoint === nothing ||
@@ -579,7 +611,7 @@ mutable struct _LoopState
   k0::Int                 # iterations done before the call (resume)
 end
 
-function _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint, pr, ops)
+function _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint, pr, ops, post)
   synced = try
     isfinite(_sync!(oracle))                   # fields and forward state at the last accepted design
   catch e
@@ -587,6 +619,15 @@ function _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint,
     false
   end
   synced || (msg *= " (the forward state could not be solved again at the last accepted design)")
+  if synced && post !== nothing && post.last != run.k
+    set_context!(problem.ctx, :iteration, run.k)
+    try
+      _postprocess!(post, oracle, hist)
+    catch e
+      e isa InterruptException && rethrow()
+      _print_event(pr, "✗ the post-processing of the last accepted design threw: " * first(sprint(showerror, e), 300), :red)
+    end
+  end
   _print_failure(pr, msg, run.k)
   _print_summary(pr, map(_count, ops) .- run.cstart, run.k - run.k0)
   checkpoint === nothing ||
@@ -596,7 +637,7 @@ end
 
 function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_buf, cont_names, maxiter, on_failure,
                    stop, schedule, checkpoint, post, grey, fwd, adj, filters, pr)
-  fail(msg) = _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint, pr, (fwd, adj, filters))
+  fail(msg) = _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint, pr, (fwd, adj, filters), post)
   while run.k < maxiter
     k = run.k + 1
     set_context!(ctx, :iteration, k)
@@ -672,7 +713,7 @@ function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_
                     c1[1] - c0[1], c1[2] - c0[2], c1[3] - c0[3], info.multiplier,
                     grey === nothing ? NaN : grey_value(grey)), cont_buf)
     _print_row(pr, hist)
-    post === nothing || post(ctx)
+    post !== nothing && _post_due(post, k) && _postprocess!(post, oracle, hist)
     r = _stop_reason(stop, info, hist, run.stage_start)
     # with a nonlinear constraint, convergence also needs the constraint met to the tolerance of the optimiser
     (r !== nothing && !_is_linear(oracle) && has_constraint(oracle) && info.violation > constraint_tol(opt)) && (r = nothing)
