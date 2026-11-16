@@ -84,6 +84,8 @@ function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, 
           " · maxiter $maxiter", resume === nothing ? "" : " · resumed at iteration $(resume.iteration)")
   println(p.io, "  on failure: reject step, shrink $(_g(on_failure.shrink)), at most $(on_failure.max) attempts",
           defaults.on_failure ? " (default)" : "")
+  opt isa OC && println(p.io, "  OC: move $(_g(opt.move)) · ", opt.adapt === nothing ? "fixed (top88)" :
+                        "adaptive per entry ×$(_g(opt.adapt[1]))/×$(_g(opt.adapt[2])), floor $(_g(opt.move_min))")
   _print_columns(p, schedule)
 end
 

@@ -391,6 +391,43 @@ end
     @test st.shift == 0.125
   end
 
+  @testset "OC: adaptive move limits per entry" begin
+    o = FunctionOracle(z -> sum(x -> abs2(x - 0.9), z) / 2, (d, z) -> (d .= z .- 0.9); constraint = (ones(4), 1.6))
+    opt = OC()
+    z = fill(0.4, 4)
+    s = init(opt, z, o)
+    @test s.m == fill(0.2, 4)
+    # last step +, +, -, 0 after a previous step +, -, -, +: the sign test
+    s.k = 1
+    s.dprev .= [1.0, 1.0, -1.0, 1.0]
+    s.z_old .= z .- [0.1, -0.1, -0.1, 0.0]
+    s.m .= [0.1, 0.1, 0.1, 0.1]
+    m = HyperShape.Optimizers._move_limits!(opt, s, z)
+    @test s.m ≈ [0.12, 0.07, 0.12, 0.1]
+    @test m == s.m                           # no shrink! factor
+    s.m .= [0.19, 0.0011, 0.1, 0.1]
+    s.dprev .= [1.0, -1.0, 0.0, 0.0]
+    s.z_old .= z .- [0.1, 0.1, 0.0, 0.0]
+    HyperShape.Optimizers._move_limits!(opt, s, z)
+    @test s.m ≈ [0.2, 0.001, 0.1, 0.1]       # ceiling and floor
+    shrink!(opt, s, 0.5)
+    s.k = 0                                  # no sign test: only the scaling
+    m = HyperShape.Optimizers._move_limits!(opt, s, z)
+    @test m ≈ [0.1, 0.0005, 0.05, 0.05] && s.m ≈ [0.2, 0.001, 0.1, 0.1]
+    reset!(opt, s)
+    @test s.m == fill(0.2, 4) && s.k == 0 && all(iszero, s.dprev)
+    # no allocations with adaptive limits; adapt = nothing keeps the scalar limit of top88
+    z = fill(0.4, 4)
+    s = init(opt, z, o)
+    step!(opt, s, z, o, nothing); step!(opt, s, z, o, nothing)
+    @test step_allocations(opt, s, z, o) == 0
+    o2 = OC(adapt = nothing)
+    z2 = fill(0.4, 4)
+    s2 = init(o2, z2, o)
+    @test step!(o2, s2, z2, o, nothing).step == 0.2
+    @test set_move!(o2, 0.1).move == 0.1
+  end
+
   @testset "Nonlinear constraint: review cases" begin
     lb = 1e-3
     F(z) = sum(c ./ z)

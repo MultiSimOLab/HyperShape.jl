@@ -83,7 +83,9 @@ acceptable step; with `close_early = true`, also when the [`StopCriteria`](@ref)
 the last stage: early stages can look converged on a grey plateau before the topology forms). The optimisation can
 only stop in the last stage. At each jump the memory of the
 optimiser is forgotten (`reset!`), which costs one more forward solve. All value lists have the same length (the
-number of stages). Supported objects: [`Heaviside`](@ref) (β, through `set_beta!`).
+number of stages). Supported objects: [`Heaviside`](@ref) (β, through `set_beta!`) and `OC` (its move limit, through
+`set_move!`: `Continuation(β = H => [1, 2, 4, 8, 16], move = oc => [0.2, 0.2, 0.1, 0.05, 0.025]; every = 50)`, the
+same `oc` given to `SIMP`).
 """
 struct Continuation{N,O<:Tuple,V<:Tuple}
   names::NTuple{N,Symbol}
@@ -119,6 +121,8 @@ end
 
 _set_parameter!(h::Heaviside, v) = set_beta!(h, v)
 _valid_parameter(h::Heaviside, v) = isfinite(v) && v > 0
+_set_parameter!(o::OC, v) = set_move!(o, v)
+_valid_parameter(o::OC, v) = isfinite(v) && v > 0
 
 function _apply_stage!(c::Continuation, s, buf)
   foreach((o, v) -> _set_parameter!(o, v[s]), c.objects, c.values)
@@ -298,8 +302,9 @@ end
 
 Reads a checkpoint written by [`Checkpoint`](@ref): `z`, `iteration`, `stage`, `stage_iterations`, `scales`,
 `blocks`, `continuation` (names) and `history` (named tuple of columns). Pass it to `solve!(…; resume = …)`. The
-memory of the optimiser is not saved: OC resumes exactly (with a nonlinear constraint, up to the correction shift,
-which restarts at zero), SiMPL restarts its step size.
+memory of the optimiser is not saved: OC with `adapt = nothing` resumes exactly (with a nonlinear constraint, up to
+the correction shift, which restarts at zero); with adaptive move limits they restart at `move`; SiMPL restarts its
+step size.
 """
 function load_checkpoint(path::AbstractString)
   meta = TOML.parsefile(joinpath(path, "checkpoint.toml"))

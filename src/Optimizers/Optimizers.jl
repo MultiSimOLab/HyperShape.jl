@@ -22,7 +22,7 @@ using LinearAlgebra
 export Optimizer, StepInfo
 export AbstractOracle, FunctionOracle
 export objective, gradient!, bounds, linear_constraint, has_constraint, constraint, constraint_gradient!, riesz!
-export OC, SiMPL, constraint_tol
+export OC, SiMPL, constraint_tol, set_move!
 
 include("Oracle.jl")
 include("Interface.jl")

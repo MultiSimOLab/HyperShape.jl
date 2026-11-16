@@ -147,6 +147,30 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test err.iterations == 0 && isempty(err.history.iteration) && size(err.history.continuation, 2) == 0
   end
 
+  @testset "OC: move limit per continuation stage, banner" begin
+    for adapt in (nothing, (0.7, 1.2))
+      q = compliance_problem()
+      oc = OC(; adapt)
+      io = IOBuffer()
+      r = solve!(q.problem, SIMP(oc); maxiter = 6, stop = nothing, io, verbose = 1,
+                 schedule = Continuation(β = q.H => [1.0, 2.0, 4.0], move = oc => [0.2, 0.1, 0.05]; every = 2))
+      st = r.history.step
+      if adapt === nothing
+        @test st == [0.2, 0.2, 0.1, 0.1, 0.05, 0.05]
+      else
+        @test all(st[1:2] .<= 0.2 + 1e-12) && all(st[3:4] .<= 0.1 + 1e-12) && all(st[5:6] .<= 0.05 + 1e-12)
+        @test st[3] ≈ 0.1 && st[5] ≈ 0.05      # restored to the new ceiling at the jump
+      end
+      @test oc.move == 0.05
+      out = String(take!(io))
+      @test occursin(adapt === nothing ? "OC: move 0.2 · fixed (top88)" : "adaptive per entry ×0.7/×1.2, floor 0.001", out)
+    end
+    @test_throws ArgumentError Continuation(move = OC() => [0.2, -0.1]; every = 2)
+    @test_throws ArgumentError (OC().move = 0.1)
+    @test_throws ArgumentError OC(adapt = (1.2, 0.7))
+    @test_throws ArgumentError OC(move_min = 0.5)
+  end
+
   @testset "OC: the move limit is restored after a standing step" begin
     o = FunctionOracle(z -> sum(abs2, z .- 0.9) / 2, (d, z) -> (d .= z .- 0.9); constraint = (ones(4), 1.6))
     opt = OC()
@@ -189,7 +213,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
 
   @testset "Checkpoint and resume" begin
     dir = mktempdir()
-    run(q, maxiter; kwargs...) = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), kwargs..., stop = nothing)
+    run(q, maxiter; kwargs...) = solve!(q.problem, SIMP(OC(adapt = nothing); metric = Euclidean()); maxiter, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), kwargs..., stop = nothing)
     qa = compliance_problem()
     ra = run(qa, 8)
     qb = compliance_problem()
@@ -338,7 +362,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     # a resumed run stops where the uninterrupted one does
     dir = mktempdir()
     stopc = StopCriteria(objective = 2e-2, window = 2)
-    runs(q, maxiter; kwargs...) = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter, stop = stopc,
+    runs(q, maxiter; kwargs...) = solve!(q.problem, SIMP(OC(adapt = nothing); metric = Euclidean()); maxiter, stop = stopc,
                                          verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), kwargs...)
     ra = runs(compliance_problem(), 40)
     @test ra.status === :converged
@@ -482,7 +506,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     rc = run(qc, 8; resume = load_checkpoint(dir))
     @test rc.history.iteration == 1:8 && rc.history.objective[1:4] == ra.history.objective[1:4]
     @test abs(rc.history.constraint[end]) <= 1e-4                     # the shift restarts at zero, the constraint holds
-    @test rc.history.objective[end] ≈ ra.history.objective[end] rtol = 1e-3
+    @test rc.history.objective[end] ≈ ra.history.objective[end] rtol = 1e-2   # the adaptive limits restart
   end
 
   @testset "Volume of the projected density: Taylor test (P1)" begin

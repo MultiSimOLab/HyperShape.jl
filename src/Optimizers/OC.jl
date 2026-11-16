@@ -1,6 +1,6 @@
 """
     OC(; move = 0.2, damping = 0.5, bisection_tol = 1e-3, max_bisections = 200, constraint_tol = 1e-4,
-         max_corrections = 8)
+         max_corrections = 8, adapt = (0.7, 1.2), move_min = 1e-3)
 
 Optimality criteria update of Andreassen et al. (top88, 2011) for one constraint `g(z) ≤ 0`:
 
@@ -19,47 +19,118 @@ with `m = move * (ub - lb)` and `λ > 0` found by bisection on `aᵀz = V`, star
   kept for the next step (`reset!` clears it). The bisection is solved to `min(bisection_tol, 1e-7)` so that the
   corrections see a smooth function. If the move limit does not allow meeting the constraint, the step is still taken.
 
+**Move limits.** With `adapt = (dec, inc)` (default) each entry has its own move limit `mᵢ`: multiplied by `dec`
+when its last step changed sign with respect to the one before, by `inc` when it kept it, and kept in
+`[move_min, move]` (as the move limits of MMA, Svanberg 1987). It stops the oscillation of OC at the interface when a
+Heaviside projection is sharp (a step of `move` is wider than the projection band, about `1/β`). `reset!` (a
+continuation jump) restores every `mᵢ` to `move`; `shrink!` scales them all. `adapt = nothing` gives the scalar move
+limit of top88. `move` can follow a continuation, `Continuation(β = H => […], move = oc => […])` (see
+[`set_move!`](@ref)); with `adapt` it is the ceiling of the limits. The `step` of the [`StepInfo`](@ref) is the mean
+of the limits.
+
 The objective is evaluated once per step and the new design is not evaluated (`f_new = NaN`, `kkt = NaN`). If the
 move limit does not allow meeting the constraint (infeasible start), the step is still taken and `violation > 0` in
 the [`StepInfo`](@ref).
 """
-struct OC <: Optimizer
+mutable struct OC <: Optimizer
   move::Float64
   damping::Float64
   bisection_tol::Float64
   max_bisections::Int
   constraint_tol::Float64
   max_corrections::Int
+  adapt::Union{Nothing,Tuple{Float64,Float64}}
+  move_min::Float64
 end
 
 function OC(; move = 0.2, damping = 0.5, bisection_tol = 1e-3, max_bisections = 200, constraint_tol = 1e-4,
-            max_corrections = 8)
+            max_corrections = 8, adapt = (0.7, 1.2), move_min = 1e-3)
   0 < move || throw(ArgumentError("move must be positive"))
   0 < damping || throw(ArgumentError("damping must be positive"))
   0 < constraint_tol || throw(ArgumentError("constraint_tol must be positive"))
   max_corrections >= 0 || throw(ArgumentError("max_corrections must be non-negative"))
-  OC(move, damping, bisection_tol, max_bisections, constraint_tol, max_corrections)
+  if adapt !== nothing
+    (length(adapt) == 2 && 0 < adapt[1] < 1 <= adapt[2]) ||
+      throw(ArgumentError("adapt must be (decrease, increase) with 0 < decrease < 1 ≤ increase, or nothing"))
+    0 < move_min <= move || throw(ArgumentError("move_min must be in (0, move]"))
+  end
+  OC(move, damping, bisection_tol, max_bisections, constraint_tol, max_corrections,
+     adapt === nothing ? nothing : (Float64(adapt[1]), Float64(adapt[2])), Float64(move_min))
+end
+
+Base.setproperty!(::OC, ::Symbol, v) = throw(ArgumentError("OC is immutable; change the move limit with set_move!"))
+
+"""
+    set_move!(opt::OC, move) -> opt
+
+Changes the move limit of `opt` (the ceiling of the adaptive limits). Used by a [`Continuation`] of `move`; the
+optimisation loop calls `reset!` after it, which restores the adaptive limits to the new value.
+"""
+function set_move!(opt::OC, move)
+  0 < move || throw(ArgumentError("move must be positive"))
+  setfield!(opt, :move, Float64(move))
+  opt
 end
 
 mutable struct OCState{V}
-  move::Float64
+  move::Float64  # current ceiling (opt.move, times the factors of shrink!)
   shrunk::Bool   # shrink! was called since the last step!
   dF::V
   z_old::V
   a::V           # derivative of a nonlinear constraint at the current design
   shift::Float64 # correction of the linearised constraint, kept between steps
+  m::V           # adaptive move limit of each entry (with adapt)
+  meff::V        # m scaled by the factors of shrink!
+  dprev::V       # previous step, for the sign test
+  work::V
+  k::Int         # steps taken since init or reset!
 end
 
 function init(opt::OC, z, oracle)
   has_constraint(oracle) || throw(ArgumentError("OC needs a constraint (aᵀz ≤ V or g(z) ≤ 0)"))
   c = linear_constraint(oracle)
   c === nothing || minimum(c[1]) > 0 || throw(ArgumentError("OC needs a linear constraint with a > 0"))
-  OCState(opt.move, false, similar(z), similar(z), similar(z), 0.0)
+  v() = similar(z)
+  s = OCState(opt.move, false, v(), v(), v(), 0.0, v(), v(), v(), v(), 0)
+  fill!(s.m, opt.move)
+  fill!(s.dprev, 0)
+  s
 end
 
-reset!(opt::OC, s::OCState) = (s.move = opt.move; s.shrunk = false; s.shift = 0.0; s)
-constraint_tol(opt::OC) = opt.constraint_tol
+function reset!(opt::OC, s::OCState)
+  s.move = opt.move
+  s.shrunk = false
+  s.shift = 0.0
+  fill!(s.m, opt.move)
+  fill!(s.dprev, 0)
+  s.k = 0
+  s
+end
 shrink!(opt::OC, s::OCState, factor) = (s.move *= factor; s.shrunk = true; s)
+constraint_tol(opt::OC) = opt.constraint_tol
+
+# Adaptive move limits (with adapt = (dec, inc)): each entry's limit is multiplied by dec when its last step changed
+# sign with respect to the one before, by inc when it kept it, and clamped to [move_min, move]. Returns the move
+# limit to use: the vector of limits scaled by the shrink! factors, or the scalar s.move without adapt.
+function _move_limits!(opt::OC, s::OCState, z)
+  adapt = opt.adapt
+  adapt === nothing && return s.move
+  _adapt_limits!(opt, s, z, adapt[1], adapt[2])
+end
+
+function _adapt_limits!(opt::OC, s::OCState, z, dec::Float64, inc::Float64)
+  if s.k > 0
+    @. s.work = z - s.z_old       # the last step (zero after a rejected step was rolled back)
+    @. s.m = clamp(s.m * ifelse(s.work * s.dprev < 0, dec, ifelse(s.work * s.dprev > 0, inc, 1.0)), opt.move_min, opt.move)
+    copyto!(s.dprev, s.work)
+  end
+  sc = s.move / opt.move
+  @. s.meff = s.m * sc
+  s.meff
+end
+
+_step_size(m::Real) = m
+_step_size(m::AbstractVector) = sum(m) / length(m)
 
 _oc_power(x, η) = η == 0.5 ? sqrt(x) : x^η
 
@@ -96,20 +167,28 @@ end
 function step!(opt::OC, s::OCState, z, oracle, ctx)
   s.shrunk || (s.move = opt.move)   # the previous step stood: the reduction is dropped
   s.shrunk = false
+  adapt = opt.adapt
+  # function barrier: the move limit is a scalar (top88) or a vector (adaptive), each step specialised on it
+  m = adapt === nothing ? s.move : _adapt_limits!(opt, s, z, adapt[1], adapt[2])
+  s.k += 1
+  m isa Float64 ? _oc_step!(opt, s, z, oracle, m) : _oc_step!(opt, s, z, oracle, m::typeof(s.meff))
+end
+
+function _oc_step!(opt::OC, s::OCState, z, oracle, m)
   f = objective(oracle, z)
-  isfinite(f) || return StepInfo(false, f, NaN, NaN, 0.0, s.move, 0.0, 1, NaN)
+  isfinite(f) || return StepInfo(false, f, NaN, NaN, 0.0, _step_size(m), 0.0, 1, NaN)
   gradient!(s.dF, oracle, z)
   c = linear_constraint(oracle)
-  c === nothing && return _oc_step_nonlinear!(opt, s, z, oracle, f)
+  c === nothing && return _oc_step_nonlinear!(opt, s, z, oracle, f, m)
   a, V = c
   lb, ub = bounds(oracle)
   copyto!(s.z_old, z)
-  zo, B, η, m = s.z_old, s.dF, opt.damping, s.move
+  zo, B, η = s.z_old, s.dF, opt.damping
   @. B = _oc_power(max(zero(B), -B) / a, η)
   vol, λ, _, _ = _oc_bisect!(z, zo, B, a, lb, ub, V, m, η, opt.bisection_tol, opt.max_bisections)
   @. B = z - zo   # B is free now: use it as work vector
   change = maximum(abs, B)
-  StepInfo(true, f, NaN, NaN, change, m, max(0.0, vol - V), 1, λ)
+  StepInfo(true, f, NaN, NaN, change, _step_size(m), max(0.0, vol - V), 1, λ)
 end
 
 # Next shift of the linearised constraint from the corrections so far: regula falsi kept inside the bracket once the
@@ -127,7 +206,7 @@ function _next_shift(sh, G, lo, hi, prev)
   sh + G
 end
 
-function _oc_step_nonlinear!(opt::OC, s::OCState, z, oracle, f)
+function _oc_step_nonlinear!(opt::OC, s::OCState, z, oracle, f, m)
   g = constraint(oracle, z)
   isfinite(g) || return StepInfo(false, f, NaN, NaN, 0.0, s.move, Inf, 1, NaN)
   a = constraint_gradient!(s.a, oracle, z)
@@ -138,7 +217,7 @@ function _oc_step_nonlinear!(opt::OC, s::OCState, z, oracle, f)
   @. a = max(a, 1e-12 * amax)
   lb, ub = bounds(oracle)
   copyto!(s.z_old, z)
-  zo, B, η, m = s.z_old, s.dF, opt.damping, s.move
+  zo, B, η = s.z_old, s.dF, opt.damping
   @. B = _oc_power(max(zero(B), -B) / a, η)
   tol = min(opt.bisection_tol, 1e-7)
   Vlin = dot(a, zo) - g
@@ -159,5 +238,5 @@ function _oc_step_nonlinear!(opt::OC, s::OCState, z, oracle, f)
   end
   s.shift = isfinite(sh) ? sh : 0.0
   @. B = z - zo
-  StepInfo(true, f, NaN, NaN, maximum(abs, B), m, isfinite(G) ? max(0.0, G) : Inf, 1, λ)
+  StepInfo(true, f, NaN, NaN, maximum(abs, B), _step_size(m), isfinite(G) ? max(0.0, G) : Inf, 1, λ)
 end
