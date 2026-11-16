@@ -416,11 +416,12 @@ end
         @test gc(z) <= 0
       end
     end
-    # OC needs a constraint that acts on every entry
+    # entries the constraint does not depend on (zero derivative): OC moves them by the move limit, no error
     gh(z) = sum(z[1:n÷2]) / n - 0.2
     o = FunctionOracle(F, dF!; lb, ub = 1.0, constraint = (gh, (dG, z) -> (dG .= 0; dG[1:n÷2] .= 1 / n; dG)))
     z = fill(0.3, n)
-    @test_throws ArgumentError step!(OC(), init(OC(), z, o), z, o, nothing)
+    info = step!(OC(), init(OC(), z, o), z, o, nothing)
+    @test info.accepted && all(>(0.49), z[n÷2+1:end]) && gh(z) <= 1e-4   # +move limit, 0.2 (ub - lb)
   end
 
 end

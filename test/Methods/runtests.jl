@@ -461,6 +461,22 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test sum(∫(q.θ.ρ)q.dΩ) ≈ 0.4 * vol rtol = name === :OC ? 2e-4 : 2e-6
   end
 
+  @testset "Checkpoint and resume with a nonlinear constraint" begin
+    dir = mktempdir()
+    vol = 1.0
+    run(q, maxiter; kwargs...) = solve!(Optimization(q.z; objective = q.C, constraints = Volume(q.θ, q.dΩ; max = 0.4 * vol)),
+                                        SIMP(OC()); maxiter, verbose = 0, stop = nothing, kwargs...)
+    qa = compliance_problem()
+    ra = run(qa, 8)
+    qb = compliance_problem()
+    run(qb, 4; checkpoint = Checkpoint(dir; every = 2))
+    qc = compliance_problem()
+    rc = run(qc, 8; resume = load_checkpoint(dir))
+    @test rc.history.iteration == 1:8 && rc.history.objective[1:4] == ra.history.objective[1:4]
+    @test abs(rc.history.constraint[end]) <= 1e-4                     # the shift restarts at zero, the constraint holds
+    @test rc.history.objective[end] ≈ ra.history.objective[end] rtol = 1e-3
+  end
+
   @testset "Volume of the projected density: Taylor test (P1)" begin
     q = compliance_problem(; design = :P1)
     @test check_consistency(Volume(q.θ, q.dΩ; max = 0.4 * sum(∫(1.0)q.dΩ))).passed

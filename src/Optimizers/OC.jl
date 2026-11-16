@@ -12,7 +12,8 @@ with `m = move * (ub - lb)` and `λ > 0` found by bisection on `aᵀz = V`, star
   keeps the design of the last midpoint, so the constraint holds up to the bisection tolerance. With the defaults, the
   step is the one of top88. Requires `a > 0`.
 - **Nonlinear constraint** (for example the volume of a projected density): `a = ∂g/∂z` at the current design (floored
-  at `1e-12 maximum(a)`, since a filter can leave tiny or negative entries where a projection saturates) and the
+  at `1e-12 maximum(a)`, since a filter can leave tiny or negative entries where a projection saturates; an entry
+  with a zero derivative moves up to the move limit in the direction of descent) and the
   linearised constraint `aᵀz ≤ aᵀzₖ - g(zₖ) - s`. The shift `s` is then corrected (chord, then bounded secant steps,
   at most `max_corrections`) until `|g(z_new)| ≤ constraint_tol`, evaluating the true `g` once per correction; `s` is
   kept for the next step (`reset!` clears it). The bisection is solved to `min(bisection_tol, 1e-7)` so that the
@@ -132,9 +133,8 @@ function _oc_step_nonlinear!(opt::OC, s::OCState, z, oracle, f)
   a = constraint_gradient!(s.a, oracle, z)
   amax = maximum(a)
   amax > 0 || throw(ArgumentError("OC: the derivative of the constraint has no positive entry"))
-  # an entry the constraint does not depend on at all has no OC update (Bᵢ would be infinite)
-  any(iszero, a) && throw(ArgumentError("OC: the constraint does not depend on some entries of z (zero derivative); " *
-                                        "OC needs a constraint that acts on every entry"))
+  # entries with a zero derivative (a saturated projection, or a block the constraint does not depend on) cost no
+  # volume here: the floor lets them move up to the move limit in the direction of descent
   @. a = max(a, 1e-12 * amax)
   lb, ub = bounds(oracle)
   copyto!(s.z_old, z)

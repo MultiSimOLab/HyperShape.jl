@@ -367,6 +367,8 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
   checkpoint === nothing || checkpoint isa Checkpoint || throw(ArgumentError("solve!: checkpoint must be a Checkpoint"))
   maxiter >= 1 || throw(ArgumentError("solve!: maxiter must be at least 1"))
   pr = _Printer(io, verbose, schedule)
+  # a nonlinear constraint is met to the tolerance of the optimiser: above it, the value is shown in red
+  any(c -> !c.linear, problem.constraints) && (pr.red = min(_RED_CONSTRAINT, constraint_tol(opt)))
   lb, ub = get_bounds(z)
   (all(isfinite, lb) && all(isfinite, ub)) || throw(ArgumentError("SIMP: the bounds of z must be finite"))
   cont_names = schedule === nothing ? () : schedule.names
@@ -450,7 +452,13 @@ function _make_feasible_nonlinear!(o, zk; tol = 1e-6, maxit = 60)
   g1 = constraint(o, zk)
   isfinite(g1) || throw(ArgumentError("Optimization: the constraint is not finite at the starting design"))
   g1 <= 0 && return nothing
+  # entries the constraint depends on: nonzero derivative at the start or at the middle of the bounds (a saturated
+  # projection gives exact zeros where the constraint still depends on the entry)
   acts = constraint_gradient!(similar(zk), o, zk) .!= 0
+  zmid = (o.lb .+ o.ub) ./ 2
+  constraint(o, zmid)
+  acts .|= constraint_gradient!(similar(zk), o, zmid) .!= 0
+  constraint(o, zk)
   z0 = copy(zk)
   zt = similar(zk)
   gt(t) = (@. zt = ifelse(acts, o.lb + t * (z0 - o.lb), z0); constraint(o, zt) + tol / 2)

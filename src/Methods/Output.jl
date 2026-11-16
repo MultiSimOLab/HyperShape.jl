@@ -10,6 +10,7 @@ mutable struct _Printer{IO_}
   tlast::Float64
   header::Bool          # the column header is pending: printed before the next row
   widths::Vector{Int}   # widths of the continuation columns
+  red::Float64          # a constraint value above this is shown in red
 end
 
 _verbose_level(v::Bool) = v ? 2 : 0
@@ -19,7 +20,7 @@ _verbose_level(v) = throw(ArgumentError("solve!: verbose must be 0, 1, 2 or a Bo
 function _Printer(io, verbose, schedule)
   widths = schedule === nothing ? Int[] :
            [max(6, textwidth(string(n)), maximum(x -> textwidth(_g(x)), v)) for (n, v) in zip(schedule.names, schedule.values)]
-  _Printer(io, _verbose_level(verbose), time(), time(), false, widths)
+  _Printer(io, _verbose_level(verbose), time(), time(), false, widths, _RED_CONSTRAINT)
 end
 
 # a constraint value above this (scaled) is shown in red; OC meets the constraint only to its bisection tolerance
@@ -105,7 +106,7 @@ function _print_row(p::_Printer, hist::OptHistory)
   g = hist.constraint[k]
   @printf(p.io, "  %5d  %13.6e  %9s  ", hist.iteration[k], f, isfinite(df) ? @sprintf("%+9.1e", df) : "        —")
   if isfinite(g)
-    _styled(p, @sprintf("%10.2e", g), g > _RED_CONSTRAINT ? :red : :normal)
+    _styled(p, @sprintf("%10.2e", g), g > p.red ? :red : :normal)
   else
     print(p.io, "         —")
   end
