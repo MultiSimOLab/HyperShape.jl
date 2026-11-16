@@ -57,7 +57,8 @@ function _print_banner(p::_Printer, problem, method, maxiter, stop, schedule, re
   opt = method.optimizer
   z = problem.z
   title = " HyperShape · SIMP($(nameof(typeof(opt)))) "
-  _styled(p, "━━" * title * "━"^max(3, 98 - length(title)) * "\n", :cyan; bold = true)
+  W = textwidth(_header(p, ntuple(_ -> "", length(p.widths))))   # as wide as the table
+  _styled(p, "━━" * title * "━"^max(3, W - 2 - textwidth(title)) * "\n", :cyan; bold = true)
   blocks = join(("$n ($(length(r)))" for (n, r) in zip(z.names, z.ranges)), ", ")
   nc = length(problem.linear_constraints)
   println(p.io, "  design variables $(length(z)): $blocks · constraint: ", nc == 0 ? "none" : "linear", " · metric: ",
