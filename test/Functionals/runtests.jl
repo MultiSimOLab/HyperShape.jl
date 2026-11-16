@@ -29,7 +29,7 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
   @testset "Compliance, self-adjoint ($(design))" for design in (:P0, :P1)
     p = state_problem(; design)
     (; z, θ, S, f, dk, dΩ) = p
-    J = Functional((u, θ) -> ∫(f * u)dΩ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, S, θ; scale = 1.0)
+    J = Functional((u, θ) -> ∫(f * u)dΩ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = :self, fields = θ, scale = 1.0)
     g = functional_gradient!(zeros(length(z)), J, nothing)
     rates = taylor_rates(() -> functional_value(J, nothing), g, z, direction(length(z)))
     @test all(r -> 1.9 < r < 2.1, rates)
@@ -38,7 +38,7 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
   @testset "Boundary value with its own adjoint ($(design))" for design in (:P0, :P1)
     p = state_problem(; design)
     (; z, θ, S, A, dk, dΩ, dΓ) = p
-    J = Functional((u, θ) -> ∫(u)dΓ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, A, θ; scale = 1.0)
+    J = Functional((u, θ) -> ∫(u)dΓ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = A, fields = θ, scale = 1.0)
     g = functional_gradient!(zeros(length(z)), J, nothing)
     rates = taylor_rates(() -> functional_value(J, nothing), g, z, direction(length(z)))
     @test all(r -> 1.9 < r < 2.1, rates)
@@ -47,7 +47,7 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
   @testset "Design-only functional (volume of θ)" begin
     p = state_problem()
     (; z, θ, dΩ) = p
-    Vol = Functional(θ -> ∫(θ.ρ)dΩ, θ -> (δ -> ∫(δ)dΩ), θ; scale = 0.5)
+    Vol = Functional(θ -> ∫(θ.ρ)dΩ, θ; derivative = θ -> (δ -> ∫(δ)dΩ), scale = 0.5)
     @test functional_value(Vol, nothing) ≈ sum(∫(θ.ρ)dΩ) / 0.5
     g = functional_gradient!(zeros(length(z)), Vol, nothing)
     rates = taylor_rates(() -> functional_value(Vol, nothing), g, z, direction(length(z)))
@@ -58,8 +58,8 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
     p = state_problem()
     (; z, θ, S, f, dk, dΩ) = p
     Jf, DJf = (u, θ) -> ∫(f * u)dΩ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ)
-    J1 = Functional(Jf, DJf, S, S, θ; scale = 1.0)
-    Ji = Functional(Jf, DJf, S, S, θ; scale = :initial)
+    J1 = Functional(Jf, S; derivative = DJf, adjoint = :self, fields = θ, scale = 1.0)
+    Ji = Functional(Jf, S; derivative = DJf, adjoint = :self, fields = θ, scale = :initial)
     J0 = functional_value(J1, nothing)
     @test functional_value(Ji, nothing) ≈ 1.0
     g1 = functional_gradient!(zeros(length(z)), J1, nothing)
@@ -69,21 +69,21 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
     set_values!(z, w)
     @test functional_value(Ji, nothing) ≈ functional_value(J1, nothing) / J0   # the scale stays the first value
     # gradient first: the scale is set from the value at that design
-    Jg = Functional(Jf, DJf, S, S, θ; scale = :initial)
+    Jg = Functional(Jf, S; derivative = DJf, adjoint = :self, fields = θ, scale = :initial)
     gg = functional_gradient!(zeros(length(z)), Jg, nothing)
     @test functional_value(Jg, nothing) ≈ 1.0
     @test gg ≈ functional_gradient!(zeros(length(z)), J1, nothing) ./ functional_value(J1, nothing)
     for bad in (0.0, -1.0, NaN, Inf, :first)
-      @test_throws ArgumentError Functional(Jf, DJf, S, S, θ; scale = bad)
+      @test_throws ArgumentError Functional(Jf, S; derivative = DJf, adjoint = :self, fields = θ, scale = bad)
     end
-    @test_throws UndefKeywordError Functional(Jf, DJf, S, S, θ)
+    @test_throws UndefKeywordError Functional(Jf, S; derivative = DJf, adjoint = :self, fields = θ)
   end
 
   @testset "States are solved only when something changed" begin
     p = state_problem()
     (; z, θ, H, S, A, f, dk, dΩ, dΓ, nforward, nadjoint) = p
-    C = Functional((u, θ) -> ∫(f * u)dΩ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, S, θ; scale = 1.0)
-    B = Functional((u, θ) -> ∫(u)dΓ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, A, θ; scale = 1.0)
+    C = Functional((u, θ) -> ∫(f * u)dΩ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = :self, fields = θ, scale = 1.0)
+    B = Functional((u, θ) -> ∫(u)dΓ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = A, fields = θ, scale = 1.0)
     g = zeros(length(z))
     functional_value(C, nothing); functional_value(B, nothing)
     functional_gradient!(g, C, nothing); functional_gradient!(g, B, nothing)
@@ -105,7 +105,7 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
     converge = Ref(false)
     Sf = StateOperator(get_model(p.S); depends = (θ,),
                        solve = (m, ctx) -> (solve!(m; Assembly = true), converge[]))
-    J = Functional((u, θ) -> ∫(f * u)dΩ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), Sf, Sf, θ; scale = 1.0)
+    J = Functional((u, θ) -> ∫(f * u)dΩ, Sf; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = :self, fields = θ, scale = 1.0)
     @test isnan(functional_value(J, nothing))
     g = functional_gradient!(zeros(length(z)), J, nothing)
     @test all(isnan, g)
@@ -120,11 +120,11 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
     p = state_problem()
     (; z, x, f, dk, dΩ) = p
     θ2 = PhysicalFields(x; ρ = Identity(), r2 = :ρ => Heaviside(β = 2.0, η = 0.5))
-    J = Functional(θ -> ∫(θ.ρ * θ.r2)dΩ, θ -> (ρ = δ -> ∫(θ.r2 * δ)dΩ, r2 = δ -> ∫(θ.ρ * δ)dΩ), θ2; scale = 1.0)
+    J = Functional(θ -> ∫(θ.ρ * θ.r2)dΩ, θ2; derivative = θ -> (ρ = δ -> ∫(θ.r2 * δ)dΩ, r2 = δ -> ∫(θ.ρ * δ)dΩ), scale = 1.0)
     g = functional_gradient!(zeros(length(z)), J, nothing)
     rates = taylor_rates(() -> functional_value(J, nothing), g, z, direction(length(z)))
     @test all(r -> 1.9 < r < 2.1, rates)
-    Jbad = Functional(θ -> ∫(θ.ρ)dΩ, θ -> (δ -> ∫(δ)dΩ), θ2; scale = 1.0)
+    Jbad = Functional(θ -> ∫(θ.ρ)dΩ, θ2; derivative = θ -> (δ -> ∫(δ)dΩ), scale = 1.0)
     @test_throws ArgumentError functional_gradient!(zeros(length(z)), Jbad, nothing)
   end
 
@@ -132,8 +132,8 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
     p = state_problem()
     m = HyperShape.Operators.get_model(p.S)
     @test_throws ArgumentError StateOperator(m; depends = (1.0,), solve = (m, ctx) -> solve!(m))
-    @test_throws UndefKeywordError StateOperator(m; solve = (m, ctx) -> solve!(m))
-    @test_throws UndefKeywordError StateOperator(m; depends = (p.θ,))
+    @test_throws ArgumentError StateOperator(m; solve = (m, ctx) -> solve!(m))     # dependencies are mandatory
+    @test StateOperator(m; depends = (p.θ,)).solve === HyperShape.Operators.default_solve(StateOperator, m)
     # forms that captured the state see the new solution after a new design
     uh = get_state(p.S)
     dΩ = p.dΩ
@@ -159,15 +159,15 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
   @testset "Non-zero Dirichlet values: adjoint on the homogeneous space" begin
     p = state_problem(; gD = 1.0)
     (; z, θ, S, A, dk, dΩ, dΓ) = p
-    J = Functional((u, θ) -> ∫(u)dΓ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, A, θ; scale = 1.0)
+    J = Functional((u, θ) -> ∫(u)dΓ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = A, fields = θ, scale = 1.0)
     g = functional_gradient!(zeros(length(z)), J, nothing)
     @test all(r -> 1.9 < r < 2.1, taylor_rates(() -> functional_value(J, nothing), g, z, direction(length(z))))
     # adjoint built on the space with the Dirichlet values of the state: detected
     q = state_problem(; gD = 1.0, adjoint_space = :state)
-    Jq = Functional((u, θ) -> ∫(u)dΓ, (u, w, θ) -> (δ -> ∫(-(q.dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)q.dΩ), q.S, q.A, q.θ; scale = 1.0)
+    Jq = Functional((u, θ) -> ∫(u)dΓ, q.S; derivative = (u, w, θ) -> (δ -> ∫(-(q.dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)q.dΩ), adjoint = q.A, fields = q.θ, scale = 1.0)
     @test_throws ArgumentError functional_gradient!(zeros(length(q.z)), Jq, nothing)
     # self-adjoint shortcut with non-zero Dirichlet values: detected
-    Js = Functional((u, θ) -> ∫(p.f * u)dΩ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, S, θ; scale = 1.0)
+    Js = Functional((u, θ) -> ∫(p.f * u)dΩ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = :self, fields = θ, scale = 1.0)
     @test_throws ArgumentError functional_gradient!(zeros(length(z)), Js, nothing)
   end
 
@@ -191,15 +191,15 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
     S0 = StateOperator(m; depends = (), solve = (m, ctx) -> solve!(m; Assembly = true))
     A1 = StateOperator(get_model(p.A); depends = θ, solve = (m, ctx) -> solve!(m; Assembly = true))
     Jf, DJf = (u, θ) -> ∫(u)dΓ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ)
-    @test_throws ArgumentError Functional(Jf, DJf, S0, p.A, θ; scale = 1.0)
-    @test_throws ArgumentError Functional(Jf, DJf, p.S, A1, θ; scale = 1.0)
+    @test_throws ArgumentError Functional(Jf, S0; derivative = DJf, adjoint = p.A, fields = θ, scale = 1.0)
+    @test_throws ArgumentError Functional(Jf, p.S; derivative = DJf, adjoint = A1, fields = θ, scale = 1.0)
   end
 
   @testset "Value kept until the design changes; ctx reaches every solve" begin
     p = state_problem()
     (; z, θ, S, A, dΓ, dk, dΩ, ctxs) = p
     nJ = Ref(0)
-    J = Functional((u, θ) -> (nJ[] += 1; ∫(u)dΓ), (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, A, θ; scale = 1.0)
+    J = Functional((u, θ) -> (nJ[] += 1; ∫(u)dΓ), S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = A, fields = θ, scale = 1.0)
     v1 = functional_value(J, nothing); v2 = functional_value(J, nothing)
     @test v1 == v2 && nJ[] == 1
     changed!(z)
@@ -219,7 +219,7 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
   @testset "Taylor test after a change of β" begin
     p = state_problem()
     (; z, θ, H, S, A, dk, dΩ, dΓ, nadjoint) = p
-    J = Functional((u, θ) -> ∫(u)dΓ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, A, θ; scale = 1.0)
+    J = Functional((u, θ) -> ∫(u)dΓ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = A, fields = θ, scale = 1.0)
     functional_gradient!(zeros(length(z)), J, nothing)
     n = nadjoint[]
     set_beta!(H, 8.0)
@@ -247,13 +247,13 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
     jac(Λ) = (u, du, v) -> ∫((k ∘ θ.ρ) * ((1 + c * u * u) * ∇(du) ⋅ ∇(v) + 2c * u * du * ∇(u) ⋅ ∇(v)))dΩ
     function build(maxiter, stepping)
       nls = NewtonRaphson(LUSolver(); maxiter, atol = 1e-11, rtol = 1e-11, verbose = 0)
-      S = StateOperator(StaticNonlinearModel(res, jac, U, V, bc; nls); depends = θ,
+      S = StateOperator(StaticNonlinearModel(res, jac, U, V, bc; nls), θ;
                         solve = (m, ctx) -> solve!(m; stepping = stepping[], RestartState = false))
       uh = get_state(S)
-      A = StateOperator(StaticLinearModel(w -> ∫(w)dΓ, (p, w) -> jac(1.0)(uh, w, p), U0, V, bc0; ls = LUSolver());
-                        depends = (θ, S), solve = (m, ctx) -> solve!(m; Assembly = true))
-      Functional((u, θ) -> ∫(u)dΓ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * (1 + c * u * u) * ∇(u) ⋅ ∇(w) * δ)dΩ),
-                 S, A, θ; scale = 1.0), S
+      A = AdjointOperator(S, StaticLinearModel(w -> ∫(w)dΓ, (p, w) -> jac(1.0)(uh, w, p), U0, V, bc0; ls = LUSolver()))
+      @test A.depends === (θ, S)
+      Functional((u, θ) -> ∫(u)dΓ, S; adjoint = A, scale = 1.0,
+                 derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * (1 + c * u * u) * ∇(u) ⋅ ∇(w) * δ)dΩ)), S
     end
     with_logger(SimpleLogger(stderr, LogError)) do
       J, S = build(30, Ref{Any}((nsteps = 2, maxbisec = 5)))
@@ -272,12 +272,68 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
     end
   end
 
+  @testset "Default solve, dependencies, AdjointOperator and the keyword form of Functional" begin
+    p = state_problem()
+    (; z, θ, S, A, f, dk, dΩ, dΓ, a, l, U, U0, V, bc, bc0) = p
+    # default solve of a StaticLinearModel: the same states as the explicit solve
+    Sd = StateOperator(StaticLinearModel(l, a, U, V, bc; ls = LUSolver()), θ)
+    Ad = AdjointOperator(Sd, StaticLinearModel(w -> ∫(w)dΓ, (p, w) -> a(w, p), U0, V, bc0; ls = LUSolver()))
+    @test Sd.solve === HyperShape.Operators.default_solve(StateOperator, Sd.model)
+    @test Ad.depends === (θ, Sd)
+    Jd = Functional((u, θ) -> ∫(u)dΓ, Sd; adjoint = Ad, scale = 1.0,
+                    derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ))
+    Je = Functional((u, θ) -> ∫(u)dΓ, S; adjoint = A, scale = 1.0, fields = θ,
+                    derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ))
+    @test Jd.θ === θ                                   # θ deduced from the dependencies of S
+    @test functional_value(Jd, nothing) == functional_value(Je, nothing)
+    @test functional_gradient!(zeros(length(z)), Jd, nothing) ≈ functional_gradient!(zeros(length(z)), Je, nothing) rtol = 1e-12
+    @test get_free_dof_values(get_state(Sd)) == get_free_dof_values(get_state(S))
+    @test get_free_dof_values(get_state(Ad)) == get_free_dof_values(get_state(A))
+    # default solve of the filter
+    Lf = LinearOperator(StaticLinearModel((u, v) -> ∫(u * v)dΩ, U0, V, NothingBC(); ls = LUSolver()))
+    @test Lf.depends === () && Lf.solve === HyperShape.Operators.default_solve(LinearOperator, Lf.model)
+    # dependencies: positionally or with depends =, once; mandatory for a state
+    @test StateOperator(Sd.model; depends = θ).depends === (θ,)
+    @test_throws ArgumentError StateOperator(Sd.model, θ; depends = θ)
+    @test_throws ArgumentError StateOperator(Sd.model)
+    @test_throws ArgumentError LinearOperator(Lf.model, (); depends = ())
+    @test LinearOperator(Lf.model, θ).depends === (θ,)
+    # a nonlinear model has no default solve
+    res = (u, v) -> ∫((1 + u * u) * ∇(u) ⋅ ∇(v) - v)dΩ
+    jac = (u, du, v) -> ∫((1 + u * u) * ∇(du) ⋅ ∇(v) + 2 * u * du * ∇(u) ⋅ ∇(v))dΩ
+    nl = StaticNonlinearModel(Λ -> res, Λ -> jac, U, V, bc; nls = NewtonRaphson(LUSolver(); verbose = 0))
+    err = try StateOperator(nl, θ); nothing catch e; e end
+    @test err isa ArgumentError && occursin("StaticNonlinearModel", err.msg) && occursin("stepping", err.msg)
+    @test StateOperator(nl, θ; solve = (m, ctx) -> solve!(m)).depends === (θ,)
+    # AdjointOperator: extra dependencies without repetitions, homogeneous trial space
+    Ae = AdjointOperator(Sd, Ad.model, (θ, Sd, z); solve = (m, ctx) -> solve!(m; Assembly = true))
+    @test Ae.depends === (θ, Sd, z)
+    bc1 = BoundaryConditions(BoundaryCondition("left", 1.0))
+    U1 = TrialFESpace(V, bc1, 1.0)
+    @test_throws ArgumentError AdjointOperator(Sd, StaticLinearModel(w -> ∫(w)dΓ, (p, w) -> a(w, p), U1, V, bc1;
+                                                                    ls = LUSolver()))
+    # Functional: adjoint mandatory, :self or a state; fields deduced or given
+    DJ = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ)
+    @test_throws UndefKeywordError Functional((u, θ) -> ∫(u)dΓ, Sd; derivative = DJ, scale = 1.0)
+    @test_throws ArgumentError Functional((u, θ) -> ∫(u)dΓ, Sd; derivative = DJ, adjoint = Sd, scale = 1.0)
+    @test_throws ArgumentError Functional((u, θ) -> ∫(u)dΓ, Sd; derivative = DJ, adjoint = :none, scale = 1.0)
+    @test_throws ArgumentError Functional((u, θ) -> ∫(u)dΓ, Sd; derivative = DJ, adjoint = S, scale = 1.0)  # not on Sd
+    θ2 = PhysicalFields(p.x; ρ = Identity())
+    S2 = StateOperator(Sd.model, (θ, θ2))
+    @test_throws ArgumentError Functional((u, θ) -> ∫(u)dΓ, S2; derivative = DJ, adjoint = :self, scale = 1.0)
+    @test Functional((u, θ) -> ∫(u)dΓ, S2; derivative = DJ, adjoint = :self, scale = 1.0, fields = θ).θ === θ
+    @test_throws ArgumentError Functional((u, θ) -> ∫(u)dΓ, StateOperator(Sd.model, z); derivative = DJ,
+                                          adjoint = :self, scale = 1.0)
+    @test_throws ArgumentError Functional((u, θ) -> ∫(u)dΓ, Sd; derivative = DJ, adjoint = :self, scale = 1.0,
+                                          fields = θ2)                              # Sd does not depend on θ2
+  end
+
   @testset "Lazy and compiled backends after changing z and β" begin
     pl = state_problem(; backend = :lazy)
     pc = state_problem(; backend = :compiled)
     funcs = map((pl, pc)) do p
       dΓ, dΩ, dk = p.dΓ, p.dΩ, p.dk
-      Functional((u, θ) -> ∫(u)dΓ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), p.S, p.A, p.θ; scale = 1.0)
+      Functional((u, θ) -> ∫(u)dΓ, p.S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = p.A, fields = p.θ, scale = 1.0)
     end
     for p in (pl, pc)
       functional_gradient!(zeros(length(p.z)), funcs[p === pl ? 1 : 2], nothing)
@@ -294,9 +350,9 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
     grads = map((:compiled, :lazy)) do vb
       p = state_problem(; vector_backend = vb)
       (; z, θ, S, A, f, dk, dΩ, dΓ) = p
-      C = Functional((u, θ) -> ∫(f * u)dΩ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, S, θ; scale = 1.0)
-      B = Functional((u, θ) -> ∫(u)dΓ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, A, θ; scale = 1.0)
-      Vol = Functional(θ -> ∫(θ.ρ)dΩ, θ -> (δ -> ∫(δ)dΩ), θ; scale = 1.0)
+      C = Functional((u, θ) -> ∫(f * u)dΩ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = :self, fields = θ, scale = 1.0)
+      B = Functional((u, θ) -> ∫(u)dΓ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = A, fields = θ, scale = 1.0)
+      Vol = Functional(θ -> ∫(θ.ρ)dΩ, θ; derivative = θ -> (δ -> ∫(δ)dΩ), scale = 1.0)
       gs = Vector{Float64}[]
       for it in 1:3
         for F in (C, B, Vol)

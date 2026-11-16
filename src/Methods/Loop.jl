@@ -1,11 +1,12 @@
 # The common optimisation loop: continuation, step rejection, stopping, history, checkpoint.
 
 """
-    RejectStep(; shrink, max)
+    RejectStep(; shrink = 0.5, max = 5)
 
 What to do when the forward problem does not converge at the design proposed by the optimiser: go back to the
 previous design, call `shrink!` on the optimiser with `shrink` (`0 < shrink < 1`: OC multiplies its move limit) and
-try again, at most `max` attempts per iteration; then throw [`OptimizationFailure`](@ref). Both are mandatory.
+try again, at most `max` attempts per iteration; then throw [`OptimizationFailure`](@ref). `RejectStep()` is the
+default of [`solve!`](@ref) (with the defaults, the step can go down to 1/16 of the first one).
 
 Optimisers that evaluate their trials (SiMPL) handle failures inside their line search, so for them this only
 applies if a step is accepted at a design that cannot be evaluated again.
@@ -15,7 +16,7 @@ struct RejectStep
   max::Int
 end
 
-function RejectStep(; shrink, max)
+function RejectStep(; shrink = 0.5, max = 5)
   0 < shrink < 1 || throw(ArgumentError("RejectStep: shrink must be in (0, 1)"))
   max >= 1 || throw(ArgumentError("RejectStep: max must be at least 1"))
   RejectStep(Float64(shrink), Int(max))
@@ -47,6 +48,20 @@ function StopCriteria(; change = nothing, kkt = nothing, objective = nothing, wi
   StopCriteria(change === nothing ? nothing : Float64(change), kkt === nothing ? nothing : Float64(kkt),
                objective === nothing ? nothing : Float64(objective), Int(window))
 end
+
+"""
+    default_stop(optimizer) -> Union{StopCriteria,Nothing}
+
+Stopping criteria of [`solve!`](@ref) when `stop` is not given: `StopCriteria(change = 1e-4)` for OC (which has no
+optimality measure), `StopCriteria(kkt = 1e-4, change = 1e-4)` for SiMPL, and `nothing` (only `maxiter`) for any
+other optimiser.
+"""
+default_stop(::OC) = StopCriteria(change = 1e-4)
+default_stop(::SiMPL) = StopCriteria(kkt = 1e-4, change = 1e-4)
+default_stop(::Optimizer) = nothing
+
+# `stop` not given (distinct from `stop = nothing`, which means maxiter only)
+struct _DefaultStop end
 
 const HISTORY_COLUMNS = (:iteration, :objective, :constraint, :kkt, :change, :step, :attempts, :forward, :adjoint, :filter,
                          :multiplier)
@@ -303,18 +318,20 @@ end
 _stop_reason(::Nothing, info, hist, stage_start) = nothing
 
 """
-    solve!(problem::Optimization, method::SIMP; maxiter, on_failure, stop = nothing, schedule = nothing,
-           checkpoint = nothing, post = nothing, resume = nothing, verbose = 2, io = stdout) -> OptResult
+    solve!(problem::Optimization, method::SIMP; maxiter, on_failure = RejectStep(), stop = default_stop(optimizer),
+           schedule = nothing, checkpoint = nothing, post = nothing, resume = nothing, verbose = 2, io = stdout)
+        -> OptResult
 
-Runs the optimisation from the current values of `z`. Mandatory: `maxiter` (total iterations, resumed ones included)
-and `on_failure` ([`RejectStep`](@ref)). Optional: `stop` ([`StopCriteria`](@ref); without it the loop runs
-`maxiter` iterations), `schedule` ([`Continuation`](@ref)), `checkpoint` ([`Checkpoint`](@ref)), `post` (a function
+Runs the optimisation from the current values of `z`. Mandatory: `maxiter` (total iterations, resumed ones included).
+Optional: `on_failure` ([`RejectStep`](@ref), default `RejectStep(shrink = 0.5, max = 5)`), `stop`
+([`StopCriteria`](@ref); default [`default_stop`](@ref) of the optimiser; `stop = nothing` runs `maxiter`
+iterations), `schedule` ([`Continuation`](@ref)), `checkpoint` ([`Checkpoint`](@ref)), `post` (a function
 `post(ctx)` called after each accepted iteration, with the fields and the forward state at the accepted design; the
 adjoint state is still the one of the previous design) and
 `resume` (the result of [`load_checkpoint`](@ref)), `verbose` and `io`.
 
 Screen output (`verbose`, default `2`, printed to `io`): `0` nothing; `1` a banner (variables, constraint, metric,
-continuation, stopping criteria), the events (continuation jumps, rejected steps, stalls, a scaled start), a closing
+continuation, stopping criteria and failure handling, each marked when it is a default), the events (continuation jumps, rejected steps, stalls, a scaled start), a closing
 ✓/⚠/✗ line and a summary of solves and time; `2` also a row per iteration: objective, its relative change,
 constraint (red above 1e-3), optimality measure, change of z, step, multiplier, continued parameters, forward,
 adjoint and filter solves, and time. `true` is `2`, `false` is `0`. The summary counts every solve of the call
@@ -331,9 +348,13 @@ functional) and one transposed filter; SiMPL one filter and one forward per tria
 one adjoint and one transposed filter; one more forward after each continuation jump. The linear constraint costs
 nothing in the loop (its vector is computed once at the start).
 """
-function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failure::RejectStep, stop = nothing,
+function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failure = nothing, stop = _DefaultStop(),
                 schedule = nothing, checkpoint = nothing, post = nothing, resume = nothing, verbose = 2, io::IO = stdout)
   z, ctx, opt = problem.z, problem.ctx, method.optimizer
+  defaults = (stop = stop isa _DefaultStop, on_failure = on_failure === nothing)
+  defaults.stop && (stop = default_stop(opt))
+  defaults.on_failure && (on_failure = RejectStep())
+  on_failure isa RejectStep || throw(ArgumentError("solve!: on_failure must be a RejectStep"))
   stop === nothing || stop isa StopCriteria || throw(ArgumentError("solve!: stop must be a StopCriteria"))
   schedule === nothing || schedule isa Continuation || throw(ArgumentError("solve!: schedule must be a Continuation"))
   checkpoint === nothing || checkpoint isa Checkpoint || throw(ArgumentError("solve!: checkpoint must be a Checkpoint"))
@@ -363,7 +384,7 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
     _prefill!(hist, resume)
   end
 
-  _print_banner(pr, problem, method, maxiter, stop, schedule, resume)
+  _print_banner(pr, problem, method, maxiter, stop, on_failure, defaults, schedule, resume)
   set_context!(ctx, :iteration, k0)
   set_context!(ctx, :attempt, 0)
   set_context!(ctx, :trial, 0)

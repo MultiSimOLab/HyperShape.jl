@@ -23,8 +23,7 @@ Implemented (filter by PDE, Heaviside projection, P0 and P1 design fields):
 
 ```julia
 af(ρ̃, v) = ∫(r^2 * ∇(ρ̃) ⋅ ∇(v) + ρ̃ * v)dΩ
-Sf = LinearOperator(StaticLinearModel(af, Uf, Vf, NothingBC(); ls = LUSolver()); depends = (),
-                    solve = (m, b, ctx, stale) -> solve!(m, b; Assembly = stale))
+Sf = LinearOperator(StaticLinearModel(af, Uf, Vf, NothingBC(); ls = LUSolver()))   # constant matrix, default solve
 
 z = OptVariables(ρ = FieldVariable(Vρ; bounds = (0.0, 1.0), init = 0.5))
 x = DesignFields(z; ρ = Identity())
@@ -70,10 +69,14 @@ Two kinds of operator wrap a HyperFEM computational model built by the user.
 |---|---|---|
 | Model | full weak forms | bilinear form only (the matrix) |
 | Right-hand side | from the user's forms | vector assembled by HyperShape |
-| `depends` | invalidates the result | invalidates the matrix |
-| User function | `solve = (m, ctx) -> …` | `solve = (m, b, ctx, stale) -> …` |
+| Dependencies | invalidate the result (mandatory) | invalidate the matrix (default `()`) |
+| `solve` function | `(m, ctx) -> …` | `(m, b, ctx, stale) -> …` |
+| Default `solve` (`StaticLinearModel` only) | `solve!(m; Assembly = true)` | `solve!(m, b; Assembly = stale)` |
 
-- Dependencies are declared explicitly with `depends`; an operator solves again only when one of them has changed.
+- Dependencies are given positionally (`StateOperator(model, θ)`) or with `depends =`; an operator solves again only
+  when one of them has changed.
+- HyperShape never chooses a solver: a default `solve` calls the solver of the user's model. Nonlinear, staggered and
+  transient models need the user's `solve` (the load stepping and the restart are modelling decisions).
 - `ctx` is a read-only context updated by HyperShape: design iteration, attempt, continuation values and phase. Until
   the common optimisation loop exists, whoever updates the fields passes it (`nothing` when the fields are built).
 - The adjoint is another state operator; its forms are written by the user, typically the tangent of the forward
@@ -83,11 +86,19 @@ Implemented:
 
 ```julia
 model_u = StaticLinearModel(l, a, U, V, bc; ls = LUSolver())          # forms and solver of the user; they capture θ
-S = StateOperator(model_u; depends = θ, solve = (m, ctx) -> solve!(m; Assembly = true))
+S = StateOperator(model_u, θ)                                          # default solve: solve!(m; Assembly = true)
 uh = get_state(S)                                                       # fixed object
 # adjoint: a(w, p) = ∂J/∂u[w] for all w, on the space with homogeneous Dirichlet values (U0, bc0)
 model_p = StaticLinearModel(l_adj, (p, w) -> a(w, p), U0, V, bc0; ls = LUSolver())   # captures θ and uh
-A = StateOperator(model_p; depends = (θ, S), solve = (m, ctx) -> solve!(m; Assembly = true))
+A = AdjointOperator(S, model_p)                                         # depends on θ and S
+```
+
+A nonlinear forward state gives its own `solve`, and returns the convergence flag:
+
+```julia
+S = StateOperator(StaticNonlinearModel(res, jac, U, V, bc; nls), θ;
+                  solve = (m, ctx) -> solve!(m; stepping = (nsteps = 10, maxbisec = 5), RestartState = false))
+A = AdjointOperator(S, StaticLinearModel(l_adj, (p, w) -> jac(1.0)(get_state(S), w, p), U0, V, bc0; ls = LUSolver()))
 ```
 
 - `solve` returns the solution vector (taken as converged) or a tuple whose last element is the convergence flag,
@@ -95,26 +106,30 @@ A = StateOperator(model_p; depends = (θ, S), solve = (m, ctx) -> solve!(m; Asse
   states that depend on it are not solved and the functionals return `NaN`.
 - A state is solved again only when one of its dependencies changed; a failed solve is not repeated for the same
   design.
-- The functional checks that the forward state depends on θ and the adjoint on θ and on the forward state, and that
-  the trial space of the adjoint has homogeneous Dirichlet values.
+- `AdjointOperator(S, model)` is a `StateOperator` whose dependencies are those of `S`, then `S` (extra ones can be
+  added); it checks that the trial space has homogeneous Dirichlet values. The functional checks that the forward
+  state depends on θ and the adjoint on θ and on the forward state.
 
 ## Functionals
 
 One `Functional` per objective or constraint:
 
 ```julia
-J = Functional(Jform, DJform, S, A, θ; scale)
+J = Functional(Jform, S; derivative = DJform, adjoint = A, scale)
 #   Jform(u, θ)       scalar value
 #   DJform(u, p, θ)   total derivative with respect to θ, as a linear form
 ```
 
 The value applies the forward operator `S`; the derivative applies the adjoint operator `A` and assembles `DJform`.
+θ is the physical fields `S` depends on (give `fields = θ` if it depends on none or on several).
 HyperShape then applies the transposed maps down to `z`. Implemented, with `functional_value(J, ctx)` and
 `functional_gradient!(gz, J, ctx)`:
 
-- `DJform(u, p, θ)` returns `δ -> ∫(… * δ)dΩ`, or a named tuple of such functions when θ has several fields.
-- Self-adjoint functionals pass `A = S` (then `p = u`) and include the sign in `DJform`.
-- Design-only functionals (volume): `Functional(Jform, DJform, θ; scale)` with `Jform(θ)` and `DJform(θ)`.
+- `derivative(u, p, θ)` returns `δ -> ∫(… * δ)dΩ`, or a named tuple of such functions when θ has several fields.
+- `adjoint` is mandatory: self-adjoint functionals pass `adjoint = :self` (then `p = u`) and include the sign in
+  `derivative`.
+- Design-only functionals (volume): `Functional(Jform, θ; derivative = DJform, scale)` with `Jform(θ)` and
+  `DJform(θ)`.
 - `scale` is mandatory: a positive number, `:initial` (absolute value of the first evaluation) or `1.0`.
 
 ## Consistency checks
@@ -141,7 +156,7 @@ accept or reject, continuation, stopping, checkpoint); only the step is specific
 
 | Method | Design field | Step |
 |---|---|---|
-| `SIMP(optimizer; metric)` | density in [0, 1] | any `Optimizer` (OC, SiMPL) |
+| `SIMP(optimizer; metric)` | density in [0, 1] | any `Optimizer` (`OC`, `SiMPL`) |
 | `ReactionDiffusion` (phase 2) | level set in [−1, 1] | one linear solve, then clipping |
 | `LevelSet` (phase 2) | signed distance | velocity extension, advection, reinitialisation |
 
@@ -149,11 +164,10 @@ Implemented: `Optimization` and `SIMP` with the common loop.
 
 ```julia
 θv  = PhysicalFields(x; ρ = Identity())                    # unprojected density: the volume is linear in z
-Vol = Functional(θ -> sum(∫(θ.ρ)dΩ) - Vmax, θ -> (δ -> ∫(δ)dΩ), θv; scale = Vmax)   # g(z) ≤ 0
+Vol = Functional(θ -> sum(∫(θ.ρ)dΩ) - Vmax, θv; derivative = θ -> (δ -> ∫(δ)dΩ), scale = Vmax)   # g(z) ≤ 0
 problem = Optimization(z; objective = J, linear_constraints = (Vol,))
 result  = solve!(problem, SIMP(SiMPL(); metric = LumpedMass(dΩ));
-                 maxiter = 300, on_failure = RejectStep(shrink = 0.5, max = 5),
-                 stop = StopCriteria(kkt = 1e-5),
+                 maxiter = 300, stop = StopCriteria(kkt = 1e-5),
                  schedule = Continuation(β = H => [1, 2, 4, 8, 16, 32]; every = 40),
                  checkpoint = Checkpoint("results/ckpt"; every = 10),
                  post = ctx -> nothing)
@@ -166,13 +180,15 @@ beam). A constraint on the physical volume is nonlinear in `z` and comes with th
 
 - **Constraint:** in phase 0, at most one linear constraint, a design-only functional. Its vector `a` is computed once
   and its linearity in z is checked at the start; a projected volume is a nonlinear constraint (phase 1).
-- **Metric:** mandatory; `LumpedMass(dΩ)` (cell volumes for P0, lumped mass for P1) or `Euclidean()`.
-- **Rejection:** if the forward problem does not converge at the new design, the loop restores the previous one,
+- **Metric:** `LumpedMass(dΩ)` (cell volumes for P0, lumped mass for P1) or `Euclidean()`; mandatory for SiMPL, OC
+  does not use it (default `Euclidean()`).
+- **Rejection** (`on_failure`, default `RejectStep(shrink = 0.5, max = 5)`): if the forward problem does not converge at the new design, the loop restores the previous one,
   calls `shrink!` and tries again, at most `max` times; then it throws `OptimizationFailure` (checkpoint written).
   SiMPL handles failures inside its line search; if it finds no step, the current continuation stage ends (in the last stage, or without continuation, the result is `:stalled`).
 - **Continuation:** explicit list of values per stage, a jump every `every` iterations or when the stopping criteria
   are met; the optimiser forgets its memory at each jump; the optimisation only stops in the last stage.
-- **Stopping:** `maxiter` is mandatory; `StopCriteria(change, kkt, objective)` are off unless given.
+- **Stopping:** `maxiter` is mandatory. `stop` defaults to `StopCriteria(change = 1e-4)` for OC and
+  `StopCriteria(kkt = 1e-4, change = 1e-4)` for SiMPL (`default_stop`); `stop = nothing` runs `maxiter` iterations.
 - **Context:** `OptContext` (iteration, attempt, trial, phase, continuation values) reaches every solve function of
   the user; phases `:setup`, `:check`, `:optimization` and `:linesearch`.
 - **Checkpoint:** `checkpoint.toml`, `z_<k>.bin` and `history_<k>.csv` in a folder; resume with
@@ -226,3 +242,22 @@ end
 `OptPostProcessor(problem, driver; every, filepath)` calls the user-written `driver(post, ctx)` every `every` design
 iterations, following the pattern of HyperFEM's `PostProcessor`. The user decides which fields are written and on
 which triangulation, including domains larger than the design region.
+
+## Defaults and how to replace them
+
+A default never removes generality: everything it sets can be replaced from the user's script. The banner of
+`solve!` marks the defaults in use.
+
+| Default | Where | How to replace it |
+|---|---|---|
+| `solve!(m; Assembly = true)` | `StateOperator` / `AdjointOperator` of a `StaticLinearModel` | `solve = (m, ctx) -> …` |
+| `solve!(m, b; Assembly = stale)` | `LinearOperator` of a `StaticLinearModel` | `solve = (m, b, ctx, stale) -> …` |
+| `()` (constant matrix) | dependencies of a `LinearOperator` | `LinearOperator(model, deps)` |
+| `RejectStep(shrink = 0.5, max = 5)` | `solve!(…; on_failure)` | `on_failure = RejectStep(…)` |
+| `default_stop(optimizer)` | `solve!(…; stop)` | `stop = StopCriteria(…)` or `stop = nothing` |
+| `Euclidean()` (unused) | `SIMP(OC())` | `metric = …` |
+
+The solver is always the one of the user's model. For example, with PETSc (GridapPETSc) build the model with
+`ls = PETScLinearSolver()`; the default `solve` then calls it. Any other solve (a preconditioner rebuilt only every few
+iterations, a warm start, a matrix-free solver) goes in the user's own `solve` function.
+
