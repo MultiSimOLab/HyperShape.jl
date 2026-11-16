@@ -21,10 +21,10 @@ function compliance_problem(; design = :P0, n = 8, dim = 2, init = 0.4, fraction
          phases === nothing || push!(phases, (ctx.iteration, ctx.trial, ctx.phase))
          (solve!(m; Assembly = true), flag())
        end)
-  C = Functional((u, θ) -> ∫(f * u)dΩ, (u, w, θ) -> (δ -> ∫(-sign[] * (dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), Sc, Sc, θ; scale = :initial)
+  C = Functional((u, θ) -> ∫(f * u)dΩ, Sc; derivative = (u, w, θ) -> (δ -> ∫(-sign[] * (dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = :self, fields = θ, scale = :initial)
   θv = PhysicalFields(x; ρ = Identity())
   vol = sum(∫(1.0)dΩ)
-  Vol = Functional(θ -> sum(∫(θ.ρ)dΩ) - fraction * vol, θ -> (δ -> ∫(δ)dΩ), θv; scale = fraction * vol)
+  Vol = Functional(θ -> sum(∫(θ.ρ)dΩ) - fraction * vol, θv; derivative = θ -> (δ -> ∫(δ)dΩ), scale = fraction * vol)
   (; p..., C, Vol, θv, S = Sc, problem = Optimization(z; objective = C, linear_constraints = (Vol,)))
 end
 
@@ -42,19 +42,19 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test o.a ≈ m ./ (0.4 * sum(m))
     @test o.V ≈ 1.0 atol = 1e-12            # (∫ρ - 0.4|Ω|)/(0.4|Ω|) ≤ 0  ⇔  aᵀz ≤ 1
     # a projected volume is not linear in z
-    Vp = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4, θ -> (δ -> ∫(δ)q.dΩ), q.θ; scale = 0.4)
+    Vp = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4, q.θ; derivative = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4)
     bad = Optimization(q.z; objective = q.C, linear_constraints = (Vp,))
-    @test_throws ArgumentError solve!(bad, SIMP(OC(); metric = Euclidean()); maxiter = 2, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
+    @test_throws ArgumentError solve!(bad, SIMP(OC(); metric = Euclidean()); maxiter = 2, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     @test FunctionalOracle(q.problem, Euclidean()).metric === nothing
     # a uniform start at 0.3 used to hide a nonlinear constraint
     q3 = compliance_problem(; design, init = 0.3)
-    Vp3 = Functional(θ -> sum(∫(θ.ρ)q3.dΩ) - 0.4, θ -> (δ -> ∫(δ)q3.dΩ), q3.θ; scale = 0.4)
+    Vp3 = Functional(θ -> sum(∫(θ.ρ)q3.dΩ) - 0.4, q3.θ; derivative = θ -> (δ -> ∫(δ)q3.dΩ), scale = 0.4)
     @test_throws ArgumentError solve!(Optimization(q3.z; objective = q3.C, linear_constraints = Vp3),
-                                      SIMP(OC(); metric = Euclidean()); maxiter = 2, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
+                                      SIMP(OC(); metric = Euclidean()); maxiter = 2, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     @test get_values(q3.z) == fill(0.3, length(q3.z))     # z restored after the probes
     # the filtered, unprojected volume is linear and has the same vector (Neumann filter)
     θf = PhysicalFields(q.x; ρ = HelmholtzFilter(q.Sf; measure = q.dΩ))
-    Vf = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4 * sum(m), θ -> (δ -> ∫(δ)q.dΩ), θf; scale = 0.4 * sum(m))
+    Vf = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4 * sum(m), θf; derivative = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4 * sum(m))
     of = FunctionalOracle(Optimization(q.z; objective = q.C, linear_constraints = Vf), Euclidean())
     _setup_constraint!(of, Vf, q.problem.ctx)
     @test of.a ≈ m ./ (0.4 * sum(m)) rtol = 1e-10
@@ -65,9 +65,12 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test_throws ArgumentError Optimization(q.z; objective = q.C, constraints = (q.Vol,))
     @test_throws ArgumentError Optimization(q.z; objective = q.C, linear_constraints = (q.Vol, q.Vol))
     @test_throws ArgumentError Optimization(q.z; objective = q.C, linear_constraints = (q.C,))   # has states
-    @test_throws UndefKeywordError SIMP(OC())
+    @test SIMP(OC()).metric isa Euclidean           # default metric of OC (which does not use it)
+    @test_throws ArgumentError SIMP(SiMPL())         # SiMPL needs one
     @test_throws ArgumentError SIMP(OC(); metric = :lumped)
-    @test_throws UndefKeywordError solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 2)
+    @test_throws UndefKeywordError solve!(q.problem, SIMP(OC()))   # maxiter is mandatory
+    @test_throws ArgumentError solve!(q.problem, SIMP(OC()); maxiter = 2, on_failure = :reject)
+    @test_throws ArgumentError solve!(q.problem, SIMP(OC()); maxiter = 2, on_failure = nothing)
     @test_throws ArgumentError RejectStep(shrink = 1.5, max = 2)
     @test_throws ArgumentError StopCriteria(change = -1)
     @test_throws ArgumentError Continuation(β = q.H => [1, 2], γ = q.H => [1]; every = 2)
@@ -84,7 +87,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
       metric = opt isa OC ? Euclidean() : LumpedMass(q.dΩ)
       seen = Tuple[]
       r = solve!(q.problem, SIMP(opt; metric); maxiter = 15, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3),
-                 post = ctx -> push!(seen, (ctx.iteration, ctx.attempt, ctx.phase)))
+                 post = ctx -> push!(seen, (ctx.iteration, ctx.attempt, ctx.phase)), stop = nothing)
       h = r.history
       @test r.status === :maxiter && r.iterations == 15 && length(h) == 15
       @test h.objective[end] < 0.9 * h.objective[1]
@@ -106,9 +109,9 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
   @testset "Functional with an adjoint" begin
     q = compliance_problem()
     (; z, θ, S, A, dk, dΩ, dΓ) = q
-    B = Functional((u, θ) -> ∫(u)dΓ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, A, θ; scale = :initial)
+    B = Functional((u, θ) -> ∫(u)dΓ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = A, fields = θ, scale = :initial)
     r = solve!(Optimization(z; objective = B, linear_constraints = q.Vol), SIMP(OC(); metric = Euclidean());
-               maxiter = 6, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
+               maxiter = 6, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     @test all(==(1), r.history.adjoint[2:end])
     @test r.history.objective[end] < r.history.objective[1]
   end
@@ -117,7 +120,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     # the third forward solve fails once
     cnt = Ref(0)
     q = compliance_problem(; solve_flag = () -> (cnt[] += 1; cnt[] != 3))
-    r = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 6, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
+    r = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 6, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     h = r.history
     k = findfirst(>(1), h.attempts)
     @test k !== nothing && h.attempts[k] == 2
@@ -130,12 +133,12 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     accepted = Vector{Float64}[]
     @test_throws OptimizationFailure solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 6,
                                             verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 2),
-                                            post = ctx -> push!(accepted, copy(get_values(q.z))))
+                                            post = ctx -> push!(accepted, copy(get_values(q.z))), stop = nothing)
     @test get_values(q.z) == last(accepted)
     # the forward problem fails at the start
     q = compliance_problem(; solve_flag = () -> false)
     err = try
-      solve!(q.problem, SIMP(SiMPL(); metric = Euclidean()); maxiter = 3, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 2))
+      solve!(q.problem, SIMP(SiMPL(); metric = Euclidean()); maxiter = 3, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 2), stop = nothing)
       nothing
     catch e
       e
@@ -159,7 +162,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     set_beta!(q.H, 3.0)
     sched = Continuation(β = q.H => [1.0, 2.0, 4.0]; every = 3)
     r = solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 12, schedule = sched,
-               verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
+               verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     @test vec(r.history.continuation)[1:9] == [1, 1, 1, 2, 2, 2, 4, 4, 4]
     @test q.H.β == 4.0 && r.history.names == [:β]
     # a criterion always met: one iteration per stage, stop in the last one
@@ -180,7 +183,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
 
   @testset "Checkpoint and resume" begin
     dir = mktempdir()
-    run(q, maxiter; kwargs...) = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), kwargs...)
+    run(q, maxiter; kwargs...) = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), kwargs..., stop = nothing)
     qa = compliance_problem()
     ra = run(qa, 8)
     qb = compliance_problem()
@@ -197,7 +200,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     # SiMPL resumes (not bit-identical) and the checks on the checkpoint
     qd = compliance_problem()
     rd = solve!(qd.problem, SIMP(SiMPL(); metric = LumpedMass(qd.dΩ)); maxiter = 6, resume = ck,
-                verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
+                verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     @test rd.iterations == 6 && rd.history.objective[end] <= rd.history.objective[5] * (1 + 1e-12)
     qe = compliance_problem(; design = :P1)
     @test_throws ArgumentError run(qe, 8; resume = ck)
@@ -207,7 +210,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
   @testset "3D ($(design))" for design in (:P0, :P1)
     q = compliance_problem(; design, dim = 3, n = 4)
     @test check_consistency(q.C, q.Vol).passed
-    r = solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 5, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
+    r = solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 5, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     @test r.history.objective[end] < r.history.objective[1] && nonincreasing(r.history.objective)
   end
 
@@ -215,7 +218,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     sign = Ref(1.0)
     q = compliance_problem(; sign)
     r = solve!(q.problem, SIMP(SiMPL(max_backtracks = 1); metric = LumpedMass(q.dΩ)); maxiter = 10,
-               verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), post = ctx -> (ctx.iteration == 2 && (sign[] = -1.0)))
+               verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), post = ctx -> (ctx.iteration == 2 && (sign[] = -1.0)), stop = nothing)
     @test r.status === :stalled && r.iterations == 2
     @test get_values(q.z) == r.state.z
     @test get_free_dof_values(q.x.ρ) == get_values(q.z)
@@ -229,7 +232,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     accepted = Vector{Float64}[]
     err = try
       solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 6, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 2),
-             checkpoint = Checkpoint(dir; every = 10), post = ctx -> push!(accepted, copy(get_values(q.z))))
+             checkpoint = Checkpoint(dir; every = 10), post = ctx -> push!(accepted, copy(get_values(q.z))), stop = nothing)
       nothing
     catch e
       e
@@ -245,11 +248,11 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     q = compliance_problem()
     (; z, θ, S, dk, dΩ, dΓ, A) = q
     Abad = StateOperator(A.model; depends = (θ, S), solve = (m, ctx) -> (solve!(m; Assembly = true), false))
-    B = Functional((u, θ) -> ∫(u)dΓ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, Abad, θ; scale = 1.0)
+    B = Functional((u, θ) -> ∫(u)dΓ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = Abad, fields = θ, scale = 1.0)
     dir2 = mktempdir()
     @test_throws OptimizationFailure solve!(Optimization(z; objective = B, linear_constraints = q.Vol),
                                             SIMP(OC(); metric = Euclidean()); maxiter = 3,
-                                            verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 2), checkpoint = Checkpoint(dir2; every = 10))
+                                            verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 2), checkpoint = Checkpoint(dir2; every = 10), stop = nothing)
     @test isfile(joinpath(dir2, "checkpoint.toml"))
   end
 
@@ -257,7 +260,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     phases = Tuple{Int,Int,Symbol}[]
     q = compliance_problem(; init = nothing, fraction = 0.7, phases)
     r = solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 5,
-               schedule = Continuation(β = q.H => [2.0, 4.0]; every = 3), verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
+               schedule = Continuation(β = q.H => [2.0, 4.0]; every = 3), verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     @test r.iterations == 5
     # the first solve of iteration 1 and of the jump iteration are the current design
     first_of(k) = phases[findfirst(p -> p[1] == k, phases)]
@@ -270,7 +273,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     dir = mktempdir()
     sched(q) = Continuation(β = q.H => [1.0, 2.0, 4.0]; every = 3)
     run(q, maxiter; kwargs...) = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter, schedule = sched(q),
-                                        verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), kwargs...)
+                                        verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), kwargs..., stop = nothing)
     qa = compliance_problem(); ra = run(qa, 9)
     qb = compliance_problem(); run(qb, 5; checkpoint = Checkpoint(dir; every = 5))
     ck = load_checkpoint(dir)
@@ -280,7 +283,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test vec(rc.history.continuation) == vec(ra.history.continuation)
     qd = compliance_problem()
     @test_throws ArgumentError solve!(qd.problem, SIMP(OC(); metric = Euclidean()); maxiter = 9, resume = ck,
-                                      schedule = Continuation(β = qd.H => [1.0]; every = 3), verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
+                                      schedule = Continuation(β = qd.H => [1.0]; every = 3), verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
   end
 
   @testset "Objective criterion counts only the current stage" begin
@@ -296,7 +299,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
   @testset "SiMPL without constraint, loop bookkeeping without allocations" begin
     q = compliance_problem()
     r = solve!(Optimization(q.z; objective = q.C), SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 4,
-               verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
+               verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     @test r.history.objective[end] < r.history.objective[1] && all(isnan, r.history.constraint)
     @test all(isnan, r.history.multiplier) && r.start_scaling === nothing
     h = OptHistory(10, (:β,))
@@ -316,13 +319,13 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     # a projected volume from a uniform 0.5 start with η = 0.5 on a finer mesh is not linear
     q = compliance_problem(; n = 40, init = 0.5)
     set_beta!(q.H, 3.0)
-    Vp = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4, θ -> (δ -> ∫(δ)q.dΩ), q.θ; scale = 0.4)
+    Vp = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4, q.θ; derivative = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4)
     o = FunctionalOracle(Optimization(q.z; objective = q.C, linear_constraints = Vp), Euclidean())
     @test_throws ArgumentError _setup_constraint!(o, Vp, q.problem.ctx)
     # a start with values at the bounds: the first solve of SiMPL is the current design
     phases = Tuple{Int,Int,Symbol}[]
     q = compliance_problem(; init = [isodd(i) ? 0.0 : 0.8 for i in 1:64], phases)
-    solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 1, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
+    solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 1, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     @test phases[findfirst(p -> p[1] == 1, phases)][3] === :optimization
     # a resumed run stops where the uninterrupted one does
     dir = mktempdir()
@@ -342,22 +345,22 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     dir2 = mktempdir()
     @test_throws OptimizationFailure solve!(qf2.problem, SIMP(OC(); metric = Euclidean()); maxiter = 6,
                                             schedule = Continuation(β = qf2.H => [1.0, 2.0]; every = 2),
-                                            checkpoint = Checkpoint(dir2; every = 100), verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 2))
+                                            checkpoint = Checkpoint(dir2; every = 100), verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 2), stop = nothing)
     ck = load_checkpoint(dir2)
     @test ck.stage == 1 && ck.iteration == 2 && qf2.H.β == 1.0
     # a fixed scale is kept on resume
     q = compliance_problem()
     rq = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 2, checkpoint = Checkpoint(dir; every = 100),
-                verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
+                verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     q2 = compliance_problem()
     q2.Vol.scale[] = 7.0
     solve!(q2.problem, SIMP(OC(); metric = Euclidean()); maxiter = 3, resume = load_checkpoint(dir),
-           verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
+           verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     @test q2.Vol.scale[] == 7.0
     # a user's file in the checkpoint folder is not deleted
     write(joinpath(dir, "z_notes.txt"), "keep")
     solve!(compliance_problem().problem, SIMP(OC(); metric = Euclidean()); maxiter = 2, checkpoint = Checkpoint(dir; every = 1),
-           verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
+           verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     @test isfile(joinpath(dir, "z_notes.txt"))
   end
 
@@ -367,20 +370,20 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     q = compliance_problem(; sign)
     r = solve!(q.problem, SIMP(SiMPL(max_backtracks = 1); metric = LumpedMass(q.dΩ)); maxiter = 10,
                schedule = Continuation(β = q.H => [1.0, 2.0]; every = 5), verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3),
-               post = ctx -> (ctx.iteration == 2 && (sign[] = -1.0)))
+               post = ctx -> (ctx.iteration == 2 && (sign[] = -1.0)), stop = nothing)
     @test r.status === :stalled && r.iterations == 2 && q.H.β == 2.0
     # an infeasible start is scaled towards the lower bound and SiMPL runs
     q = compliance_problem(; init = 0.6)
     io = IOBuffer()
     r = @test_logs solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 5, verbose = 0, io,
-                          on_failure = RejectStep(shrink = 0.5, max = 3))        # level 0: no logs, nothing on io
+                          on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)        # level 0: no logs, nothing on io
     @test isempty(take!(io)) && r.start_scaling ≈ 0.4 / 0.6
     @test r.iterations == 5 && all(<=(1e-8), r.history.constraint)
     @test nonincreasing(r.history.objective)
     # multipliers in the history
     @test all(>=(0), r.history.multiplier)
     q = compliance_problem()
-    r = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 3, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
+    r = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 3, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     @test all(>(0), r.history.multiplier)
   end
 
@@ -390,7 +393,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     c0 = q.nforward[]
     io = IOBuffer()
     r = solve!(q.problem, SIMP(SiMPL(max_backtracks = 0); metric = LumpedMass(q.dΩ)); maxiter = 30, io,
-               schedule = Continuation(β = q.H => [1.0, 2.0, 4.0, 8.0]; every = 6), on_failure = RejectStep(shrink = 0.5, max = 3))
+               schedule = Continuation(β = q.H => [1.0, 2.0, 4.0, 8.0]; every = 6), on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     out = String(take!(io))
     @test occursin("the stage ends", out)
     ends = findfirst("the stage ends", out)
@@ -402,7 +405,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     dir = mktempdir()
     q = compliance_problem()
     rb = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 2, verbose = 0, checkpoint = Checkpoint(dir; every = 2),
-                on_failure = RejectStep(shrink = 0.5, max = 3))
+                on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     ck = load_checkpoint(dir)
     @test ck.history.multiplier == rb.history.multiplier
     hfile = joinpath(dir, "history_2.csv")
@@ -414,7 +417,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     ck1 = load_checkpoint(dir)
     @test all(isnan, ck1.history.multiplier) && ck1.history.objective == ck.history.objective
     r1 = solve!(compliance_problem().problem, SIMP(OC(); metric = Euclidean()); maxiter = 4, verbose = 0, resume = ck1,
-                on_failure = RejectStep(shrink = 0.5, max = 3))
+                on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     @test r1.iterations == 4 && isnan(r1.history.multiplier[1]) && r1.history.multiplier[4] > 0
     # the scaled start leaves the entries the constraint does not act on
     q = compliance_problem()
@@ -431,6 +434,35 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     HyperShape.Methods._print_row(p0, h); HyperShape.Methods._print_event(p0, "x", :red)
     @test (@allocated HyperShape.Methods._print_row(p0, h)) == 0
     @test (@allocated HyperShape.Methods._print_event(p0, "x", :red)) == 0
+  end
+
+  @testset "Defaults: metric of OC, stopping criteria, failure handling and the banner" begin
+    default_stop = HyperShape.Methods.default_stop
+    @test SIMP(OC()).default_metric && !SIMP(OC(); metric = Euclidean()).default_metric
+    @test RejectStep() === RejectStep(shrink = 0.5, max = 5)
+    @test default_stop(OC()).change == 1e-4 && default_stop(OC()).kkt === nothing
+    @test default_stop(SiMPL()).kkt == 1e-4 && default_stop(SiMPL()).change === nothing
+    # the defaults give the same run as the same values written explicitly
+    for (mkopt, lumped) in ((() -> OC(), false), (() -> SiMPL(), true))
+      runs = map((true, false)) do dflt
+        q = compliance_problem()
+        method = lumped ? SIMP(mkopt(); metric = LumpedMass(q.dΩ)) : SIMP(mkopt())
+        io = IOBuffer()
+        r = dflt ? solve!(q.problem, method; maxiter = 8, io, verbose = 1) :
+                   solve!(q.problem, method; maxiter = 8, io, verbose = 1, on_failure = RejectStep(shrink = 0.5, max = 5),
+                          stop = default_stop(mkopt()))
+        (r, String(take!(io)))
+      end
+      (r1, o1), (r2, o2) = runs
+      @test r1.status == r2.status && r1.iterations == r2.iterations && r1.objective == r2.objective
+      name = nameof(typeof(mkopt()))
+      @test occursin("(default for $name)", o1) && !occursin("(default for", o2)
+      @test occursin("at most 5 attempts (default)", o1) && occursin("at most 5 attempts\n", o2)
+    end
+    io = IOBuffer()
+    solve!(compliance_problem().problem, SIMP(OC()); maxiter = 2, io, verbose = 1, stop = nothing)
+    out = String(take!(io))
+    @test occursin("metric: not used by OC", out) && occursin("stop: maxiter only · maxiter 2", out)
   end
 
   @testset "Screen output" begin
@@ -459,11 +491,11 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     cnt[] = 0
     q = compliance_problem(; solve_flag = () -> (cnt[] += 1; cnt[] != 3 && cnt[] < 6))
     @test_throws OptimizationFailure solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 6, io,
-                                            on_failure = RejectStep(shrink = 0.5, max = 2))
+                                            on_failure = RejectStep(shrink = 0.5, max = 2), stop = nothing)
     out = String(take!(io))
     @test occursin("✗ iteration 2: the forward problem did not converge", out) && occursin("(2 attempts)", out)
     @test occursin("✗ failed after", out)
     @test_throws ArgumentError solve!(compliance_problem().problem, SIMP(OC(); metric = Euclidean()); maxiter = 2,
-                                      verbose = 5, on_failure = RejectStep(shrink = 0.5, max = 3))
+                                      verbose = 5, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
   end
 end

@@ -25,7 +25,7 @@ function filter_problem(af_of; n = 6, depends_of = x -> ())
   Sf = LinearOperator(StaticLinearModel(af, TrialFESpace(Vf), Vf, NothingBC(); ls = LUSolver()); depends = depends_of(x),
                       solve = (m, b, ctx, stale) -> solve!(m, b; Assembly = stale))
   θ = PhysicalFields(x; ρ = Heaviside(β = 2.0, η = 0.5) ∘ HelmholtzFilter(Sf; measure = dΩ))
-  F = Functional(θ -> ∫(θ.ρ * θ.ρ)dΩ, θ -> (δ -> ∫(2 * θ.ρ * δ)dΩ), θ; scale = 1.0)
+  F = Functional(θ -> ∫(θ.ρ * θ.ρ)dΩ, θ; derivative = θ -> (δ -> ∫(2 * θ.ρ * δ)dΩ), scale = 1.0)
   (; z, x, θ, F, dΩ)
 end
 
@@ -36,9 +36,9 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
   @testset "Consistent functionals pass ($(design))" for design in (:P0, :P1)
     p = state_problem(; design)
     (; z, θ, S, A, f, dk, dΩ, dΓ, a, l) = p
-    C = Functional((u, θ) -> ∫(f * u)dΩ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, S, θ; scale = :initial)
-    B = Functional((u, θ) -> ∫(u)dΓ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, A, θ; scale = 2.0)
-    Vol = Functional(θ -> ∫(θ.ρ)dΩ, θ -> (δ -> ∫(δ)dΩ), θ; scale = 1.0)
+    C = Functional((u, θ) -> ∫(f * u)dΩ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = :self, fields = θ, scale = :initial)
+    B = Functional((u, θ) -> ∫(u)dΓ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = A, fields = θ, scale = 2.0)
+    Vol = Functional(θ -> ∫(θ.ρ)dΩ, θ; derivative = θ -> (δ -> ∫(δ)dΩ), scale = 1.0)
     z0 = copy(get_values(z))
     r = check_consistency((compliance = C, boundary = B, volume = Vol);
                           tangents = (S => ((u, v) -> a(u, v) - l(v), (u, du, v) -> a(du, v)),))
@@ -67,7 +67,7 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     p = state_problem()
     (; θ, S, f, dk, dΩ, a, l) = p
     # factor 2 in DJform
-    C = Functional((u, θ) -> ∫(f * u)dΩ, (u, w, θ) -> (δ -> ∫(-2 * (dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, S, θ; scale = 1.0)
+    C = Functional((u, θ) -> ∫(f * u)dΩ, S; derivative = (u, w, θ) -> (δ -> ∫(-2 * (dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = :self, fields = θ, scale = 1.0)
     r = check_consistency(C; tangents = S => ((u, v) -> a(u, v) - l(v), (u, du, v) -> 2 * a(du, v)))
     @test !r.passed
     @test !_all_passed(r, "gradient of functional 1")
@@ -102,7 +102,7 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     p = state_problem()
     q = filter_problem(symmetric_filter)
     dΩ = p.dΩ
-    Vol = Functional(θ -> ∫(θ.ρ)dΩ, θ -> (δ -> ∫(δ)dΩ), p.θ; scale = 1.0)
+    Vol = Functional(θ -> ∫(θ.ρ)dΩ, p.θ; derivative = θ -> (δ -> ∫(δ)dΩ), scale = 1.0)
     @test_throws ArgumentError check_consistency(Vol, q.F)                    # different z
     @test_throws ArgumentError check_consistency()
     @test_throws ArgumentError check_consistency(Vol; steps = 1)
@@ -125,15 +125,15 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     p = state_problem(; design = :P1)
     (; θ, S, f, dk, dΩ) = p
     DJ(c) = (u, w, θ) -> (δ -> ∫(-c * (dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ)
-    C = Functional((u, θ) -> ∫(f * u)dΩ, DJ(1.0), S, S, θ; scale = 1.0)
+    C = Functional((u, θ) -> ∫(f * u)dΩ, S; derivative = DJ(1.0), adjoint = :self, fields = θ, scale = 1.0)
     @test _all_passed(check_consistency(C), "gradient")
-    @test !_all_passed(check_consistency(Functional((u, θ) -> ∫(f * u)dΩ, DJ(1.05), S, S, θ; scale = 1.0)), "gradient")
+    @test !_all_passed(check_consistency(Functional((u, θ) -> ∫(f * u)dΩ, S; derivative = DJ(1.05), adjoint = :self, fields = θ, scale = 1.0)), "gradient")
     @test !_all_passed(check_consistency(C; min_rate = 2.5), "gradient")
     n0 = length(p.ctxs)
     r = check_consistency(C; ctx = :my_context)
     @test length(p.ctxs) > n0 && all(c -> c[2] === :my_context, p.ctxs[n0+1:end])   # every solve of the call
     # sensitivity of the verdict (documented): 1 % in DJform is found
-    @test !_all_passed(check_consistency(Functional((u, θ) -> ∫(f * u)dΩ, DJ(1.01), S, S, θ; scale = 1.0)), "gradient")
+    @test !_all_passed(check_consistency(Functional((u, θ) -> ∫(f * u)dΩ, S; derivative = DJ(1.01), adjoint = :self, fields = θ, scale = 1.0)), "gradient")
     # a saturated projection: J does not change along δ, nothing is tested
     set_beta!(p.H, 512.0)
     r = check_consistency(C)
@@ -144,17 +144,17 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
   @testset "A missing gradient is not hidden by a large constant" begin
     q = filter_problem(symmetric_filter)
     dΩ = q.dΩ
-    F = Functional(θ -> ∫(1.0e8 + θ.ρ)dΩ, θ -> (δ -> ∫(0.0 * δ)dΩ), q.θ; scale = 1.0)
+    F = Functional(θ -> ∫(1.0e8 + θ.ρ)dΩ, q.θ; derivative = θ -> (δ -> ∫(0.0 * δ)dΩ), scale = 1.0)
     @test !_all_passed(check_consistency(F), "gradient")
-    G = Functional(θ -> ∫(1.0e8 + θ.ρ)dΩ, θ -> (δ -> ∫(δ)dΩ), q.θ; scale = 1.0)
+    G = Functional(θ -> ∫(1.0e8 + θ.ρ)dΩ, q.θ; derivative = θ -> (δ -> ∫(δ)dΩ), scale = 1.0)
     @test _all_passed(check_consistency(G), "gradient")
   end
 
   @testset "Number of solves" begin
     p = state_problem()
     (; θ, S, A, f, dk, dΩ, dΓ, nforward, nadjoint) = p
-    C = Functional((u, θ) -> ∫(f * u)dΩ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, S, θ; scale = 1.0)
-    B = Functional((u, θ) -> ∫(u)dΓ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, A, θ; scale = 1.0)
+    C = Functional((u, θ) -> ∫(f * u)dΩ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = :self, fields = θ, scale = 1.0)
+    B = Functional((u, θ) -> ∫(u)dΓ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = A, fields = θ, scale = 1.0)
     functional_gradient!(zeros(length(p.z)), B, nothing)
     f0, a0 = nforward[], nadjoint[]
     @test check_consistency(C, B; steps = 5).passed
@@ -168,7 +168,7 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
       (; z, θ, f, dk, dΩ) = p
       cnt = Ref(0)
       S2 = StateOperator(p.S.model; depends = θ, solve = (m, ctx) -> (cnt[] += 1; (solve!(m; Assembly = true), cnt[] < failfrom)))
-      C = Functional((u, θ) -> ∫(f * u)dΩ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S2, S2, θ; scale = :initial)
+      C = Functional((u, θ) -> ∫(f * u)dΩ, S2; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = :self, fields = θ, scale = :initial)
       z0 = copy(get_values(z))
       r = check_consistency(C)
       @test !r.passed && !_all_passed(r, "gradient")
@@ -177,8 +177,7 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     p = state_problem()
     (; z, θ, S, f, dk, dΩ) = p
     cnt = Ref(0)
-    C = Functional((u, θ) -> (cnt[] += 1; cnt[] == 4 && error("boom"); ∫(f * u)dΩ),
-                   (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, S, θ; scale = :initial)
+    C = Functional((u, θ) -> (cnt[] += 1; cnt[] == 4 && error("boom"); ∫(f * u)dΩ), S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = :self, fields = θ, scale = :initial)
     z0 = copy(get_values(z))
     @test_throws ErrorException check_consistency(C)
     @test get_values(z) == z0 && isnan(C.scale[])
@@ -191,7 +190,7 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     z = OptVariables(ρ = FieldVariable(V0; bounds = (0.0, Inf), init = [0.5 + 0.3 * sin(i) for i in 1:num_free_dofs(V0)]))
     x = DesignFields(z; ρ = Identity())
     θ = PhysicalFields(x; ρ = Heaviside(β = 2.0, η = 0.5), E = :ρ => Identity())
-    F = Functional(θ -> ∫(θ.ρ * θ.E)dΩ, θ -> (ρ = δ -> ∫(θ.E * δ)dΩ, E = δ -> ∫(θ.ρ * δ)dΩ), θ; scale = 1.0)
+    F = Functional(θ -> ∫(θ.ρ * θ.E)dΩ, θ; derivative = θ -> (ρ = δ -> ∫(θ.E * δ)dΩ, E = δ -> ∫(θ.ρ * δ)dΩ), scale = 1.0)
     r = check_consistency((energy = F,))
     @test r.passed
     @test _all_passed(r, "design chain of θ.ρ") && _all_passed(r, "design chain of θ.E")
@@ -200,7 +199,7 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
   @testset "Tangents: nonlinear residual, Dirichlet values, labels" begin
     p = state_problem(; gD = 1.0, adjoint_space = :homogeneous)
     (; θ, S, A, dk, dΩ, dΓ) = p
-    B = Functional((u, θ) -> ∫(u)dΓ, (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), S, A, θ; scale = 1.0)
+    B = Functional((u, θ) -> ∫(u)dΓ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = A, fields = θ, scale = 1.0)
     res(u, v) = ∫((1 + u * u) * ∇(u) ⋅ ∇(v))dΩ
     jac(c) = (u, du, v) -> ∫((1 + u * u) * ∇(du) ⋅ ∇(v) + c * u * du * ∇(u) ⋅ ∇(v))dΩ
     r = check_consistency(B; tangents = (S => (res, jac(2.0)), S => (res, jac(1.9))))
@@ -218,7 +217,7 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
       u1 = get_state(S1)
       S2 = StateOperator(StaticLinearModel(v -> ∫(u1 * v)dΩ, (u, v) -> ∫(∇(u) ⋅ ∇(v))dΩ, U, V, bc; ls = LUSolver());
                          depends = (θ, S1), solve = (m, ctx) -> solve!(m; Assembly = true))
-      F = Functional((u, θ) -> ∫(u)dΩ, (u, w, θ) -> (δ -> ∫(0.0 * δ)dΩ), S2, S2, θ; scale = 1.0)
+      F = Functional((u, θ) -> ∫(u)dΩ, S2; derivative = (u, w, θ) -> (δ -> ∫(0.0 * δ)dΩ), adjoint = :self, fields = θ, scale = 1.0)
       r = check_consistency(F)
       @test _all_passed(r, "dependencies") == (deps1 !== ())
     end
@@ -232,7 +231,7 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     x = DesignFields(z; ρ = Identity())
     θ = PhysicalFields(x; ρ = Identity())
     ε = 3e-6
-    F = Functional(θ -> ∫(θ.ρ + ε * θ.ρ * θ.ρ)dΩ, θ -> (δ -> ∫((1 + 2ε * θ.ρ) * δ)dΩ), θ; scale = 1.0)
+    F = Functional(θ -> ∫(θ.ρ + ε * θ.ρ * θ.ρ)dΩ, θ; derivative = θ -> (δ -> ∫((1 + 2ε * θ.ρ) * δ)dΩ), scale = 1.0)
     r = check_consistency(F; direction = fill(0.1, n), h0 = 1e-2)
     g = only(_results(r, "gradient"))
     @test !g.passed && occursin("inconclusive", g.message)
@@ -244,7 +243,7 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     Sf = HyperShape.Variables.filter_operators(q.θ)[1]
     dΩ = q.dΩ
     θ2 = PhysicalFields(q.x; ρ = Heaviside(β = 3.0, η = 0.4) ∘ HelmholtzFilter(Sf; measure = dΩ), E = :ρ => HelmholtzFilter(Sf; measure = dΩ))
-    F = Functional(θ -> ∫(θ.ρ * θ.E)dΩ, θ -> (ρ = δ -> ∫(θ.E * δ)dΩ, E = δ -> ∫(θ.ρ * δ)dΩ), θ2; scale = 1.0)
+    F = Functional(θ -> ∫(θ.ρ * θ.E)dΩ, θ2; derivative = θ -> (ρ = δ -> ∫(θ.E * δ)dΩ, E = δ -> ∫(θ.ρ * δ)dΩ), scale = 1.0)
     r = check_consistency(F)
     @test r.passed
     @test length(_results(r, "design chain")) == 2 && length(_results(r, "symmetry")) == 1

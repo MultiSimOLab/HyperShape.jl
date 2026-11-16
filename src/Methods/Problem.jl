@@ -26,7 +26,7 @@ struct _Validated end   # only the keyword constructors build problems
 
 Optimisation problem over the variables `z`: minimise the [`Functional`](@ref) `objective` subject to the bounds of
 `z` and, in phase 0, at most one linear constraint `g(z) ≤ 0`, given as a design-only functional (for example the
-volume of an unprojected density, `Functional(θ -> sum(∫(θ.ρ)dΩ) - Vmax, θ -> (δ -> ∫(δ)dΩ), θv; scale = Vmax)` with
+volume of an unprojected density, `Functional(θ -> sum(∫(θ.ρ)dΩ) - Vmax, θv; derivative = θ -> (δ -> ∫(δ)dΩ), scale = Vmax)` with
 `θv = PhysicalFields(x; ρ = Identity())`). Its
 linearity in z is checked when the optimisation starts. Nonlinear constraints (`constraints = …`) come in phase 1.
 
@@ -81,21 +81,34 @@ end
 const Metric = Union{Euclidean,LumpedMass}
 
 """
-    SIMP(optimizer; metric)
+    SIMP(optimizer; metric = default_metric(optimizer))
 
-Density method: the step is `optimizer` (any `Optimizer`: `OC(…)`, `SiMPL(…)`). `metric` is mandatory:
-[`LumpedMass`](@ref)`(dΩ)` or [`Euclidean`](@ref)`()`, or a named tuple with one of them per block of z. OC
-ignores it; SiMPL uses it in its step and its optimality measure.
+Density method: the step is `optimizer` (any `Optimizer`: `OC(…)`, `SiMPL(…)`). `metric`:
+[`LumpedMass`](@ref)`(dΩ)` or [`Euclidean`](@ref)`()`, or a named tuple with one of them per block of z. SiMPL uses
+it in its step and its optimality measure, and needs it (no default). OC ignores it; its default is `Euclidean()`.
 """
 struct SIMP{O<:Optimizer,M}
   optimizer::O
   metric::M
-  function SIMP(optimizer::Optimizer; metric)
+  default_metric::Bool   # the metric was not given (shown in the banner)
+  function SIMP(optimizer::Optimizer; metric = nothing)
+    given = metric !== nothing
+    given || (metric = default_metric(optimizer))
     ok = metric isa Metric || (metric isa NamedTuple && all(m -> m isa Metric, values(metric)))
     ok || throw(ArgumentError("SIMP: metric must be LumpedMass(dΩ), Euclidean() or a named tuple of them per block"))
-    new{typeof(optimizer),typeof(metric)}(optimizer, metric)
+    new{typeof(optimizer),typeof(metric)}(optimizer, metric, !given)
   end
 end
+
+"""
+    default_metric(optimizer)
+
+Metric of [`SIMP`](@ref) when none is given: `Euclidean()` for OC (which does not use it); an error for any other
+optimiser, which must be given one.
+"""
+default_metric(::OC) = Euclidean()
+default_metric(opt::Optimizer) =
+  throw(ArgumentError("SIMP: $(nameof(typeof(opt))) needs a metric: SIMP(opt; metric = LumpedMass(dΩ)) or Euclidean()"))
 
 _block_metric(::Euclidean, V) = ones(num_free_dofs(V))
 _block_metric(m::LumpedMass, V) = collect(assemble_vector(v -> ∫(v)m.measure, V))

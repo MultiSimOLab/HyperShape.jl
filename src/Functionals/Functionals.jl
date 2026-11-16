@@ -9,7 +9,7 @@ module Functionals
 using Gridap
 using Gridap.FESpaces
 using HyperFEM: HyperFEM, get_state, get_spaces
-using ..Operators: StateOperator, apply!, version
+using ..Operators: StateOperator, apply!, version, dirichlet_values
 import ..Operators: invalidate!
 using ..Operators: get_model as HyperShape_get_model
 using ..Variables: PhysicalFields, update_fields!, design_gradient!, get_designfields, get_optvariables
@@ -17,23 +17,27 @@ using ..Variables: PhysicalFields, update_fields!, design_gradient!, get_designf
 export Functional, functional_value, functional_gradient!
 
 """
-    Functional(Jform, DJform, S, A, θ; scale)
-    Functional(Jform, DJform, θ; scale)
+    Functional(J, S::StateOperator; derivative, adjoint, scale, fields = nothing)
+    Functional(J, θ::PhysicalFields; derivative, scale)
 
 Objective or constraint.
 
 With states (first form):
-- `Jform(u, θ)`: value, a `DomainContribution` (`∫(…)dΩ`) or a number; `u = get_state(S)`.
-- `DJform(u, p, θ)`: total derivative with respect to the physical fields, `∂J/∂θ − ∂R/∂θ` contracted with the
-  adjoint `p = get_state(A)`: a function `δ -> ∫(… * δ)dΩ` when θ has one field, or a named tuple of such functions
+- `J(u, θ)`: value, a `DomainContribution` (`∫(…)dΩ`) or a number; `u = get_state(S)`.
+- `derivative(u, p, θ)`: total derivative with respect to the physical fields, `∂J/∂θ − ∂R/∂θ` contracted with the
+  adjoint `p`: a function `δ -> ∫(… * δ)dΩ` when θ has one field, or a named tuple of such functions
   (`(ρ = δ -> …, E = δ -> …)`), one per physical field it depends on.
-- `S`: forward [`StateOperator`](@ref); `A`: adjoint state operator, which solves `a(w, p) = ∂J/∂u[w]` for all `w`
-  (with `a` the tangent of the forward problem) on a space with homogeneous Dirichlet values; `S` must depend on θ
-  and `A` on θ and `S`. For a self-adjoint functional pass `A = S` (then `p = u`; valid only when the Dirichlet
-  values of the state are zero) and include the sign in `DJform`. Non-zero Dirichlet values in the trial space of
-  the adjoint are detected when the gradient is computed.
+- `S`: forward [`StateOperator`](@ref).
+- `adjoint` (mandatory): the adjoint state, usually
+  [`AdjointOperator`](@ref HyperShape.Operators.AdjointOperator)`(S, model)`, which solves `a(w, p) = ∂J/∂u[w]`
+  for all `w` (with `a` the tangent of the forward problem) on a space with homogeneous Dirichlet values; it must
+  depend on θ and on `S`. Or `:self` for a self-adjoint functional (then `p = u`, with the
+  sign in `derivative`; valid only when the Dirichlet values of the state are zero, which is checked here and when
+  the gradient is computed).
+- `fields`: the physical fields θ. By default the only [`PhysicalFields`](@ref) among the dependencies of `S`;
+  give it when `S` depends on none or on several.
 
-Design only (second form, volume, perimeter): `Jform(θ)` and `DJform(θ)`.
+Design only (second form, volume, perimeter): `J(θ)` and `derivative(θ)`.
 
 `scale` is mandatory: a positive number, `:initial` (the absolute value of the first finite evaluation; an error if
 it is zero) or `1.0` for no scaling. The value and the derivative are divided by it.
@@ -66,19 +70,44 @@ end
 
 _depends_on(S::StateOperator, obj) = any(d -> d === obj, S.depends)
 
-function Functional(Jform, DJform, S::StateOperator, A::StateOperator, θ::PhysicalFields; scale)
-  mode, value = _scale(scale)
-  _depends_on(S, θ) || throw(ArgumentError("Functional: the forward state must depend on θ (depends = θ)"))
-  if A !== S
-    (_depends_on(A, θ) && _depends_on(A, S)) ||
-      throw(ArgumentError("Functional: the adjoint state must depend on θ and on the forward state (depends = (θ, S))"))
+function _fields(S::StateOperator, fields)
+  if fields === nothing
+    θs = Tuple(d for d in S.depends if d isa PhysicalFields)   # the dependencies have no repetitions
+    length(θs) == 1 || throw(ArgumentError(isempty(θs) ?
+      "Functional: the forward state does not depend directly on any PhysicalFields; declare θ among its dependencies (StateOperator(model, θ))" :
+      "Functional: the forward state depends on several PhysicalFields; pass fields = θ"))
+    return θs[1]
   end
-  Functional(Jform, DJform, S, A, θ, mode, Ref(value), [-1.0, -1.0, NaN])
+  fields isa PhysicalFields || throw(ArgumentError("Functional: fields must be a PhysicalFields"))
+  _depends_on(S, fields) || throw(ArgumentError("Functional: the forward state must depend on θ (StateOperator(model, θ))"))
+  fields
 end
 
-function Functional(Jform, DJform, θ::PhysicalFields; scale)
+struct _NoAdjoint end
+
+function Functional(J, S::StateOperator; derivative, adjoint = _NoAdjoint(), scale, fields = nothing)
+  adjoint isa _NoAdjoint && throw(ArgumentError(
+    "Functional: adjoint is mandatory: adjoint = AdjointOperator(S, model), or adjoint = :self for a self-adjoint functional"))
   mode, value = _scale(scale)
-  Functional(Jform, DJform, nothing, nothing, θ, mode, Ref(value), [-1.0, -1.0, NaN])
+  θ = _fields(S, fields)
+  A = if adjoint === :self
+    _check_homogeneous(S, true)
+    S
+  elseif adjoint isa StateOperator
+    adjoint === S && throw(ArgumentError("Functional: write adjoint = :self for a self-adjoint functional"))
+    (_depends_on(adjoint, θ) && _depends_on(adjoint, S)) ||
+      throw(ArgumentError("Functional: the adjoint state must depend on θ and on the forward state (use AdjointOperator(S, model))"))
+    _check_homogeneous(adjoint, false)
+    adjoint
+  else
+    throw(ArgumentError("Functional: adjoint must be a StateOperator (AdjointOperator(S, model)) or :self, got $(repr(adjoint))"))
+  end
+  Functional(J, derivative, S, A, θ, mode, Ref(value), [-1.0, -1.0, NaN])
+end
+
+function Functional(J, θ::PhysicalFields; derivative, scale)
+  mode, value = _scale(scale)
+  Functional(J, derivative, nothing, nothing, θ, mode, Ref(value), [-1.0, -1.0, NaN])
 end
 
 _total(v::Real) = Float64(v)
@@ -139,19 +168,17 @@ end
 function _as_named(form, θ)
   names = propertynames(θ)
   length(names) == 1 ||
-    throw(ArgumentError("Functional: DJform must return a named tuple of forms when θ has several fields ($(join(names, ", ")))"))
+    throw(ArgumentError("Functional: derivative must return a named tuple of forms when θ has several fields ($(join(names, ", ")))"))
   NamedTuple{(names[1],)}((form,))
 end
 
 # the adjoint (or the state of a self-adjoint functional) must have homogeneous Dirichlet values
 _check_homogeneous(F::Functional{FJ,FD,Nothing}) where {FJ,FD} = nothing
-function _check_homogeneous(F::Functional)
-  m = HyperShape_get_model(F.A)
-  applicable(get_spaces, m) || return nothing
-  U = first(get_spaces(m))
-  applicable(get_dirichlet_dof_values, U) || return nothing
-  all(iszero, get_dirichlet_dof_values(U)) || throw(ArgumentError(F.A === F.S ?
-    "Functional: A = S needs homogeneous Dirichlet values in the state; give an adjoint state on a homogeneous space" :
+_check_homogeneous(F::Functional) = _check_homogeneous(F.A, F.A === F.S)
+function _check_homogeneous(A::StateOperator, self::Bool)
+  v = dirichlet_values(HyperShape_get_model(A))
+  v === nothing || all(iszero, v) || throw(ArgumentError(self ?
+    "Functional: adjoint = :self needs homogeneous Dirichlet values in the state; give an AdjointOperator on a homogeneous space" :
     "Functional: the trial space of the adjoint has non-zero Dirichlet values; build the adjoint on a homogeneous space"))
   nothing
 end
@@ -160,7 +187,7 @@ end
     functional_gradient!(gz, F::Functional, ctx) -> gz
 
 Scaled derivative of the functional with respect to z, written into `gz`. Solves the forward state (if needed) and
-the adjoint state, assembles `DJform` and pulls it back to z. Filled with `NaN` if a state did not converge.
+the adjoint state, assembles `derivative` and pulls it back to z. Filled with `NaN` if a state did not converge.
 """
 function functional_gradient!(gz, F::Functional, ctx)
   update_fields!(F.θ, ctx)

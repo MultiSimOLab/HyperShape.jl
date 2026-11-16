@@ -15,6 +15,7 @@ ecosystem, and uses HyperFEM's computational models as black boxes for the forwa
 - One abstraction for **density (SIMP)**, **reaction–diffusion** and **level-set** methods.
 - **Weak forms, computational models and solvers are written and configured by the user**; HyperShape adds the
   design variables, the functionals, the sensitivities and the optimisation loop.
+  Defaults (the solve of a linear model, stopping criteria, step rejection) can always be replaced from the script.
 - **Analytical derivatives** throughout, verified with Taylor (finite-difference) tests.
 - Structured meshes (real geometries imported from STL/CAD on octree background meshes) and unstructured meshes.
 - Designed for large problems: in-place operations on generic vectors, user-supplied solvers, global operations
@@ -31,7 +32,7 @@ OptVariables z ─► DesignFields x ─► PhysicalFields θ ─► weak forms 
 | Piece | Role |
 |---|---|
 | `OptVariables`, `DesignFields`, `PhysicalFields` | Three linked levels of variables: what the optimiser sees, the design fields (nodal or cell-wise), and the physical fields read by the weak forms |
-| `StateOperator` | Forward and adjoint states over HyperFEM computational models |
+| `StateOperator`, `AdjointOperator` | Forward and adjoint states over HyperFEM computational models (default `solve` for linear models) |
 | `LinearOperator` | Auxiliary linear solves (filter, reaction–diffusion step, velocity extension) |
 | `Functional` | Objective and constraints, with their derivative with respect to the physical fields |
 | Methods | `SIMP`, `ReactionDiffusion`, `LevelSet`: a common loop where only the step differs |

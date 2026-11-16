@@ -49,10 +49,12 @@ function _describe_stop(stop)
 end
 
 _metric_name(m::Euclidean) = "Euclidean"
+_metric_label(method) = method.optimizer isa OC ? "not used by OC" :
+                        _metric_name(method.metric) * (method.default_metric ? " (default)" : "")
 _metric_name(m::LumpedMass) = "lumped mass"
 _metric_name(m::NamedTuple) = join(("$k: $(_metric_name(v))" for (k, v) in pairs(m)), ", ")
 
-function _print_banner(p::_Printer, problem, method, maxiter, stop, schedule, resume)
+function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, defaults, schedule, resume)
   p.level >= 1 || return
   opt = method.optimizer
   z = problem.z
@@ -62,14 +64,16 @@ function _print_banner(p::_Printer, problem, method, maxiter, stop, schedule, re
   blocks = join(("$n ($(length(r)))" for (n, r) in zip(z.names, z.ranges)), ", ")
   nc = length(problem.linear_constraints)
   println(p.io, "  design variables $(length(z)): $blocks · constraint: ", nc == 0 ? "none" : "linear", " · metric: ",
-          _metric_name(method.metric))
+          _metric_label(method))
   if schedule !== nothing
     for (n, v) in zip(schedule.names, schedule.values)
       println(p.io, "  continuation $n: ", join((_g(x) for x in v), " → "), " (every $(schedule.every) iterations)")
     end
   end
-  println(p.io, "  stop: ", _describe_stop(stop), " · maxiter $maxiter",
-          resume === nothing ? "" : " · resumed at iteration $(resume.iteration)")
+  println(p.io, "  stop: ", _describe_stop(stop), defaults.stop ? " (default for $(nameof(typeof(opt))))" : "",
+          " · maxiter $maxiter", resume === nothing ? "" : " · resumed at iteration $(resume.iteration)")
+  println(p.io, "  on failure: reject step, shrink $(_g(on_failure.shrink)), at most $(on_failure.max) attempts",
+          defaults.on_failure ? " (default)" : "")
   _print_columns(p, schedule)
 end
 

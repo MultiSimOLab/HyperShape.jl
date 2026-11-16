@@ -7,13 +7,17 @@ Operators over HyperFEM computational models.
   carries the bilinear form only and HyperShape supplies the right-hand side.
 - [`StateOperator`](@ref): forward and adjoint states. The model carries the user's full weak forms.
 
-Both declare their dependencies explicitly (`depends = ...`): objects with a [`version`](@ref) counter.
+Both declare their dependencies (objects with a [`version`](@ref) counter), positionally or with `depends = ...`.
+For a `StaticLinearModel` both have a default `solve` ([`default_solve`](@ref)); any other model needs the user's.
+[`AdjointOperator`](@ref) builds the adjoint state of a forward one.
 """
 module Operators
 
 using HyperFEM: HyperFEM
+using Gridap.FESpaces: get_dirichlet_dof_values
+using Gridap.MultiField: MultiFieldFESpace
 
-export LinearOperator, StateOperator, is_converged, OptContext
+export LinearOperator, StateOperator, AdjointOperator, is_converged, OptContext
 
 """
     OptContext(phase::Symbol = :setup)
@@ -67,6 +71,39 @@ abstract type AbstractOperator end
 _as_depends(d::Tuple) = d
 _as_depends(d) = (d,)
 
+# dependencies given positionally or with `depends =`, never both
+struct _Unset end
+function _dependencies(who, positional, keyword)
+  positional isa _Unset || keyword isa _Unset ||
+    throw(ArgumentError("$who: give the dependencies once, positionally or with depends ="))
+  positional isa _Unset ? keyword : positional
+end
+
+"""
+    default_solve(::Type{<:AbstractOperator}, model)
+
+Solve function used when the user gives none. Only a HyperFEM `StaticLinearModel` has one, and it calls the model's
+own solver (HyperShape never chooses one):
+
+- [`StateOperator`](@ref): `(m, ctx) -> solve!(m; Assembly = true)`. The operator is solved only when a dependency
+  changed, so the forms are always re-assembled (`Assembly = false` would also reuse the previous right-hand side).
+- [`LinearOperator`](@ref): `(m, b, ctx, stale) -> solve!(m, b; Assembly = stale)`: the matrix is re-assembled and
+  factorised again only when a dependency changed.
+
+Any other model (nonlinear, staggered, transient, or a `StaticLinearModel` with several right-hand sides) throws: the load stepping and the restart are modelling decisions,
+so pass `solve = (m, ctx) -> solve!(m; stepping = …, RestartState = …)`. To use another solver (PETSc, an iterative
+solver with a preconditioner…) build the model with it, or pass your own `solve`.
+"""
+function default_solve end
+
+_solve_state_linear(m, ctx) = HyperFEM.solve!(m; Assembly = true)
+_solve_rhs_linear(m, b, ctx, stale) = HyperFEM.solve!(m, b; Assembly = stale)
+
+default_solve(::Type{<:AbstractOperator}, model) =
+  throw(ArgumentError("no default solve for a $(nameof(typeof(model))): only a StaticLinearModel with one " *
+                      "right-hand side has one. For a nonlinear model the load stepping and the restart are modelling " *
+                      "decisions: pass solve = (m, ctx) -> solve!(m; stepping = …, RestartState = …) (or your own solve)"))
+
 function _check_depends(depends)
   for d in depends
     applicable(version, d) || throw(ArgumentError("depends: $(typeof(d)) does not implement HyperShape.Operators.version"))
@@ -98,17 +135,19 @@ solved. Nothing for other objects.
 refresh!(obj, ctx) = obj
 
 """
-    LinearOperator(model; depends, solve)
+    LinearOperator(model[, deps]; depends = (), solve = default_solve(LinearOperator, model))
 
 Linear solve with a matrix built by a HyperFEM model (typically a `StaticLinearModel` with the bilinear form alone)
 and a right-hand side supplied by HyperShape.
 
 - `model`: the computational model; its matrix and solver are the user's.
-- `depends`: the objects the matrix depends on (one object or a tuple; each implements [`version`](@ref)); `()` if
-  the matrix never changes. Mandatory.
-- `solve`: user function `(model, b, ctx, stale) -> x` that solves with the right-hand side `b` and returns the
-  solution vector. `stale` is `true` when something in `depends` changed since the last solve, so the user can
-  re-assemble, for example `solve = (m, b, ctx, stale) -> solve!(m, b; Assembly = stale)`. Mandatory.
+- `deps` or `depends`: the objects the matrix depends on (one object or a tuple; each implements
+  [`version`](@ref)), given once. Default `()`: the matrix never changes. A dependency captured by the bilinear form
+  and not declared gives stale results; [`check_consistency`](@ref HyperShape.Checks.check_consistency) detects it.
+- `solve`: function `(model, b, ctx, stale) -> x` that solves with the right-hand side `b` and returns the solution
+  vector. `stale` is `true` when something in the dependencies changed since the last solve, so it can re-assemble.
+  Default for a `StaticLinearModel`: `solve!(m, b; Assembly = stale)` ([`default_solve`](@ref)); mandatory for any
+  other model.
 
 The matrix must be the one the model assembled at construction (no dependency has changed yet). The returned vector
 is copied, so it may be a buffer of the model. [`invalidate!`](@ref) makes the next solve stale whatever the
@@ -123,8 +162,9 @@ mutable struct LinearOperator{M,F,D} <: AbstractOperator
   nsolves::Int        # number of solves done
 end
 
-function LinearOperator(model; depends, solve)
-  deps = _check_depends(_as_depends(depends))
+function LinearOperator(model, deps = _Unset(); depends = _Unset(), solve = default_solve(LinearOperator, model))
+  d = _dependencies("LinearOperator", deps, depends)
+  deps = _check_depends(_as_depends(d isa _Unset ? () : d))
   LinearOperator(model, solve, deps, Int[version(d) for d in deps], false, 0)
 end
 

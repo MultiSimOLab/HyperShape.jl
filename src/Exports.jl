@@ -6,27 +6,17 @@ macro publish(mod, name)
   end
 end
 
-@publish TopOpt FEFunctional
-@publish TopOpt adimensionalize!
-@publish TopOpt evaluate_derivative!
-@publish TopOpt evaluate_objective
-@publish TopOpt evaluate!
-@publish TopOpt get_space
-@publish TopOpt get_derivative
-@publish TopOpt OptimFEVariable
-@publish TopOpt update!
-@publish TopOpt pushforward!
-@publish TopOpt pullback!
-
-
 @publish Operators LinearOperator
 @publish Operators StateOperator
+@publish Operators AdjointOperator
 @publish Operators is_converged
 @publish Operators OptContext
 @publish Functionals Functional
 @publish Functionals functional_value
 @publish Functionals functional_gradient!
 @publish Checks check_consistency
+@publish Optimizers OC
+@publish Optimizers SiMPL
 @publish Methods Optimization
 @publish Methods SIMP
 @publish Methods LumpedMass
