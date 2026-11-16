@@ -141,6 +141,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
       e
     end
     @test err isa OptimizationFailure && occursin("first iteration", sprint(showerror, err))
+    @test err.iterations == 0 && isempty(err.history.iteration) && size(err.history.continuation, 2) == 0
   end
 
   @testset "OC: the move limit is restored after a standing step" begin
@@ -297,6 +298,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     r = solve!(Optimization(q.z; objective = q.C), SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 4,
                verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
     @test r.history.objective[end] < r.history.objective[1] && all(isnan, r.history.constraint)
+    @test all(isnan, r.history.multiplier) && r.start_scaling === nothing
     h = OptHistory(10, (:β,))
     buf = [1.0]
     row = (1, 1.0, 0.0, NaN, 0.1, 0.2, 1, 1, 0, 2, 0.5)
@@ -369,8 +371,10 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test r.status === :stalled && r.iterations == 2 && q.H.β == 2.0
     # an infeasible start is scaled towards the lower bound and SiMPL runs
     q = compliance_problem(; init = 0.6)
-    r = @test_logs (:info, r"scaled towards the lower bound") solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ));
-                                                                     maxiter = 5, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
+    io = IOBuffer()
+    r = @test_logs solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 5, verbose = 0, io,
+                          on_failure = RejectStep(shrink = 0.5, max = 3))        # level 0: no logs, nothing on io
+    @test isempty(take!(io)) && r.start_scaling ≈ 0.4 / 0.6
     @test r.iterations == 5 && all(<=(1e-8), r.history.constraint)
     @test nonincreasing(r.history.objective)
     # multipliers in the history
@@ -378,6 +382,55 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     q = compliance_problem()
     r = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 3, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
     @test all(>(0), r.history.multiplier)
+  end
+
+  @testset "Second review: stalls, solve counts, old checkpoints, scaled start" begin
+    # a stall ends a stage and the run goes on; the summary counts every forward solve of the call
+    q = compliance_problem(; n = 16)
+    c0 = q.nforward[]
+    io = IOBuffer()
+    r = solve!(q.problem, SIMP(SiMPL(max_backtracks = 0); metric = LumpedMass(q.dΩ)); maxiter = 30, io,
+               schedule = Continuation(β = q.H => [1.0, 2.0, 4.0, 8.0]; every = 6), on_failure = RejectStep(shrink = 0.5, max = 3))
+    out = String(take!(io))
+    @test occursin("the stage ends", out)
+    ends = findfirst("the stage ends", out)
+    @test count(l -> occursin(r"^\s+\d+\s+\d\.\d{6}e[+-]\d\d", l), split(out[last(ends):end], '\n')) >= 1   # rows after it
+    m = match(r"solves: forward (\d+)", out)
+    @test parse(Int, m[1]) == q.nforward[] - c0
+    @test !occursin(r"─\n\s+it .*\n\s+─+\n\s+─", out)                   # no header without rows
+    # a checkpoint of format 1 (no multiplier column) is still read
+    dir = mktempdir()
+    q = compliance_problem()
+    rb = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 2, verbose = 0, checkpoint = Checkpoint(dir; every = 2),
+                on_failure = RejectStep(shrink = 0.5, max = 3))
+    ck = load_checkpoint(dir)
+    @test ck.history.multiplier == rb.history.multiplier
+    hfile = joinpath(dir, "history_2.csv")
+    lines = split.(readlines(hfile), ",")
+    j = findfirst(==("multiplier"), lines[1])
+    write(hfile, join((join(deleteat!(copy(l), j), ",") for l in lines), "\n") * "\n")
+    tfile = joinpath(dir, "checkpoint.toml")
+    write(tfile, replace(read(tfile, String), "format = 2" => "format = 1"))
+    ck1 = load_checkpoint(dir)
+    @test all(isnan, ck1.history.multiplier) && ck1.history.objective == ck.history.objective
+    r1 = solve!(compliance_problem().problem, SIMP(OC(); metric = Euclidean()); maxiter = 4, verbose = 0, resume = ck1,
+                on_failure = RejectStep(shrink = 0.5, max = 3))
+    @test r1.iterations == 4 && isnan(r1.history.multiplier[1]) && r1.history.multiplier[4] > 0
+    # the scaled start leaves the entries the constraint does not act on
+    q = compliance_problem()
+    nz = length(get_values(q.z))
+    a = ones(nz); a[1:5] .= 0
+    lb = zeros(nz)
+    zk = fill(0.6, nz)
+    t = HyperShape.Methods._make_feasible!((a = a, V = 0.4 * sum(a), lb = lb, z = q.z), zk)
+    @test t ≈ 0.4 / 0.6 && all(==(0.6), zk[1:5]) && dot(a, zk) ≈ 0.4 * sum(a)
+    # printing at level 0 allocates nothing
+    h = OptHistory(4, (:β,))
+    _record!(h, (1, 1.0, 0.0, NaN, 0.1, 0.2, 1, 1, 0, 2, 0.5), [1.0])
+    p0 = HyperShape.Methods._Printer(IOBuffer(), 0, nothing)
+    HyperShape.Methods._print_row(p0, h); HyperShape.Methods._print_event(p0, "x", :red)
+    @test (@allocated HyperShape.Methods._print_row(p0, h)) == 0
+    @test (@allocated HyperShape.Methods._print_event(p0, "x", :red)) == 0
   end
 
   @testset "Screen output" begin

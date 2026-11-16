@@ -182,9 +182,11 @@ end
     OptResult
 
 Result of [`solve!`](@ref): `status` (`:converged`, `:maxiter` or `:stalled`, the last when the optimiser found no
-acceptable step in the last continuation stage; in an earlier stage this ends the stage), `reason` (the criterion met, or `nothing`), `iterations`, `objective` (scaled, at the final design),
-`history` ([`OptHistory`](@ref)) and `state` (the optimiser state). The final design is in `z`, with the fields and
-the forward state in sync with it.
+acceptable step in the last continuation stage; in an earlier stage this ends the stage), `reason` (the criterion
+met, or `nothing`), `iterations`, `objective` (scaled, at the final design), `history` ([`OptHistory`](@ref)),
+`state` (the optimiser state) and `start_scaling` (the factor `t` by which an infeasible starting design was scaled
+towards the lower bound, `nothing` if it was not). The final design is in `z`, with the fields and the forward state
+in sync with it.
 """
 struct OptResult{S}
   status::Symbol
@@ -193,6 +195,7 @@ struct OptResult{S}
   objective::Float64
   history::OptHistory
   state::S
+  start_scaling::Union{Nothing,Float64}
 end
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -217,7 +220,7 @@ function _write_checkpoint(c::Checkpoint, problem, opt, zk, hist, k, stage, stag
     end
   end
   meta = Dict{String,Any}(
-    "format" => 1,
+    "format" => 2,
     "iteration" => k,
     "stage" => stage,
     "stage_iterations" => stage_iters,
@@ -244,7 +247,7 @@ memory of the optimiser is not saved: OC resumes exactly, SiMPL restarts its ste
 """
 function load_checkpoint(path::AbstractString)
   meta = TOML.parsefile(joinpath(path, "checkpoint.toml"))
-  meta["format"] == 1 || throw(ArgumentError("load_checkpoint: unknown format $(meta["format"])"))
+  meta["format"] in (1, 2) || throw(ArgumentError("load_checkpoint: unknown format $(meta["format"])"))
   n = meta["length"]
   z = Vector{Float64}(undef, n)
   open(io -> read!(io, z), joinpath(path, meta["z_file"]))
@@ -252,6 +255,8 @@ function load_checkpoint(path::AbstractString)
   header = Symbol.(split(first(lines), ","))
   rows = [parse.(Float64, split(l, ",")) for l in lines[2:end]]
   cols = NamedTuple{Tuple(header)}(Tuple([r[j] for r in rows] for j in eachindex(header)))
+  # format 1 (before the multiplier column): the multiplier is unknown
+  haskey(cols, :multiplier) || (cols = merge(cols, (multiplier = fill(NaN, length(rows)),)))
   (z = z, iteration = Int(meta["iteration"]), stage = Int(meta["stage"]),
    stage_iterations = Int(meta["stage_iterations"]), scales = Float64.(meta["scales"]),
    blocks = Symbol.(meta["blocks"]), continuation = Symbol.(meta["continuation"]), history = cols)
@@ -299,7 +304,7 @@ _stop_reason(::Nothing, info, hist, stage_start) = nothing
 
 """
     solve!(problem::Optimization, method::SIMP; maxiter, on_failure, stop = nothing, schedule = nothing,
-           checkpoint = nothing, post = nothing, resume = nothing) -> OptResult
+           checkpoint = nothing, post = nothing, resume = nothing, verbose = 2, io = stdout) -> OptResult
 
 Runs the optimisation from the current values of `z`. Mandatory: `maxiter` (total iterations, resumed ones included)
 and `on_failure` ([`RejectStep`](@ref)). Optional: `stop` ([`StopCriteria`](@ref); without it the loop runs
@@ -311,11 +316,13 @@ adjoint state is still the one of the previous design) and
 Screen output (`verbose`, default `2`, printed to `io`): `0` nothing; `1` a banner (variables, constraint, metric,
 continuation, stopping criteria), the events (continuation jumps, rejected steps, stalls, a scaled start), a closing
 ✓/⚠/✗ line and a summary of solves and time; `2` also a row per iteration: objective, its relative change,
-constraint (red if violated), optimality measure, change of z, step, multiplier, continued parameters, forward,
-adjoint and filter solves, and time. `true` is `2`, `false` is `0`.
+constraint (red above 1e-3), optimality measure, change of z, step, multiplier, continued parameters, forward,
+adjoint and filter solves, and time. `true` is `2`, `false` is `0`. The summary counts every solve of the call
+(those of rejected or stalled trials, the setup and the final synchronisation included).
 
 If the starting design (not a resumed one) violates the linear constraint, it is scaled towards the lower bound,
-`z = lb + t (z − lb)`, so that the constraint holds with equality (logged with `@info`).
+`z = lb + t (z − lb)` on the entries the constraint acts on, so that it holds with equality; `t` is returned in
+`result.start_scaling` and reported as an event when `verbose ≥ 1`.
 
 Each iteration: the optimiser takes a step from the current design; the loop evaluates the new design (no solve when
 the optimiser already did, as SiMPL); if the forward problem does not converge there, the design is restored, the
@@ -327,11 +334,11 @@ nothing in the loop (its vector is computed once at the start).
 function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failure::RejectStep, stop = nothing,
                 schedule = nothing, checkpoint = nothing, post = nothing, resume = nothing, verbose = 2, io::IO = stdout)
   z, ctx, opt = problem.z, problem.ctx, method.optimizer
-  pr = _Printer(io, verbose)
   stop === nothing || stop isa StopCriteria || throw(ArgumentError("solve!: stop must be a StopCriteria"))
   schedule === nothing || schedule isa Continuation || throw(ArgumentError("solve!: schedule must be a Continuation"))
   checkpoint === nothing || checkpoint isa Checkpoint || throw(ArgumentError("solve!: checkpoint must be a Checkpoint"))
   maxiter >= 1 || throw(ArgumentError("solve!: maxiter must be at least 1"))
+  pr = _Printer(io, verbose, schedule)
   lb, ub = get_bounds(z)
   (all(isfinite, lb) && all(isfinite, ub)) || throw(ArgumentError("SIMP: the bounds of z must be finite"))
   cont_names = schedule === nothing ? () : schedule.names
@@ -364,36 +371,36 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
   set_context!(ctx, :continuation, schedule === nothing ? NamedTuple() : _apply_stage!(schedule, stage, cont_buf))
 
   oracle = FunctionalOracle(problem, method.metric)
+  ops = _counters(problem)
+  cstart = map(_count, ops)
   isempty(problem.linear_constraints) || _setup_constraint!(oracle, only(problem.linear_constraints), ctx)
   set_context!(ctx, :phase, :optimization)
   zk = oracle.zk
   copyto!(zk, get_values(z))
+  t_start = nothing
   if resume === nothing                       # a resumed design is the one the run left
-    t = _make_feasible!(oracle, zk)
-    if t !== nothing
-      msg = "the starting design violated the linear constraint; it was scaled towards the lower bound by " *
-            "$(round(t, sigdigits = 4)) to meet it"
-      pr.level >= 1 ? _print_event(pr, "· " * msg, :yellow) : @info("solve!: " * msg)
-    end
+    t_start = _make_feasible!(oracle, zk)
+    t_start === nothing || _print_event(pr, "· the starting design violated the linear constraint; it was scaled " *
+                                            "towards the lower bound by $(round(t_start, sigdigits = 4)) to meet it", :yellow)
   end
   zprev = similar(zk)
   state = init(opt, zk, oracle)
-  fwd, adj, filters = _counters(problem)
-  run = _LoopState(k0, stage, stage_iters, hist.n - stage_iters)   # what a failure needs to write the checkpoint
+  fwd, adj, filters = ops
+  run = _LoopState(k0, stage, stage_iters, hist.n - stage_iters, cstart, k0)   # what a failure needs
   status, reason = _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_buf, cont_names, maxiter,
                              on_failure, stop, schedule, checkpoint, post, fwd, adj, filters, pr)
 
   f_final = _sync!(oracle)                     # fields and forward state at the final design
   _print_end(pr, status, reason, run.k, f_final)
-  _print_summary(pr, hist, k0)
+  _print_summary(pr, map(_count, ops) .- cstart, run.k - k0)
   checkpoint === nothing ||
     _write_checkpoint(checkpoint, problem, opt, zk, hist, run.k, run.stage, run.stage_iters, cont_names)
-  OptResult(status, reason, run.k, f_final, _trim!(hist), state)
+  OptResult(status, reason, run.k, f_final, _trim!(hist), state, t_start)
 end
 
 # A start that violates the linear constraint is scaled towards the lower bound, z = lb + t (z - lb), so that aᵀz = V:
 # the pattern of the design is kept, the bounds hold, and optimisers that need a feasible start (SiMPL) can start.
-function _make_feasible!(o::FunctionalOracle, zk)
+function _make_feasible!(o, zk)
   o.a === nothing && return nothing
   a, V = o.a, o.V
   az = dot(a, zk)
@@ -402,7 +409,7 @@ function _make_feasible!(o::FunctionalOracle, zk)
   (all(>=(0), a) && alb < V) ||
     throw(ArgumentError("Optimization: the linear constraint cannot be met within the bounds (aᵀlb ≥ V or a has negative entries)"))
   t = (V - alb) / (az - alb)
-  @. zk = o.lb + t * (zk - o.lb)
+  @. zk = ifelse(a > 0, o.lb + t * (zk - o.lb), zk)     # entries outside the constraint are left as they are
   set_values!(o.z, zk)
   t
 end
@@ -412,9 +419,11 @@ mutable struct _LoopState
   stage::Int
   stage_iters::Int
   stage_start::Int    # history length when the current stage started
+  cstart::NTuple{3,Int}   # solve counters at the start of the call
+  k0::Int                 # iterations done before the call (resume)
 end
 
-function _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint, pr)
+function _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint, pr, ops)
   synced = try
     isfinite(_sync!(oracle))                   # fields and forward state at the last accepted design
   catch e
@@ -423,6 +432,7 @@ function _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint,
   end
   synced || (msg *= " (the forward state could not be solved again at the last accepted design)")
   _print_failure(pr, msg, run.k)
+  _print_summary(pr, map(_count, ops) .- run.cstart, run.k - run.k0)
   checkpoint === nothing ||
     _write_checkpoint(checkpoint, problem, opt, zk, hist, run.k, run.stage, run.stage_iters, cont_names)
   throw(OptimizationFailure(msg, _trim!(deepcopy(hist)), run.k))
@@ -430,7 +440,7 @@ end
 
 function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_buf, cont_names, maxiter, on_failure,
                    stop, schedule, checkpoint, post, fwd, adj, filters, pr)
-  fail(msg) = _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint, pr)
+  fail(msg) = _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint, pr, (fwd, adj, filters))
   while run.k < maxiter
     k = run.k + 1
     set_context!(ctx, :iteration, k)
@@ -487,6 +497,7 @@ function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_
       # no step at this β: the stage has converged; go to the next one, or stop in the last
       (schedule === nothing || run.stage == schedule.nstages) && return :stalled, nothing
       _print_event(pr, "· no acceptable step in stage $(run.stage): the stage ends", :yellow)
+      pr.tlast = time()                        # the time of the stalled trial is not charged to the next row
       run.stage_iters = schedule.every
       continue
     end

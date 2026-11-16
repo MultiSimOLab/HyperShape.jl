@@ -169,14 +169,21 @@ beam). A constraint on the physical volume is nonlinear in `z` and comes with th
 - **Metric:** mandatory; `LumpedMass(dΩ)` (cell volumes for P0, lumped mass for P1) or `Euclidean()`.
 - **Rejection:** if the forward problem does not converge at the new design, the loop restores the previous one,
   calls `shrink!` and tries again, at most `max` times; then it throws `OptimizationFailure` (checkpoint written).
-  SiMPL handles failures inside its line search; if it finds no step, the result is `:stalled`.
+  SiMPL handles failures inside its line search; if it finds no step, the current continuation stage ends (in the last stage, or without continuation, the result is `:stalled`).
 - **Continuation:** explicit list of values per stage, a jump every `every` iterations or when the stopping criteria
   are met; the optimiser forgets its memory at each jump; the optimisation only stops in the last stage.
 - **Stopping:** `maxiter` is mandatory; `StopCriteria(change, kkt, objective)` are off unless given.
 - **Context:** `OptContext` (iteration, attempt, trial, phase, continuation values) reaches every solve function of
   the user; phases `:setup`, `:check`, `:optimization` and `:linesearch`.
-- **Checkpoint:** `checkpoint.toml`, `z.bin` and `history.csv` in a folder; resume with
+- **Checkpoint:** `checkpoint.toml`, `z_<k>.bin` and `history_<k>.csv` in a folder; resume with
   `solve!(…; resume = load_checkpoint(path))`. The optimiser memory is not saved (OC resumes exactly).
+- **Start:** a starting design that violates the linear constraint is scaled towards the lower bound on the entries
+  the constraint acts on; the factor is in `result.start_scaling`. A resumed design is not touched.
+- **Screen output:** `verbose = 2` (default) prints a banner, a row per iteration (objective, its relative change,
+  constraint, optimality measure, change, step, multiplier, continued parameters, solves, time), the events and a
+  closing line with the solves of the call; `1` omits the rows; `0` prints nothing. The output goes to `io`.
+- **Failures:** `OptimizationFailure` carries the message, the history up to the last accepted iteration and its
+  number; the history also records the multiplier of the linear constraint.
 - **Solves per iteration:** OC one filter, one forward, one adjoint (none if self-adjoint) and one transposed filter;
   SiMPL one filter and one forward per line-search trial (usually one), one adjoint and one transposed filter. After
   a rejected step the previous design is not solved again.

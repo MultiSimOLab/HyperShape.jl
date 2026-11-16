@@ -8,22 +8,36 @@ mutable struct _Printer{IO_}
   level::Int
   t0::Float64
   tlast::Float64
-  rows::Int
+  header::Bool          # the column header is pending: printed before the next row
+  widths::Vector{Int}   # widths of the continuation columns
 end
 
 _verbose_level(v::Bool) = v ? 2 : 0
 _verbose_level(v::Integer) = (0 <= v <= 2 || throw(ArgumentError("solve!: verbose must be 0, 1, 2 or a Bool")); Int(v))
 _verbose_level(v) = throw(ArgumentError("solve!: verbose must be 0, 1, 2 or a Bool"))
 
-_Printer(io, verbose) = _Printer(io, _verbose_level(verbose), time(), time(), 0)
+function _Printer(io, verbose, schedule)
+  widths = schedule === nothing ? Int[] :
+           [max(6, textwidth(string(n)), maximum(x -> textwidth(_g(x)), v)) for (n, v) in zip(schedule.names, schedule.values)]
+  _Printer(io, _verbose_level(verbose), time(), time(), false, widths)
+end
+
+# a constraint value above this (scaled) is shown in red; OC meets the constraint only to its bisection tolerance
+const _RED_CONSTRAINT = 1e-3
 
 _styled(p::_Printer, s, color = :normal; bold = false) = printstyled(p.io, s; color, bold)
 
 _e(x) = isfinite(x) ? @sprintf("%9.2e", x) : "        —"
 
-function _rule(p::_Printer, width = 100)
-  _styled(p, "  " * "─"^width * "\n", :light_black)
+_pad(s, w) = " "^max(0, w - textwidth(s)) * s
+
+function _header(p::_Printer, names)
+  cont = join(("  " * _pad(string(n), w) for (n, w) in zip(names, p.widths)))
+  @sprintf("  %5s  %13s  %9s  %10s  %9s  %9s  %9s  %9s", "it", "objective", "Δobj", "constraint", "kkt", "change",
+           "step", "μ") * cont * @sprintf("  %11s  %8s", "f/a/F", "t[s]")
 end
+
+_rule(p::_Printer) = _styled(p, "  " * "─"^(textwidth(_header(p, ntuple(_ -> "", length(p.widths)))) - 2) * "\n", :light_black)
 
 function _describe_stop(stop)
   stop === nothing && return "maxiter only"
@@ -60,37 +74,41 @@ end
 
 _g(x) = x == round(x) && abs(x) < 1e6 ? string(Int(x)) : @sprintf("%.3g", x)
 
-function _print_columns(p::_Printer, schedule)
-  p.level >= 2 || return
-  cont = schedule === nothing ? "" : join((@sprintf("%6s", n) for n in schedule.names))
+_print_columns(p::_Printer, schedule) = (p.level >= 2 && (p.header = true); nothing)
+
+function _flush_columns(p::_Printer, names)
+  p.header || return
+  p.header = false
   _rule(p)
-  _styled(p, @sprintf("  %5s  %13s  %9s  %10s  %9s  %9s  %9s  %9s%s  %9s  %7s\n", "it", "objective", "Δobj",
-                       "constraint", "kkt", "change", "step", "μ", cont, "f/a/F", "t[s]"); bold = true)
+  _styled(p, _header(p, names) * "\n"; bold = true)
   _rule(p)
 end
 
 function _print_row(p::_Printer, hist::OptHistory)
-  p.level >= 2 || return
+  p.level >= 2 || return nothing
+  _flush_columns(p, hist.names)
   k = hist.n
   t = time()
   dt = t - p.tlast
   p.tlast = t
   f = hist.objective[k]
-  df = k > 1 ? (f - hist.objective[k-1]) / max(abs(hist.objective[k-1]), floatmin()) : NaN
+  fp = k > 1 ? hist.objective[k-1] : NaN
+  df = fp != 0 ? (f - fp) / abs(fp) : NaN
   g = hist.constraint[k]
-  cont = join((@sprintf("%6s", _g(hist.continuation[j, k])) for j in axes(hist.continuation, 1)))
-  solves = "$(hist.forward[k])/$(hist.adjoint[k])/$(hist.filter[k])"
   @printf(p.io, "  %5d  %13.6e  %9s  ", hist.iteration[k], f, isfinite(df) ? @sprintf("%+9.1e", df) : "        —")
   if isfinite(g)
-    _styled(p, @sprintf("%10.2e", g), g > 1e-6 ? :red : :normal)
+    _styled(p, @sprintf("%10.2e", g), g > _RED_CONSTRAINT ? :red : :normal)
   else
     print(p.io, "         —")
   end
-  @printf(p.io, "  %9s  %9s  %9s  %9s%s  %9s  %7.3f", _e(hist.kkt[k]), _e(hist.change[k]), _e(hist.step[k]),
-          _e(hist.multiplier[k]), cont, solves, dt)
+  @printf(p.io, "  %9s  %9s  %9s  %9s", _e(hist.kkt[k]), _e(hist.change[k]), _e(hist.step[k]), _e(hist.multiplier[k]))
+  for j in axes(hist.continuation, 1)
+    print(p.io, "  ", _pad(_g(hist.continuation[j, k]), p.widths[j]))
+  end
+  @printf(p.io, "  %11s  %8.3f", "$(hist.forward[k])/$(hist.adjoint[k])/$(hist.filter[k])", dt)
   hist.attempts[k] > 1 && _styled(p, "  ($(hist.attempts[k]) attempts)", :yellow)
   println(p.io)
-  p.rows += 1
+  nothing
 end
 
 function _print_event(p::_Printer, msg, color)
@@ -110,7 +128,7 @@ const _STOP_TEXT = Dict(:change => "change of z below the tolerance", :kkt => "o
 
 function _print_end(p::_Printer, status, reason, k, f)
   p.level >= 1 || return
-  p.level >= 2 && _rule(p)
+  p.level >= 2 && (p.header = false; _rule(p))
   if status === :converged
     _styled(p, "  ✓ ", :green; bold = true)
     println(p.io, "converged: ", get(_STOP_TEXT, reason, string(reason)), " after $k iterations, objective ",
@@ -126,16 +144,15 @@ end
 
 function _print_failure(p::_Printer, msg, k)
   p.level >= 1 || return
-  p.level >= 2 && _rule(p)
+  p.level >= 2 && (p.header = false; _rule(p))
   _styled(p, "  ✗ ", :red; bold = true)
   println(p.io, "failed after $k accepted iterations: ", msg)
 end
 
-function _print_summary(p::_Printer, hist::OptHistory, k0)
+# solves: (forward, adjoint, filter) solved in this call, the setup and the final synchronisation included
+function _print_summary(p::_Printer, solves, iterations)
   p.level >= 1 || return
-  r = (k0+1):hist.n
   t = time() - p.t0
   println(p.io, @sprintf("  solves: forward %d, adjoint %d, filter %d · time %.2f s (%.3f s per iteration)",
-                         sum(view(hist.forward, r); init = 0), sum(view(hist.adjoint, r); init = 0),
-                         sum(view(hist.filter, r); init = 0), t, t / max(length(r), 1)))
+                         solves..., t, t / max(iterations, 1)))
 end
