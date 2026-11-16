@@ -42,7 +42,7 @@ function StateOperator(model, deps = _Unset(); depends = _Unset(), solve = defau
   d = _dependencies("StateOperator", deps, depends)
   d isa _Unset &&
     throw(ArgumentError("StateOperator: the dependencies are mandatory: StateOperator(model, θ) or depends = θ"))
-  deps = _check_depends(_as_depends(d))
+  deps = _check_depends(_unique_deps(_as_depends(d)))
   StateOperator(model, solve, deps, fill(-1, length(deps)), HyperFEM.get_state(model), 0, false, false)
 end
 
@@ -93,8 +93,13 @@ refresh!(S::StateOperator, ctx) = (apply!(S, ctx); S)
 invalidate!(S::StateOperator) = (S.solved = false; S)
 num_solves(S::StateOperator) = S.version
 
-default_solve(::Type{StateOperator}, ::HyperFEM.StaticLinearModel) = _solve_state_linear
-default_solve(::Type{LinearOperator}, ::HyperFEM.StaticLinearModel) = _solve_rhs_linear
+default_solve(::Type{<:StateOperator}, ::HyperFEM.StaticLinearModel) = _solve_state_linear
+default_solve(::Type{<:LinearOperator}, ::HyperFEM.StaticLinearModel) = _solve_rhs_linear
+# several right-hand sides: the state is not one field and the filter takes one vector
+_several_rhs(model) =
+  throw(ArgumentError("no default solve for a StaticLinearModel with several right-hand sides: pass your own solve"))
+default_solve(::Type{<:StateOperator}, m::HyperFEM.StaticLinearModel{<:AbstractVector}) = _several_rhs(m)
+default_solve(::Type{<:LinearOperator}, m::HyperFEM.StaticLinearModel{<:AbstractVector}) = _several_rhs(m)
 
 """
     AdjointOperator(S::StateOperator, model[, deps]; depends = (), solve = default_solve(StateOperator, model))
@@ -104,7 +109,12 @@ Adjoint state of the forward state `S`: a [`StateOperator`](@ref) over the user'
 are the user's; typically the tangent of the forward problem with test and trial swapped, evaluated at
 `get_state(S)`, and the right-hand side `∂J/∂u`). Its dependencies are those of `S`, then `S`, then the extra ones
 given in `deps` or `depends` (once), without repetitions. The trial space of `model` must have homogeneous Dirichlet
-values (checked here). It is solved only after `S` converged.
+values (checked here for the HyperFEM models that expose their spaces). It is solved only after `S` converged.
+
+One adjoint covers one forward state: if `S` depends on another state `S0` (for example through a field computed by
+`S0`), the sensitivity through `S0` needs its own adjoint and is not included in the gradient of a
+[`Functional`](@ref HyperShape.Functionals.Functional) built on `S`; [`check_consistency`](@ref
+HyperShape.Checks.check_consistency) detects it.
 """
 function AdjointOperator(S::StateOperator, model, deps = _Unset(); depends = _Unset(),
                          solve = default_solve(StateOperator, model))
@@ -116,12 +126,25 @@ end
 
 _unique_deps(t::Tuple) = foldl((acc, d) -> any(x -> x === d, acc) ? acc : (acc..., d), t; init = ())
 
+# Dirichlet values of the trial space of a model, or `nothing` when the model does not expose its spaces (only the
+# abstract `get_spaces` of HyperFEM) or the space has no Dirichlet values to read
+function dirichlet_values(model)
+  _exposes_spaces(model) || return nothing
+  _dirichlet_values(first(HyperFEM.get_spaces(model)))
+end
+const _AbstractGetSpaces = Tuple{typeof(HyperFEM.get_spaces),HyperFEM.ComputationalModels.ComputationalModel}
+_exposes_spaces(model) =
+  applicable(HyperFEM.get_spaces, model) && which(HyperFEM.get_spaces, Tuple{typeof(model)}).sig != _AbstractGetSpaces
+_dirichlet_values(U) = applicable(get_dirichlet_dof_values, U) ? get_dirichlet_dof_values(U) : nothing
+function _dirichlet_values(U::MultiFieldFESpace)
+  vs = [_dirichlet_values(Ui) for Ui in U]
+  any(v -> v === nothing, vs) ? nothing : reduce(vcat, vs; init = Float64[])
+end
+
 # the trial space of the model (if it exposes one) must have zero Dirichlet values
 function _check_homogeneous_trial(model, who)
-  applicable(HyperFEM.get_spaces, model) || return nothing
-  U = first(HyperFEM.get_spaces(model))
-  applicable(get_dirichlet_dof_values, U) || return nothing
-  all(iszero, get_dirichlet_dof_values(U)) ||
+  v = dirichlet_values(model)
+  v === nothing || all(iszero, v) ||
     throw(ArgumentError("$who: the trial space has non-zero Dirichlet values; build the adjoint on a homogeneous space"))
   nothing
 end

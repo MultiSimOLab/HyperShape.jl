@@ -15,6 +15,7 @@ module Operators
 
 using HyperFEM: HyperFEM
 using Gridap.FESpaces: get_dirichlet_dof_values
+using Gridap.MultiField: MultiFieldFESpace
 
 export LinearOperator, StateOperator, AdjointOperator, is_converged, OptContext
 
@@ -89,7 +90,7 @@ own solver (HyperShape never chooses one):
 - [`LinearOperator`](@ref): `(m, b, ctx, stale) -> solve!(m, b; Assembly = stale)`: the matrix is re-assembled and
   factorised again only when a dependency changed.
 
-Any other model (nonlinear, staggered, transient) throws: the load stepping and the restart are modelling decisions,
+Any other model (nonlinear, staggered, transient, or a `StaticLinearModel` with several right-hand sides) throws: the load stepping and the restart are modelling decisions,
 so pass `solve = (m, ctx) -> solve!(m; stepping = …, RestartState = …)`. To use another solver (PETSc, an iterative
 solver with a preconditioner…) build the model with it, or pass your own `solve`.
 """
@@ -99,9 +100,9 @@ _solve_state_linear(m, ctx) = HyperFEM.solve!(m; Assembly = true)
 _solve_rhs_linear(m, b, ctx, stale) = HyperFEM.solve!(m, b; Assembly = stale)
 
 default_solve(::Type{<:AbstractOperator}, model) =
-  throw(ArgumentError("no default solve for a $(nameof(typeof(model))): only a StaticLinearModel has one. The load " *
-                      "stepping and the restart are modelling decisions: pass " *
-                      "solve = (m, ctx) -> solve!(m; stepping = …, RestartState = …) (or your own solve function)"))
+  throw(ArgumentError("no default solve for a $(nameof(typeof(model))): only a StaticLinearModel with one " *
+                      "right-hand side has one. For a nonlinear model the load stepping and the restart are modelling " *
+                      "decisions: pass solve = (m, ctx) -> solve!(m; stepping = …, RestartState = …) (or your own solve)"))
 
 function _check_depends(depends)
   for d in depends

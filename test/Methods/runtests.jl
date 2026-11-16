@@ -70,6 +70,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test_throws ArgumentError SIMP(OC(); metric = :lumped)
     @test_throws UndefKeywordError solve!(q.problem, SIMP(OC()))   # maxiter is mandatory
     @test_throws ArgumentError solve!(q.problem, SIMP(OC()); maxiter = 2, on_failure = :reject)
+    @test_throws ArgumentError solve!(q.problem, SIMP(OC()); maxiter = 2, on_failure = nothing)
     @test_throws ArgumentError RejectStep(shrink = 1.5, max = 2)
     @test_throws ArgumentError StopCriteria(change = -1)
     @test_throws ArgumentError Continuation(β = q.H => [1, 2], γ = q.H => [1]; every = 2)

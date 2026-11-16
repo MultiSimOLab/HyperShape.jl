@@ -246,7 +246,7 @@ which triangulation, including domains larger than the design region.
 ## Defaults and how to replace them
 
 A default never removes generality: everything it sets can be replaced from the user's script. The banner of
-`solve!` marks the defaults in use.
+`solve!` marks the defaults of the loop in use (stopping criteria, failure handling, metric).
 
 | Default | Where | How to replace it |
 |---|---|---|

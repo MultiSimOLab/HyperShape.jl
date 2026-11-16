@@ -24,6 +24,8 @@ end
 
 direction(n) = [0.1 * sin(1.7i) for i in 1:n]
 
+struct _NoSpaces <: HyperFEM.ComputationalModels.ComputationalModel end   # a model that does not expose its spaces
+
 @testset "Functionals" begin
 
   @testset "Compliance, self-adjoint ($(design))" for design in (:P0, :P1)
@@ -164,11 +166,17 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
     @test all(r -> 1.9 < r < 2.1, taylor_rates(() -> functional_value(J, nothing), g, z, direction(length(z))))
     # adjoint built on the space with the Dirichlet values of the state: detected
     q = state_problem(; gD = 1.0, adjoint_space = :state)
-    Jq = Functional((u, θ) -> ∫(u)dΓ, q.S; derivative = (u, w, θ) -> (δ -> ∫(-(q.dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)q.dΩ), adjoint = q.A, fields = q.θ, scale = 1.0)
-    @test_throws ArgumentError functional_gradient!(zeros(length(q.z)), Jq, nothing)
-    # self-adjoint shortcut with non-zero Dirichlet values: detected
-    Js = Functional((u, θ) -> ∫(p.f * u)dΩ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = :self, fields = θ, scale = 1.0)
-    @test_throws ArgumentError functional_gradient!(zeros(length(z)), Js, nothing)
+    @test_throws ArgumentError Functional((u, θ) -> ∫(u)dΓ, q.S; adjoint = q.A, scale = 1.0,
+                                          derivative = (u, w, θ) -> (δ -> ∫(-(q.dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)q.dΩ))
+    # self-adjoint shortcut with non-zero Dirichlet values: detected when the functional is built
+    err = try
+      Functional((u, θ) -> ∫(p.f * u)dΩ, S; adjoint = :self, scale = 1.0,
+                 derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ))
+      nothing
+    catch e
+      e
+    end
+    @test err isa ArgumentError && occursin("adjoint = :self", err.msg)
   end
 
   @testset "Adjoint of a failed state is not solved" begin
@@ -314,7 +322,8 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
                                                                     ls = LUSolver()))
     # Functional: adjoint mandatory, :self or a state; fields deduced or given
     DJ = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ)
-    @test_throws UndefKeywordError Functional((u, θ) -> ∫(u)dΓ, Sd; derivative = DJ, scale = 1.0)
+    err = try Functional((u, θ) -> ∫(u)dΓ, Sd; derivative = DJ, scale = 1.0); nothing catch e; e end
+    @test err isa ArgumentError && occursin("AdjointOperator", err.msg) && occursin(":self", err.msg)
     @test_throws ArgumentError Functional((u, θ) -> ∫(u)dΓ, Sd; derivative = DJ, adjoint = Sd, scale = 1.0)
     @test_throws ArgumentError Functional((u, θ) -> ∫(u)dΓ, Sd; derivative = DJ, adjoint = :none, scale = 1.0)
     @test_throws ArgumentError Functional((u, θ) -> ∫(u)dΓ, Sd; derivative = DJ, adjoint = S, scale = 1.0)  # not on Sd
@@ -326,6 +335,25 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
                                           adjoint = :self, scale = 1.0)
     @test_throws ArgumentError Functional((u, θ) -> ∫(u)dΓ, Sd; derivative = DJ, adjoint = :self, scale = 1.0,
                                           fields = θ2)                              # Sd does not depend on θ2
+    # repeated dependencies are kept once; a state reached only through another state cannot give θ
+    @test StateOperator(Sd.model, (θ, θ)).depends === (θ,)
+    @test Functional((u, θ) -> ∫(u)dΓ, StateOperator(Sd.model, (θ, θ)); derivative = DJ, adjoint = :self,
+                     scale = 1.0).θ === θ
+    err = try Functional((u, θ) -> ∫(u)dΓ, StateOperator(Sd.model, Sd); derivative = DJ, adjoint = :self,
+                         scale = 1.0); nothing catch e; e end
+    @test err isa ArgumentError && occursin("StateOperator(model, θ)", err.msg)
+    # default_solve with the concrete type of an operator; several right-hand sides have none
+    @test HyperShape.Operators.default_solve(typeof(Sd), Sd.model) === Sd.solve
+    @test HyperShape.Operators.default_solve(typeof(Lf), Lf.model) === Lf.solve
+    multi = StaticLinearModel([v -> ∫(v)dΩ, v -> ∫(2v)dΩ], a, U0, V, bc0; ls = LUSolver())
+    @test_throws ArgumentError StateOperator(multi, θ)
+    @test_throws ArgumentError LinearOperator(multi)
+    # Dirichlet values of a multi-field trial space are read; a model without spaces is not checked
+    multi1 = StaticLinearModel([v -> ∫(v)dΩ, v -> ∫(2v)dΩ], a, U1, V, bc1; ls = LUSolver())
+    vals = HyperShape.Operators.dirichlet_values(multi1)
+    @test vals !== nothing && any(!iszero, vals)
+    @test_throws ArgumentError AdjointOperator(Sd, multi1; solve = (m, ctx) -> solve!(m))
+    @test HyperShape.Operators.dirichlet_values(_NoSpaces()) === nothing
   end
 
   @testset "Lazy and compiled backends after changing z and β" begin
@@ -368,7 +396,8 @@ direction(n) = [0.1 * sin(1.7i) for i in 1:n]
   @testset "Exported names do not clash with Gridap and HyperFEM" begin
     M = Module()
     Core.eval(M, :(using Gridap, HyperFEM, HyperShape))
-    for name in (:StateOperator, :Functional, :functional_value, :functional_gradient!, :is_converged)
+    for name in names(HyperShape)
+      name === :HyperShape && continue
       @test Core.eval(M, name) === getfield(HyperShape, name)
     end
   end

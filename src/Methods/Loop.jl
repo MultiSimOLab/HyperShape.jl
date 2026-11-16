@@ -60,8 +60,9 @@ default_stop(::OC) = StopCriteria(change = 1e-4)
 default_stop(::SiMPL) = StopCriteria(kkt = 1e-4, change = 1e-4)
 default_stop(::Optimizer) = nothing
 
-# `stop` not given (distinct from `stop = nothing`, which means maxiter only)
+# `stop` and `on_failure` not given (`stop = nothing` means maxiter only; `on_failure` must be a RejectStep)
 struct _DefaultStop end
+struct _DefaultFailure end
 
 const HISTORY_COLUMNS = (:iteration, :objective, :constraint, :kkt, :change, :step, :attempts, :forward, :adjoint, :filter,
                          :multiplier)
@@ -348,10 +349,10 @@ functional) and one transposed filter; SiMPL one filter and one forward per tria
 one adjoint and one transposed filter; one more forward after each continuation jump. The linear constraint costs
 nothing in the loop (its vector is computed once at the start).
 """
-function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failure = nothing, stop = _DefaultStop(),
+function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failure = _DefaultFailure(), stop = _DefaultStop(),
                 schedule = nothing, checkpoint = nothing, post = nothing, resume = nothing, verbose = 2, io::IO = stdout)
   z, ctx, opt = problem.z, problem.ctx, method.optimizer
-  defaults = (stop = stop isa _DefaultStop, on_failure = on_failure === nothing)
+  defaults = (stop = stop isa _DefaultStop, on_failure = on_failure isa _DefaultFailure)
   defaults.stop && (stop = default_stop(opt))
   defaults.on_failure && (on_failure = RejectStep())
   on_failure isa RejectStep || throw(ArgumentError("solve!: on_failure must be a RejectStep"))

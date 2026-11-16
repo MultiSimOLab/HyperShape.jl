@@ -9,7 +9,7 @@ module Functionals
 using Gridap
 using Gridap.FESpaces
 using HyperFEM: HyperFEM, get_state, get_spaces
-using ..Operators: StateOperator, apply!, version
+using ..Operators: StateOperator, apply!, version, dirichlet_values
 import ..Operators: invalidate!
 using ..Operators: get_model as HyperShape_get_model
 using ..Variables: PhysicalFields, update_fields!, design_gradient!, get_designfields, get_optvariables
@@ -32,8 +32,8 @@ With states (first form):
   [`AdjointOperator`](@ref HyperShape.Operators.AdjointOperator)`(S, model)`, which solves `a(w, p) = ∂J/∂u[w]`
   for all `w` (with `a` the tangent of the forward problem) on a space with homogeneous Dirichlet values; it must
   depend on θ and on `S`. Or `:self` for a self-adjoint functional (then `p = u`, with the
-  sign in `derivative`; valid only when the Dirichlet values of the state are zero, which is checked when the
-  gradient is computed).
+  sign in `derivative`; valid only when the Dirichlet values of the state are zero, which is checked here and when
+  the gradient is computed).
 - `fields`: the physical fields θ. By default the only [`PhysicalFields`](@ref) among the dependencies of `S`;
   give it when `S` depends on none or on several.
 
@@ -72,9 +72,9 @@ _depends_on(S::StateOperator, obj) = any(d -> d === obj, S.depends)
 
 function _fields(S::StateOperator, fields)
   if fields === nothing
-    θs = Tuple(d for d in S.depends if d isa PhysicalFields)
+    θs = Tuple(d for d in S.depends if d isa PhysicalFields)   # the dependencies have no repetitions
     length(θs) == 1 || throw(ArgumentError(isempty(θs) ?
-      "Functional: the forward state depends on no PhysicalFields; pass fields = θ" :
+      "Functional: the forward state does not depend directly on any PhysicalFields; declare θ among its dependencies (StateOperator(model, θ))" :
       "Functional: the forward state depends on several PhysicalFields; pass fields = θ"))
     return θs[1]
   end
@@ -83,15 +83,21 @@ function _fields(S::StateOperator, fields)
   fields
 end
 
-function Functional(J, S::StateOperator; derivative, adjoint, scale, fields = nothing)
+struct _NoAdjoint end
+
+function Functional(J, S::StateOperator; derivative, adjoint = _NoAdjoint(), scale, fields = nothing)
+  adjoint isa _NoAdjoint && throw(ArgumentError(
+    "Functional: adjoint is mandatory: adjoint = AdjointOperator(S, model), or adjoint = :self for a self-adjoint functional"))
   mode, value = _scale(scale)
   θ = _fields(S, fields)
   A = if adjoint === :self
+    _check_homogeneous(S, true)
     S
   elseif adjoint isa StateOperator
     adjoint === S && throw(ArgumentError("Functional: write adjoint = :self for a self-adjoint functional"))
     (_depends_on(adjoint, θ) && _depends_on(adjoint, S)) ||
       throw(ArgumentError("Functional: the adjoint state must depend on θ and on the forward state (use AdjointOperator(S, model))"))
+    _check_homogeneous(adjoint, false)
     adjoint
   else
     throw(ArgumentError("Functional: adjoint must be a StateOperator (AdjointOperator(S, model)) or :self, got $(repr(adjoint))"))
@@ -168,13 +174,11 @@ end
 
 # the adjoint (or the state of a self-adjoint functional) must have homogeneous Dirichlet values
 _check_homogeneous(F::Functional{FJ,FD,Nothing}) where {FJ,FD} = nothing
-function _check_homogeneous(F::Functional)
-  m = HyperShape_get_model(F.A)
-  applicable(get_spaces, m) || return nothing
-  U = first(get_spaces(m))
-  applicable(get_dirichlet_dof_values, U) || return nothing
-  all(iszero, get_dirichlet_dof_values(U)) || throw(ArgumentError(F.A === F.S ?
-    "Functional: A = S needs homogeneous Dirichlet values in the state; give an adjoint state on a homogeneous space" :
+_check_homogeneous(F::Functional) = _check_homogeneous(F.A, F.A === F.S)
+function _check_homogeneous(A::StateOperator, self::Bool)
+  v = dirichlet_values(HyperShape_get_model(A))
+  v === nothing || all(iszero, v) || throw(ArgumentError(self ?
+    "Functional: adjoint = :self needs homogeneous Dirichlet values in the state; give an AdjointOperator on a homogeneous space" :
     "Functional: the trial space of the adjoint has non-zero Dirichlet values; build the adjoint on a homogeneous space"))
   nothing
 end
