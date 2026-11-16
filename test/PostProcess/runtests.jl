@@ -1,5 +1,6 @@
 using Gridap
 using Gridap.FESpaces
+using Gridap.Geometry          # exports its own extend: extend_field must not clash
 using HyperFEM
 using HyperShape
 using HyperShape.Variables: get_values
@@ -24,7 +25,7 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
 
 @testset "PostProcess" begin
 
-  @testset "extend ($(dim)D)" for dim in (2, 3)
+  @testset "extend_field ($(dim)D)" for dim in (2, 3)
     n = dim == 2 ? (30, 10) : (6, 2, 2)
     model = CartesianDiscreteModel(dim == 2 ? (0, 3, 0, 1) : (0, 3, 0, 1, 0, 1), n)
     Ω = Triangulation(model)
@@ -41,7 +42,7 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
     for (name, f) in (("P0", f0), ("P1", f1), ("opP1", proj ∘ f1))
       fd = f(get_cell_points(dΩd))
       for (Ωt, dΩt, out) in ((Ω, dΩ, 1.0), (Ωs, dΩs, 0.25))
-        e = extend(f, Ωt; outside = out)
+        e = extend_field(f, Ωt; outside = out)
         cmap = HyperShape.PostProcess._cell_map(Ωd, Ωt)
         vals = e(get_cell_points(dΩt))
         @test all(vals[i] == fd[cmap[i]] for i in eachindex(cmap) if cmap[i] > 0)           # bit for bit inside
@@ -52,15 +53,15 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
         @test isfile(file * ".vtu")
       end
     end
-    @test extend(f1, Ωd; outside = 1.0) === f1
+    @test extend_field(f1, Ωd; outside = 1.0) === f1
     other = CartesianDiscreteModel(dim == 2 ? (0, 3, 0, 1) : (0, 3, 0, 1, 0, 1), n)
-    @test_throws ArgumentError extend(f1, Triangulation(other); outside = 1.0)
+    @test_throws ArgumentError extend_field(f1, Triangulation(other); outside = 1.0)
   end
 
   @testset "Names" begin
-    @test extend === HyperShape.PostProcess.extend
+    @test extend_field === HyperShape.PostProcess.extend_field
     @test get_pvd === HyperFEM.get_pvd
-    @test all(n -> n in names(HyperShape), (:OptPostProcessor, :write_step, :extend))
+    @test all(n -> n in names(HyperShape), (:OptPostProcessor, :write_step, :extend_field, :get_pvd))
     @test_throws ArgumentError OptPostProcessor(recorder([]); every = 0)
     @test_throws ArgumentError OptPostProcessor(recorder([]); every = 1, name = "")
     q = compliance_problem()
@@ -210,5 +211,95 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
     # elsewhere, an error of the driver stops the optimisation
     @test_throws ErrorException solve!(compliance_problem().problem, SIMP(OC(); metric = Euclidean()); maxiter = 6,
                                        verbose = 0, stop = nothing, post = bad)
+  end
+  @testset "Review fixes" begin
+    # vector and tensor fields, outside of the field type or a number per component
+    model = CartesianDiscreteModel((0, 3, 0, 1), (12, 4))
+    Ω = Triangulation(model)
+    xc = [sum(c)[1] / length(c) for c in get_cell_coordinates(Ω)]
+    Ωd = Triangulation(model, [1.0 < x < 2.0 for x in xc])
+    Vv = FESpace(Ωd, ReferenceFE(lagrangian, VectorValue{2,Float64}, 1); conformity = :H1)
+    uv = interpolate_everywhere(x -> VectorValue(x[1], x[2]), Vv)
+    dΩ, dΩd = Measure(Ω, 2), Measure(Ωd, 2)
+    for (f, out, z) in ((uv, 0.0, VectorValue(0.0, 0.0)), (uv, VectorValue(1.0, 2.0), VectorValue(1.0, 2.0)),
+                        (∇(uv), 0.0, TensorValue(0.0, 0.0, 0.0, 0.0)))
+      e = extend_field(f, Ω; outside = out)
+      cmap = HyperShape.PostProcess._cell_map(Ωd, Ω)
+      vals = e(get_cell_points(dΩ))
+      @test all(all(==(z), vals[i]) for i in eachindex(cmap) if cmap[i] == 0)
+      file = joinpath(mktempdir(), "v")
+      HyperShape.PostProcess.WriteVTK.vtk_save(createvtk(Ω, file; cellfields = ["f" => e]))
+      @test isfile(file * ".vtu")
+    end
+    # names: a path separator, a one-argument driver
+    @test_throws ArgumentError OptPostProcessor((p, c) -> nothing; every = 1, name = "a/b")
+    @test_throws ArgumentError OptPostProcessor(ctx -> nothing; every = 1)
+    # XML characters in file names, a WriteVTK-style line, the same file twice at one time
+    dir = mktempdir()
+    c = HyperShape.PostProcess._save(HyperShape.PostProcess.PVDCollection(joinpath(dir, "c.pvd")))
+    c[0] = joinpath(dir, "a&b \"q\" <1>.vtu")
+    @test_throws ArgumentError (c[0] = joinpath(dir, "a&b \"q\" <1>.vtu"))
+    @test _load(joinpath(dir, "c.pvd"); upto = Inf).files == ["a&b \"q\" <1>.vtu"]
+    write(joinpath(dir, "w.pvd"), """<?xml version="1.0"?>\n<VTKFile type="Collection">\n<Collection>\n""" *
+          """<DataSet timestep="0.0" group="" part="0" file="w_0.vtu"/>\n<DataSet timestep="2.0" group="" part="0" file="w_2.vtu"/>\n""" *
+          """</Collection>\n</VTKFile>\n""")
+    w = _load(joinpath(dir, "w.pvd"); upto = 1)
+    @test w.times == [0.0] && w.files == ["w_0.vtu"]
+    # a relative filepath is fixed when the post-processor is built: a change of directory does not move the output
+    root = mktempdir()
+    post = cd(() -> OptPostProcessor((p, ctx) -> nothing; every = 1, filepath = "out"), root)
+    @test post.filepath == joinpath(realpath(root), "out") || post.filepath == joinpath(root, "out")
+    q = compliance_problem()
+    calls = Int[]
+    post = cd(root) do
+      OptPostProcessor(every = 2, filepath = "rel") do p, ctx
+        push!(calls, ctx.iteration)
+        ctx.iteration == 0 && cd(mktempdir())          # the driver changes directory
+        write_step(p, get_triangulation(q.uh), "rho" => q.θ.ρ)
+      end
+    end
+    old = pwd()
+    try
+      solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 4, verbose = 0, stop = nothing, post)
+    finally
+      cd(old)
+    end
+    @test calls == [0, 2, 4] && first(pvd_entries(joinpath(post.filepath, "optimization.pvd"))) == [0, 2, 4]
+    # a driver that throws does not lose the checkpoint of that iteration
+    ck = mktempdir()
+    bad = OptPostProcessor((p, ctx) -> (ctx.iteration == 4 && error("disk full")); every = 2)
+    @test_throws ErrorException solve!(compliance_problem().problem, SIMP(OC(); metric = Euclidean()); maxiter = 4,
+                                       verbose = 0, stop = nothing, post = bad, checkpoint = Checkpoint(ck; every = 2))
+    @test load_checkpoint(ck).iteration == 4
+    # a resumed run that starts with a continuation jump: no initial call, no extra forward solve
+    nsolves = Ref(0)
+    for withpost in (false, true)
+      q = compliance_problem()
+      ck = mktempdir()
+      sched = Continuation(β = q.H => [1.0, 2.0, 4.0]; every = 4)
+      solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 4, verbose = 0, stop = nothing, schedule = sched,
+             checkpoint = Checkpoint(ck; every = 4))
+      n0 = num_solves(q.S)
+      calls = Int[]
+      p = withpost ? OptPostProcessor((p, ctx) -> push!(calls, ctx.iteration); every = 3) : nothing
+      solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 9, verbose = 0, stop = nothing, schedule = sched,
+             resume = load_checkpoint(ck), post = p)
+      withpost && @test calls == [6, 9]
+      if withpost
+        @test num_solves(q.S) - n0 == nsolves[]
+      else
+        nsolves[] = num_solves(q.S) - n0
+      end
+    end
+    # the driver sees the accepted design with a nonlinear constraint and SiMPL's line search
+    q = compliance_problem()
+    Volθ = Volume(q.θ, q.dΩ; max_fraction = 0.4)
+    ok = Bool[]
+    post = OptPostProcessor(every = 1) do p, ctx
+      push!(ok, get_free_dof_values(q.x.ρ) == get_values(q.z) == get_values(p.problem.z))
+    end
+    solve!(Optimization(q.z; objective = q.C, constraints = Volθ), SIMP(SiMPL(); metric = LumpedMass(q.dΩ));
+           maxiter = 6, verbose = 0, stop = nothing, post)
+    @test length(ok) == 7 && all(ok)
   end
 end

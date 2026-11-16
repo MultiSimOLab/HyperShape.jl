@@ -406,8 +406,8 @@ Runs the optimisation from the current values of `z`. Mandatory: `maxiter` (tota
 Optional: `on_failure` ([`RejectStep`](@ref), default `RejectStep(shrink = 0.5, max = 5)`), `stop`
 ([`StopCriteria`](@ref); default [`default_stop`](@ref): range of the objective below 0.1 % over 10 iterations of
 the last stage; `stop = nothing` runs `maxiter` iterations), `schedule` ([`Continuation`](@ref)), `checkpoint` ([`Checkpoint`](@ref)), `post` (an
-[`OptPostProcessor`](@ref HyperShape.PostProcess.OptPostProcessor): its driver is called at the starting design, every
-`every` accepted iterations, at the end and after a failure, with the fields and the forward state at the accepted
+[`OptPostProcessor`](@ref HyperShape.PostProcess.OptPostProcessor): its driver is called at the starting design, at the
+accepted iterations that are multiples of `every`, at the end and after a failure, with the fields and the forward state at the accepted
 design; the adjoint state is still the one of the previous design) and
 `resume` (the result of [`load_checkpoint`](@ref)), `grey` (a [`Grey`](@ref) monitor: the measure of grey in the
 history, the table and the closing line), `verbose` and `io`. An `OC` whose `move` is continued by `schedule` gets
@@ -515,7 +515,10 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
   end
   if post !== nothing
     _post_start!(post, problem, k0, resume !== nothing)
-    if post.initial && post.last != k0
+    # a resumed run that starts with a continuation jump: the design of k0 is the one of the previous stage, and
+    # solving it now would cost one more forward solve (the first iteration solves it again at the new stage)
+    jump_first = schedule !== nothing && stage < schedule.nstages && stage_iters >= schedule.every
+    if post.initial && post.last != k0 && !jump_first
       # the forward solve of the first iteration, done now (the first step takes it from the value cache)
       if isfinite(_sync!(oracle))
         _postprocess!(post, oracle, hist)
@@ -530,14 +533,14 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
                              on_failure, stop, schedule, checkpoint, post, grey, fwd, adj, filters, pr)
 
   f_final = _sync!(oracle)                     # fields and forward state at the final design
-  if post !== nothing && post.last != run.k && isfinite(f_final)
-    set_context!(ctx, :iteration, run.k)       # after a stall, the iteration tried was run.k + 1
-    _postprocess!(post, oracle, hist)
-  end
   _print_end(pr, status, reason, run.k, f_final, grey === nothing ? NaN : grey_value(grey))
   _print_summary(pr, map(_count, ops) .- cstart, run.k - k0)
   checkpoint === nothing ||
     _write_checkpoint(checkpoint, problem, opt, state, zk, hist, run.k, run.stage, run.stage_iters, cont_names)
+  if post !== nothing && post.last != run.k && isfinite(f_final)
+    set_context!(ctx, :iteration, run.k)       # after a stall, the iteration tried was run.k + 1
+    _postprocess!(post, oracle, hist)
+  end
   OptResult(status, reason, run.k, f_final, _trim!(hist), state, t_start)
   finally
     opt isa OC && set_move!(opt, move0)
@@ -619,6 +622,10 @@ function _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint,
     false
   end
   synced || (msg *= " (the forward state could not be solved again at the last accepted design)")
+  _print_failure(pr, msg, run.k)
+  _print_summary(pr, map(_count, ops) .- run.cstart, run.k - run.k0)
+  checkpoint === nothing ||
+    _write_checkpoint(checkpoint, problem, opt, nothing, zk, hist, run.k, run.stage, run.stage_iters, cont_names)
   if synced && post !== nothing && post.last != run.k
     set_context!(problem.ctx, :iteration, run.k)
     try
@@ -628,10 +635,6 @@ function _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint,
       _print_event(pr, "✗ the post-processing of the last accepted design threw: " * first(sprint(showerror, e), 300), :red)
     end
   end
-  _print_failure(pr, msg, run.k)
-  _print_summary(pr, map(_count, ops) .- run.cstart, run.k - run.k0)
-  checkpoint === nothing ||
-    _write_checkpoint(checkpoint, problem, opt, nothing, zk, hist, run.k, run.stage, run.stage_iters, cont_names)
   throw(OptimizationFailure(msg, _trim!(deepcopy(hist)), run.k))
 end
 
@@ -713,7 +716,6 @@ function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_
                     c1[1] - c0[1], c1[2] - c0[2], c1[3] - c0[3], info.multiplier,
                     grey === nothing ? NaN : grey_value(grey)), cont_buf)
     _print_row(pr, hist)
-    post !== nothing && _post_due(post, k) && _postprocess!(post, oracle, hist)
     r = _stop_reason(stop, info, hist, run.stage_start)
     # with a nonlinear constraint, convergence also needs the constraint met to the tolerance of the optimiser
     (r !== nothing && !_is_linear(oracle) && has_constraint(oracle) && info.violation > constraint_tol(opt)) && (r = nothing)
@@ -727,6 +729,8 @@ function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_
     end
     checkpoint === nothing || k % checkpoint.every == 0 &&
       _write_checkpoint(checkpoint, problem, opt, state, zk, hist, k, run.stage, run.stage_iters, cont_names)
+    # after the checkpoint: an error of the driver does not lose it
+    post !== nothing && _post_due(post, k) && _postprocess!(post, oracle, hist)
     done && return :converged, r
   end
   :maxiter, nothing

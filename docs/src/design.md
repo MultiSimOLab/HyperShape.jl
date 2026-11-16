@@ -258,12 +258,12 @@ end
 `OptPostProcessor(driver; every, filepath)` calls the user-written `driver(post, ctx)` at the starting design, every
 `every` accepted iterations, at the end and after a failure, following the pattern of HyperFEM's `PostProcessor`.
 It does not take the problem: `solve!` passes it (`post.problem`), so it can be built before or after it. The user
-decides which fields are written and on which triangulation; `extend(f, Ω; outside)` takes a field of the design
+decides which fields are written and on which triangulation; `extend_field(f, Ω; outside)` takes a field of the design
 zone to a larger domain with a fixed value outside.
 
 ```julia
 post = OptPostProcessor(every = 10, filepath = "results/mbb") do post, ctx
-  write_step(post, Ω, "rho" => extend(θ.ρ, Ω; outside = 1.0), "u" => get_state(S))
+  write_step(post, Ω, "rho" => extend_field(θ.ρ, Ω; outside = 1.0), "u" => get_state(S))
 end
 ```
 
@@ -290,6 +290,8 @@ A default never removes generality: everything it sets can be replaced from the 
 | `RejectStep(shrink = 0.5, max = 5)` | `solve!(…; on_failure)` | `on_failure = RejectStep(…)` |
 | `default_stop(optimizer)` | `solve!(…; stop)` | `stop = StopCriteria(…)` or `stop = nothing` |
 | `Euclidean()` (unused) | `SIMP(OC())` | `metric = …` |
+| `initial = true`, `history = true`, `name = "optimization"` | `OptPostProcessor` | the keyword of the same name |
+| `createvtk` | `write_step` | its keywords (`compress = true`, …), or any writer in the driver with `get_pvd(post)[it] = file` |
 
 The solver is always the one of the user's model. For example, with PETSc (GridapPETSc) build the model with
 `ls = PETScLinearSolver()`; the default `solve` then calls it. Any other solve (a preconditioner rebuilt only every few

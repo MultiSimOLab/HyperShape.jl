@@ -6,18 +6,19 @@ Post-processing of an optimisation, one call per design iteration (the pattern o
 - [`OptPostProcessor`](@ref): calls the user's `driver(post, ctx)` every `every` iterations, keeps the `.pvd`
   collection (the iteration is the time) and writes the history of the run to `history.csv`.
 - [`write_step`](@ref): writes the fields of the current iteration with `createvtk` and adds them to the collection.
-- [`extend`](@ref): a field defined on the design zone, on a larger triangulation, with a fixed value outside.
+- [`extend_field`](@ref): a field defined on the design zone, on a larger triangulation, with a fixed value outside.
 """
 module PostProcess
 
 using Gridap
 using Gridap.Geometry: get_background_model, get_glue, num_cell_dims
 using Gridap.CellData: CellField, get_triangulation, change_domain, ReferenceDomain, Operation
+using Gridap.TensorValues: MultiValue, num_indep_components
 using WriteVTK: WriteVTK
 import HyperFEM: get_pvd
 using ..Operators: OptContext
 
-export OptPostProcessor, write_step, extend, get_pvd
+export OptPostProcessor, write_step, extend_field, get_pvd
 
 # ---------------------------------------------------------------------------------------------------------------
 # Collection
@@ -44,9 +45,12 @@ Base.length(c::PVDCollection) = length(c.times)
 
 function Base.setindex!(c::PVDCollection, file::AbstractString, t::Real)
   tf = Float64(t)
+  rel = relpath(abspath(file), dirname(abspath(c.path)))
+  any(i -> c.times[i] == tf && c.files[i] == rel, eachindex(c.times)) &&
+    throw(ArgumentError("the collection already has $rel at time $(_fmt(tf)): give each file of an iteration its own name"))
   push!(c.parts, count(==(tf), c.times))
   push!(c.times, tf)
-  push!(c.files, relpath(abspath(file), dirname(abspath(c.path))))
+  push!(c.files, rel)
   _save(c)
   c
 end
@@ -63,6 +67,10 @@ end
 
 _fmt(t::Float64) = isinteger(t) ? string(Int(t)) : string(t)
 
+const _XML = ("&" => "&amp;", "<" => "&lt;", ">" => "&gt;", "\"" => "&quot;")
+_escape(f) = replace(f, _XML...)
+_unescape(f) = replace(f, "&lt;" => "<", "&gt;" => ">", "&quot;" => "\"", "&amp;" => "&")
+
 function _save(c::PVDCollection)
   tmp = c.path * ".tmp"
   open(tmp, "w") do io
@@ -70,7 +78,7 @@ function _save(c::PVDCollection)
     println(io, "<VTKFile type=\"Collection\" version=\"1.0\" byte_order=\"LittleEndian\">")
     println(io, "  <Collection>")
     for (t, p, f) in zip(c.times, c.parts, c.files)
-      println(io, "    <DataSet timestep=\"", _fmt(t), "\" part=\"", p, "\" file=\"", f, "\"/>")
+      println(io, "    <DataSet timestep=\"", _fmt(t), "\" part=\"", p, "\" file=\"", _escape(f), "\"/>")
     end
     println(io, "  </Collection>")
     println(io, "</VTKFile>")
@@ -84,13 +92,14 @@ function _load(path::AbstractString; upto::Real)
   c = PVDCollection(path)
   if isfile(path)
     for l in eachline(path)
-      m = match(r"timestep=\"([^\"]+)\"\s+part=\"(\d+)\"\s+file=\"([^\"]+)\"", l)
-      m === nothing && continue
-      t = parse(Float64, m[1])
+      mt, mf = match(r"timestep=\"([^\"]+)\"", l), match(r"file=\"([^\"]+)\"", l)
+      (mt === nothing || mf === nothing) && continue
+      t = parse(Float64, mt[1])
       t <= upto || continue
+      mp = match(r"part=\"(\d+)\"", l)
       push!(c.times, t)
-      push!(c.parts, parse(Int, m[2]))
-      push!(c.files, m[3])
+      push!(c.parts, mp === nothing ? count(==(t), c.times) - 1 : parse(Int, mp[1]))
+      push!(c.files, _unescape(mf[1]))
     end
   end
   _save(c)
@@ -106,9 +115,12 @@ Post-processing of an optimisation: pass it to `solve!(…; post)`. `solve!` cal
 by the user, as the driver of HyperFEM's `PostProcessor`) with the fields, the variables and the forward state at the
 accepted design:
 
-- at the starting design (iteration 0, or the one of a resumed checkpoint), if `initial` (costs no extra solve: the
-  forward solve of the first iteration is done before it);
-- after every accepted iteration that is a multiple of `every` (mandatory: one call per iteration can fill the disk);
+- at the starting design (iteration 0, or the one of a resumed checkpoint), if `initial`. It costs no extra solve:
+  the forward solve of the first iteration is done before it (so the user's `solve` sees `ctx.iteration == 0` in that
+  solve, and the `forward` column of the history counts it in no iteration). Not repeated when the collection
+  already has that iteration, nor in a resumed run whose first iteration is a continuation jump;
+- after every accepted iteration that is a multiple of `every` (mandatory: one call per iteration can fill the disk;
+  the multiples count from iteration 0, also in a resumed run);
 - at the end of the run (converged, stalled or `maxiter`) and when it fails (at the last accepted design, if the
   forward problem can still be solved there), when that iteration has not been written yet.
 
@@ -117,11 +129,13 @@ state is still the one of the previous design. Nothing is called during [`check_
 HyperShape.Checks.check_consistency) or for the trial designs of a line search. An error thrown by the driver stops the
 optimisation, except in the call after a failure (then it is reported and the failure is thrown).
 
-`filepath` (a folder, created if needed) enables the collection `filepath/<name>.pvd` ([`get_pvd`](@ref), with the
+`filepath` (a folder, created if needed; made absolute when the post-processor is built) enables the collection `filepath/<name>.pvd` ([`get_pvd`](@ref), with the
 iteration as time; written after every entry, so it can be opened in ParaView during the run) and, if `history`,
 `filepath/history.csv` (the columns of [`OptHistory`](@ref HyperShape.Methods.OptHistory), written again at every call). Without `filepath` the
-driver writes what it wants (or nothing: a callback). Each `solve!` starts a new collection; a resumed run keeps the
-entries up to the iteration of the checkpoint.
+driver writes what it wants (or nothing: a callback). Each `solve!` starts a new collection (files of an earlier run
+in the folder are left there, outside it); a resumed run keeps the entries up to the iteration of the checkpoint.
+After a stall in a continuation stage whose last iteration was already written, the result of `solve!` is at the new
+stage but that iteration is not written again.
 
 The driver can write with [`write_step`](@ref) (`createvtk`), add any file it writes itself (`get_pvd(post)[ctx.iteration]
 = "file.vtu"`) or write nothing to the collection. Fields: `post.filepath`, `post.every`, `post.iteration` (of the
@@ -152,10 +166,17 @@ function OptPostProcessor(driver; every::Integer, filepath = nothing, initial::B
                           name::AbstractString = "optimization")
   every >= 1 || throw(ArgumentError("OptPostProcessor: every must be at least 1"))
   filepath === nothing || filepath isa AbstractString || throw(ArgumentError("OptPostProcessor: filepath must be a folder name or nothing"))
-  isempty(name) && throw(ArgumentError("OptPostProcessor: name must not be empty"))
-  OptPostProcessor(driver, Int(every), filepath === nothing ? nothing : String(filepath), initial, history, String(name),
+  _check_name(name, "OptPostProcessor")
+  hasmethod(driver, Tuple{OptPostProcessor{typeof(driver)},OptContext}) ||
+    throw(ArgumentError("OptPostProcessor: the driver must take two arguments, driver(post, ctx)"))
+  # absolute: a change of directory during the run does not move the output
+  OptPostProcessor(driver, Int(every), filepath === nothing ? nothing : abspath(filepath), initial, history, String(name),
                    nothing, -1, nothing, -1)
 end
+
+_check_name(name, who) =
+  (isempty(name) || occursin('/', name) || occursin('\\', name)) &&
+    throw(ArgumentError("$who: name must be a file name, not empty and without path separators (got \"$name\")"))
 
 """
     get_pvd(post::OptPostProcessor)
@@ -174,11 +195,12 @@ end
 Writes `fields` (`"name" => CellField`) on the triangulation `Ω` with `createvtk` to
 `post.filepath/<name>_<iteration>` and adds it to the collection at the current iteration. `kwargs` go to
 `createvtk` (`compress = true` for smaller files, `order`, `nsubcells`, `celldata`). For other formats, write the
-file in the driver and add it with `get_pvd(post)[ctx.iteration] = file`. Several calls in one iteration (different
-`Ω` and `name`) are parts of the same time.
+file in the driver and add it with `get_pvd(post)[ctx.iteration] = file`. Several calls in one iteration are parts
+of the same time and need different names (the same file twice at one time is an error).
 """
 function write_step(p::OptPostProcessor, Ω, fields::Pair...; name::AbstractString = p.name, kwargs...)
   p.filepath === nothing && throw(ArgumentError("write_step: the OptPostProcessor has no filepath"))
+  _check_name(name, "write_step")
   file = joinpath(p.filepath, string(name, "_", lpad(p.iteration, 4, '0')))
   get_pvd(p)[p.iteration] = createvtk(Ω, file; cellfields = collect(Pair{String,Any}, (String(f.first) => f.second for f in fields)),
                                       kwargs...)
@@ -210,19 +232,23 @@ function _post_call!(p::OptPostProcessor, ctx::OptContext)
 end
 
 # ---------------------------------------------------------------------------------------------------------------
-# extend
+# extend_field
 
 struct _Select{T} <: Function
   outside::T
 end
-(s::_Select)(inside, v) = inside ? v : oftype(v, s.outside)
+(s::_Select)(inside, v) = inside ? v : _outside(v, s.outside)
+
+_outside(v, o) = convert(typeof(v), o)
+# a scalar outside a vector or tensor field: the value of every independent component
+_outside(v::MultiValue, o::Real) = typeof(v)(ntuple(_ -> convert(eltype(v), o), Val(num_indep_components(typeof(v)))))
 
 # cell of Ω → cell of Ωd (0 outside Ωd)
 function _cell_map(Ωd, Ω)
   get_background_model(Ωd) === get_background_model(Ω) ||
-    throw(ArgumentError("extend: the field and Ω are not on the same background model"))
+    throw(ArgumentError("extend_field: the field and Ω are not on the same background model"))
   D = num_cell_dims(Ω)
-  num_cell_dims(Ωd) == D || throw(ArgumentError("extend: the field and Ω have different dimensions"))
+  num_cell_dims(Ωd) == D || throw(ArgumentError("extend_field: the field and Ω have different dimensions"))
   gd, g = get_glue(Ωd, Val(D)), get_glue(Ω, Val(D))
   m2d = zeros(Int32, num_cells(get_background_model(Ω)))
   m2d[gd.tface_to_mface] .= 1:num_cells(Ωd)
@@ -230,16 +256,17 @@ function _cell_map(Ωd, Ω)
 end
 
 """
-    extend(f::CellField, Ω::Triangulation; outside) -> CellField
+    extend_field(f::CellField, Ω::Triangulation; outside) -> CellField
 
 The field `f`, defined on a triangulation of the design zone (for example `θ.ρ`, `x.ρ` or a state on that zone), as
 a field on the larger triangulation `Ω` of the same background model: equal to `f` on the cells of the design zone and
-to the scalar `outside` on the others (for example `1.0` for a solid support, `0.0` for air). For writing (also
+to `outside` on the others (for example `1.0` for a solid support, `0.0` for air). For a vector or tensor field,
+`outside` is a value of that type or a number for every independent component (`0.0` gives zero). For writing (also
 with [`write_step`](@ref)) and integrating; returns `f` when `Ω` is its triangulation. The operation that defines `f`
-is also evaluated outside, at a zero value of its arguments (it must not throw there). Costs about 75 bytes per cell
+is also evaluated outside, at a zero value of its arguments (it must not throw there). Costs about 70 bytes per cell
 of `Ω` per call.
 """
-function extend(f::CellField, Ω::Triangulation; outside::Number)
+function extend_field(f::CellField, Ω::Triangulation; outside)
   Ωd = get_triangulation(f)
   Ωd === Ω && return f
   inside = CellField(_cell_map(Ωd, Ω) .> 0, Ω)
