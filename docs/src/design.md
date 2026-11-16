@@ -163,7 +163,7 @@ accept or reject, continuation, stopping, checkpoint); only the step is specific
 Implemented: `Optimization` and `SIMP` with the common loop.
 
 ```julia
-Vol = Volume(θ, dΩ; max = Vmax)          # physical (projected) density: nonlinear in z; Volume(x, dΩ; max) is linear
+Vol = Volume(θ, dΩ; max_fraction = 0.5)   # physical (projected) density: nonlinear in z; Volume(x, dΩ; …) is linear
 problem = Optimization(z; objective = J, constraints = Vol)
 result  = solve!(problem, SIMP(SiMPL(); metric = LumpedMass(dΩ));
                  maxiter = 300, stop = StopCriteria(kkt = 1e-5),
@@ -173,7 +173,8 @@ result  = solve!(problem, SIMP(SiMPL(); metric = LumpedMass(dΩ));
 result.status, result.history.objective
 ```
 
-`Volume(θ, dΩ; max)` bounds the physical density, the one the weak forms read; `Volume(x, dΩ; max)` the design
+`Volume(θ, dΩ; max_fraction)` bounds the fraction of the domain filled by the physical density, the one the weak
+forms read; `Volume(x, dΩ; max_fraction)` that of the design
 density. The Helmholtz filter preserves the volume, the Heaviside projection does not: on a 150×50 half MBB beam with
 target 0.5, the design volume leaves the physical one at 0.64–0.68, the physical volume holds it at 0.5000.
 

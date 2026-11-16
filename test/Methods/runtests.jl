@@ -439,8 +439,8 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
   @testset "Volume of the physical density: nonlinear constraint ($(name))" for name in (:OC, :SiMPL)
     q = compliance_problem()
     vol = sum(∫(1.0)q.dΩ)
-    V = Volume(q.θ, q.dΩ; max = 0.4 * vol)
-    @test !V.linear && Volume(q.x, q.dΩ; max = 0.4 * vol).linear
+    V = Volume(q.θ, q.dΩ; max_fraction = 0.4)
+    @test !V.linear && Volume(q.x, q.dΩ; max_fraction = 0.4).linear
     @test HyperShape.Variables.is_linear_field(q.θv, :ρ) && !HyperShape.Variables.is_linear_field(q.θ, :ρ)
     @test check_consistency(V).passed                           # Taylor test of the projected volume
     method = name === :OC ? SIMP(OC()) : SIMP(SiMPL(); metric = LumpedMass(q.dΩ))
@@ -464,7 +464,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
   @testset "Checkpoint and resume with a nonlinear constraint" begin
     dir = mktempdir()
     vol = 1.0
-    run(q, maxiter; kwargs...) = solve!(Optimization(q.z; objective = q.C, constraints = Volume(q.θ, q.dΩ; max = 0.4 * vol)),
+    run(q, maxiter; kwargs...) = solve!(Optimization(q.z; objective = q.C, constraints = Volume(q.θ, q.dΩ; max_fraction = 0.4)),
                                         SIMP(OC()); maxiter, verbose = 0, stop = nothing, kwargs...)
     qa = compliance_problem()
     ra = run(qa, 8)
@@ -479,13 +479,13 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
 
   @testset "Volume of the projected density: Taylor test (P1)" begin
     q = compliance_problem(; design = :P1)
-    @test check_consistency(Volume(q.θ, q.dΩ; max = 0.4 * sum(∫(1.0)q.dΩ))).passed
+    @test check_consistency(Volume(q.θ, q.dΩ; max_fraction = 0.4)).passed
   end
 
   @testset "Volume: infeasible start, linear volume of the design, errors" begin
     q = compliance_problem(; init = 0.9)
     vol = sum(∫(1.0)q.dΩ)
-    V = Volume(q.θ, q.dΩ; max = 0.4 * vol)
+    V = Volume(q.θ, q.dΩ; max_fraction = 0.4)
     r = solve!(Optimization(q.z; objective = q.C, constraints = V), SIMP(SiMPL(); metric = LumpedMass(q.dΩ));
                maxiter = 3, verbose = 0, stop = nothing)
     @test r.start_scaling !== nothing && 0 < r.start_scaling < 1
@@ -493,12 +493,13 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     # the volume of the design is linear: the same run as the hand-written linear functional
     runs = map((:volume, :hand)) do kind
       q = compliance_problem()
-      C = kind === :volume ? Volume(q.x, q.dΩ; max = 0.4 * vol) : q.Vol
+      C = kind === :volume ? Volume(q.x, q.dΩ; max_fraction = 0.4) : q.Vol
       solve!(Optimization(q.z; objective = q.C, constraints = C), SIMP(OC()); maxiter = 6, verbose = 0, stop = nothing)
     end
     @test runs[1].history.objective ≈ runs[2].history.objective rtol = 1e-12
-    @test_throws ArgumentError Volume(q.θ, q.dΩ; max = -1.0)
-    @test_throws ArgumentError Volume(q.θ, q.dΩ; max = 1.0, field = :E)
+    @test_throws ArgumentError Volume(q.θ, q.dΩ; max_fraction = -1.0)
+    @test_throws ArgumentError Volume(q.θ, q.dΩ; max_fraction = 1.5)
+    @test_throws ArgumentError Volume(q.θ, q.dΩ; max_fraction = 0.5, field = :E)
     @test_throws ArgumentError Optimization(q.z; objective = q.C, constraints = (V, V))
   end
 

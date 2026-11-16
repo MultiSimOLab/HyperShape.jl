@@ -113,23 +113,24 @@ function Functional(J, θ::PhysicalFields; derivative, scale, linear::Bool = fal
 end
 
 """
-    Volume(θ::PhysicalFields, dΩ; max, field = nothing, scale = max)
-    Volume(x::DesignFields, dΩ; max, field = nothing, scale = max)
+    Volume(θ::PhysicalFields, dΩ; max_fraction, field = nothing, scale = Vmax)
+    Volume(x::DesignFields, dΩ; max_fraction, field = nothing, scale = Vmax)
 
-Volume constraint `g = ∫ θ.field dΩ - max ≤ 0`, a design-only [`Functional`](@ref) with its value and derivative
-written in. With physical fields θ, the volume of the physical density: nonlinear in z if its chain has a
+Volume constraint `g = ∫ θ.field dΩ - Vmax ≤ 0` with `Vmax = max_fraction ⋅ |Ω|` (`0 < max_fraction ≤ 1`, `|Ω|` the
+measure of `dΩ`), a design-only [`Functional`](@ref) with its value and derivative written in. With physical fields θ, the volume of the physical density: nonlinear in z if its chain has a
 [`Heaviside`](@ref HyperShape.Variables.Heaviside) projection, linear otherwise. With design fields x, the volume of
 the design density (linear; the identity physical fields are built inside). `field` is mandatory when there are
-several fields. `scale` divides the value and the derivative; default `max`.
+several fields. `scale` divides the value and the derivative; default `Vmax`.
 """
-function Volume(θ::PhysicalFields, dΩ; max::Real, field = nothing, scale = max)
+function Volume(θ::PhysicalFields, dΩ; max_fraction::Real, field = nothing, scale = nothing)
   names = getfield(θ, :names)
   f = field === nothing ?
       (length(names) == 1 ? names[1] : throw(ArgumentError("Volume: several fields ($(join(names, ", "))); give field = …"))) :
       field
   f in names || throw(ArgumentError("Volume: no field named $f; available: $(join(names, ", "))"))
-  max > 0 || throw(ArgumentError("Volume: max must be positive"))
-  vmax = Float64(max)
+  0 < max_fraction <= 1 || throw(ArgumentError("Volume: max_fraction must be in (0, 1], got $max_fraction"))
+  vmax = Float64(max_fraction) * sum(∫(1.0)dΩ)
+  scale = scale === nothing ? vmax : scale
   J = θ -> sum(∫(getproperty(θ, f))dΩ) - vmax
   DJ = θ -> NamedTuple{(f,)}((δ -> ∫(δ)dΩ,))
   Functional(J, θ; derivative = DJ, scale, linear = is_linear_field(θ, f))

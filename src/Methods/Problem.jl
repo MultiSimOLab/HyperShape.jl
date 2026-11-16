@@ -26,8 +26,8 @@ struct _Validated end   # only the keyword constructors build problems
 
 Optimisation problem over the variables `z`: minimise the [`Functional`](@ref) `objective` subject to the bounds of
 `z` and, in phase 0, at most one constraint `g(z) ≤ 0`, a design-only functional: typically
-[`Volume`](@ref HyperShape.Functionals.Volume)`(θ, dΩ; max)` (volume of the physical density, nonlinear in z with a Heaviside
-projection) or `Volume(x, dΩ; max)` (volume of the design density, linear).
+[`Volume`](@ref HyperShape.Functionals.Volume)`(θ, dΩ; max_fraction)` (volume of the physical density, nonlinear in z with a Heaviside
+projection) or `Volume(x, dΩ; max_fraction)` (volume of the design density, linear).
 
 A constraint built as linear (`Volume` over identity or filter maps, or a `Functional(…; linear = true)`) is checked
 to be linear when the optimisation starts, and costs nothing in the loop (its vector is computed once). A nonlinear
