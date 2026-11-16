@@ -190,10 +190,18 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
 - **Rejection** (`on_failure`, default `RejectStep(shrink = 0.5, max = 5)`): if the forward problem does not converge at the new design, the loop restores the previous one,
   calls `shrink!` and tries again, at most `max` times; then it throws `OptimizationFailure` (checkpoint written).
   SiMPL handles failures inside its line search; if it finds no step, the current continuation stage ends (in the last stage, or without continuation, the result is `:stalled`).
-- **Continuation:** explicit list of values per stage, a jump every `every` iterations or when the stopping criteria
-  are met; the optimiser forgets its memory at each jump; the optimisation only stops in the last stage.
-- **Stopping:** `maxiter` is mandatory. `stop` defaults to `StopCriteria(change = 1e-4)` for OC and
-  `StopCriteria(kkt = 1e-4)` for SiMPL (`default_stop`); `stop = nothing` runs `maxiter` iterations.
+- **Continuation:** explicit list of values per stage, a jump every `every` iterations (or when the optimiser finds no
+  step); with `close_early = true` also when the stopping criteria are met. The optimiser forgets its memory at each
+  jump; the optimisation only stops in the last stage.
+- **Stopping:** `maxiter` is mandatory. `stop` defaults to `StopCriteria(objective = 1e-3)` for every optimiser
+  (`default_stop`): the range of the objective over the last 10 iterations of the last stage, relative to the
+  objective, below 0.1 %. With a Heaviside projection `change` and `kkt` are rarely reached; the objective settles
+  (half MBB beam 150×50: OC stops at iteration 257, SiMPL at 210, within 0.3 % of 350 iterations). Other criteria:
+  `kkt`, `kkt_rel` (relative to the first iteration), `change`; `stop = nothing` runs `maxiter` iterations. A run that
+  oscillates (OC on a thermal problem) or whose physical volume keeps growing (design volume with projection) may still
+  end at `maxiter`.
+- **Grey monitor:** `solve!(…; grey = Grey(θ, dΩ))` adds the measure of grey `4/|Ω| ∫ρ(1 − ρ)` to the history, the
+  table and the closing line. It is fixed mostly by β, so it is a measure of quality, not a stopping criterion.
 - **Context:** `OptContext` (iteration, attempt, trial, phase, continuation values) reaches every solve function of
   the user; phases `:setup`, `:check`, `:optimization` and `:linesearch`.
 - **Checkpoint:** `checkpoint.toml`, `z_<k>.bin` and `history_<k>.csv` in a folder; resume with

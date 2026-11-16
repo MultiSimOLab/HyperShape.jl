@@ -168,9 +168,15 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     # a criterion always met: one iteration per stage, stop in the last one
     q = compliance_problem()
     r = solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 12, stop = StopCriteria(change = 1.0),
-               schedule = Continuation(β = q.H => [1.0, 2.0, 4.0]; every = 3), verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
-    @test r.status === :converged && r.reason === :change && r.iterations == 3
-    @test vec(r.history.continuation) == [1, 2, 4]
+               schedule = Continuation(β = q.H => [1.0, 2.0, 4.0]; every = 3, close_early = true), verbose = 0,
+               on_failure = RejectStep(shrink = 0.5, max = 3))
+    @test r.status === :converged && r.reason === :change && r.iterations == 6   # not at the first iteration of a stage
+    @test vec(r.history.continuation) == [1, 1, 2, 2, 4, 4]
+    # by default the criteria only act in the last stage: the earlier stages run their `every` iterations
+    q = compliance_problem()
+    r = solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 12, stop = StopCriteria(change = 1.0),
+               schedule = Continuation(β = q.H => [1.0, 2.0, 4.0]; every = 3), verbose = 0)
+    @test r.status === :converged && r.iterations == 8 && vec(r.history.continuation) == [1, 1, 1, 2, 2, 2, 4, 4]
     # kkt with an optimiser that does not compute it
     q = compliance_problem()
     @test_throws ArgumentError solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 3, stop = StopCriteria(kkt = 1e-3),
@@ -289,11 +295,13 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
   @testset "Objective criterion counts only the current stage" begin
     q = compliance_problem()
     r = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 40, stop = StopCriteria(objective = 5e-2, window = 2),
-               schedule = Continuation(β = q.H => [1.0, 2.0, 4.0, 8.0]; every = 20), verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
+               schedule = Continuation(β = q.H => [1.0, 2.0, 4.0, 8.0]; every = 20, close_early = true), verbose = 0,
+               on_failure = RejectStep(shrink = 0.5, max = 3))
     c = vec(r.history.continuation)
     lengths = [count(==(v), c) for v in unique(c)]
-    @test all(>=(3), lengths[1:end-1])          # window + 1 iterations at least before a stage can end
-    @test_throws ArgumentError StopCriteria(objective = 1e-3)
+    @test all(>=(2), lengths[1:end-1])          # window iterations at least before a stage can end
+    @test StopCriteria(objective = 1e-3).window == 10
+    @test_throws ArgumentError StopCriteria(objective = 1e-3, window = 1)
   end
 
   @testset "SiMPL without constraint, loop bookkeeping without allocations" begin
@@ -304,10 +312,10 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test all(isnan, r.history.multiplier) && r.start_scaling === nothing
     h = OptHistory(10, (:β,))
     buf = [1.0]
-    row = (1, 1.0, 0.0, NaN, 0.1, 0.2, 1, 1, 0, 2, 0.5)
+    row = (1, 1.0, 0.0, NaN, 0.1, 0.2, 1, 1, 0, 2, 0.5, NaN)
     _record!(h, row, buf)
     @test (@allocated _record!(h, row, buf)) == 0
-    st = StopCriteria(change = 1e-3, objective = 1e-3, window = 1)
+    st = StopCriteria(change = 1e-3, objective = 1e-3, window = 2)
     info = HyperShape.Optimizers.StepInfo(true, 1.0, 1.0, NaN, 0.1, 0.1, 0.0, 1, 0.0)
     _stop_reason(st, info, h, 0)
     @test (@allocated _stop_reason(st, info, h, 0)) == 0
@@ -413,7 +421,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     j = findfirst(==("multiplier"), lines[1])
     write(hfile, join((join(deleteat!(copy(l), j), ",") for l in lines), "\n") * "\n")
     tfile = joinpath(dir, "checkpoint.toml")
-    write(tfile, replace(read(tfile, String), "format = 2" => "format = 1"))
+    write(tfile, replace(read(tfile, String), "format = 3" => "format = 1"))
     ck1 = load_checkpoint(dir)
     @test all(isnan, ck1.history.multiplier) && ck1.history.objective == ck.history.objective
     r1 = solve!(compliance_problem().problem, SIMP(OC(); metric = Euclidean()); maxiter = 4, verbose = 0, resume = ck1,
@@ -429,7 +437,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test t ≈ 0.4 / 0.6 && all(==(0.6), zk[1:5]) && dot(a, zk) ≈ 0.4 * sum(a)
     # printing at level 0 allocates nothing
     h = OptHistory(4, (:β,))
-    _record!(h, (1, 1.0, 0.0, NaN, 0.1, 0.2, 1, 1, 0, 2, 0.5), [1.0])
+    _record!(h, (1, 1.0, 0.0, NaN, 0.1, 0.2, 1, 1, 0, 2, 0.5, NaN), [1.0])
     p0 = HyperShape.Methods._Printer(IOBuffer(), 0, nothing)
     HyperShape.Methods._print_row(p0, h); HyperShape.Methods._print_event(p0, "x", :red)
     @test (@allocated HyperShape.Methods._print_row(p0, h)) == 0
@@ -503,12 +511,84 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test_throws ArgumentError Optimization(q.z; objective = q.C, constraints = (V, V))
   end
 
+  @testset "Stopping: range of the objective, kkt_rel, the grey monitor" begin
+    h = OptHistory(30, ())
+    rec!(f; kkt = NaN) = _record!(h, (h.n + 1, f, NaN, kkt, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN), ())
+    info(kkt = NaN) = HyperShape.Optimizers.StepInfo(true, 1.0, 1.0, kkt, 0.1, 0.1, 0.0, 1, NaN)
+    st = StopCriteria(objective = 1e-3, window = 4)
+    for f in (1.0, 1.01, 1.0, 1.01, 1.0)          # an oscillation: the ends of the window agree, the range does not
+      rec!(f)
+    end
+    @test _stop_reason(st, info(), h, 0) === nothing
+    @test _stop_reason(st, info(), h, 2) === nothing   # only 3 iterations of the stage
+    for f in (0.9, 0.9004, 0.9002, 0.9001)
+      rec!(f)
+    end
+    @test _stop_reason(st, info(), h, 0) === :objective
+    # an objective tending to zero: floor 1e-3 |f₁|; a negative objective
+    h0 = OptHistory(10, ())
+    for f in (1.0, 1e-6, 0.8e-6, 0.6e-6, 0.5e-6)
+      _record!(h0, (h0.n + 1, f, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN), ())
+    end
+    @test _stop_reason(StopCriteria(objective = 1e-3, window = 4), info(), h0, 0) === :objective
+    hn = OptHistory(10, ())
+    for f in (-1.0, -2.0, -2.0005, -2.0004)
+      _record!(hn, (hn.n + 1, f, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN), ())
+    end
+    @test _stop_reason(StopCriteria(objective = 1e-3, window = 3), info(), hn, 0) === :objective
+    @test _stop_reason(StopCriteria(objective = 1e-3, window = 4), info(), hn, 0) === nothing
+    # kkt relative to the first iteration
+    hk = OptHistory(10, ())
+    _record!(hk, (1, 1.0, NaN, 10.0, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN), ())
+    _record!(hk, (2, 1.0, NaN, 0.05, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN), ())
+    @test _stop_reason(StopCriteria(kkt_rel = 1e-2), info(0.05), hk, 0) === :kkt_rel
+    @test _stop_reason(StopCriteria(kkt_rel = 1e-2), info(0.05), hk, 1) === nothing   # first iteration of a stage
+    @test _stop_reason(StopCriteria(kkt_rel = 1e-3), info(0.05), hk, 0) === nothing
+    # the default criterion is reached on the small problem
+    for (mk, lumped) in ((() -> SiMPL(), true), (() -> OC(), false))
+      q = compliance_problem()
+      method = lumped ? SIMP(mk(); metric = LumpedMass(q.dΩ)) : SIMP(mk())
+      r = solve!(q.problem, method; maxiter = 300, verbose = 0)
+      @test r.status === :converged && r.reason === :objective && r.iterations < 300
+    end
+    # grey monitor: history, table and closing line
+    q = compliance_problem()
+    io = IOBuffer()
+    r = solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 4, stop = nothing, io,
+               grey = Grey(q.θ, q.dΩ))
+    out = String(take!(io))
+    ρ = q.θ.ρ
+    @test r.history.grey[end] ≈ 4 * sum(∫(ρ * (1 - ρ))q.dΩ) / sum(∫(1.0)q.dΩ)
+    @test all(g -> 0 <= g <= 1, r.history.grey)
+    @test occursin("grey", out) && occursin(", grey ", out)
+    @test all(isnan, solve!(compliance_problem().problem, SIMP(OC()); maxiter = 2, verbose = 0, stop = nothing).history.grey)
+    @test_throws ArgumentError solve!(q.problem, SIMP(OC()); maxiter = 2, verbose = 0, grey = q.θ)
+    θ2 = PhysicalFields(q.x; ρ = Identity(), E = :ρ => Identity())
+    @test_throws ArgumentError Grey(θ2, q.dΩ)
+    @test Grey(θ2, q.dΩ; field = :E).field === :E
+    @test_throws MethodError Grey(q.x, q.dΩ)
+    @test_throws ArgumentError Continuation(grey = q.H => [1.0, 2.0]; every = 2)   # a history column
+    # grey through a checkpoint, P1 design
+    dir = mktempdir()
+    q1 = compliance_problem(; design = :P1)
+    r1 = solve!(q1.problem, SIMP(OC()); maxiter = 3, verbose = 0, stop = nothing, grey = Grey(q1.θ, q1.dΩ),
+                checkpoint = Checkpoint(dir; every = 3))
+    @test all(isfinite, r1.history.grey) && load_checkpoint(dir).history.grey == r1.history.grey
+    # banner: no "last stage only" without criteria
+    io = IOBuffer()
+    solve!(compliance_problem().problem, SIMP(OC()); maxiter = 1, io, verbose = 1, stop = StopCriteria(),
+           schedule = Continuation(β = q.H => [1.0, 2.0]; every = 2))
+    @test !occursin("last stage only", String(take!(io)))
+  end
+
   @testset "Defaults: metric of OC, stopping criteria, failure handling and the banner" begin
     default_stop = HyperShape.Methods.default_stop
     @test SIMP(OC()).default_metric && !SIMP(OC(); metric = Euclidean()).default_metric
     @test RejectStep() === RejectStep(shrink = 0.5, max = 5)
-    @test default_stop(OC()).change == 1e-4 && default_stop(OC()).kkt === nothing
-    @test default_stop(SiMPL()).kkt == 1e-4 && default_stop(SiMPL()).change === nothing
+    for o in (OC(), SiMPL())
+      d = default_stop(o)
+      @test d.objective == 1e-3 && d.window == 10 && d.kkt === nothing && d.kkt_rel === nothing && d.change === nothing
+    end
     # the defaults give the same run as the same values written explicitly
     for (mkopt, lumped) in ((() -> OC(), false), (() -> SiMPL(), true))
       runs = map((true, false)) do dflt
@@ -523,7 +603,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
       (r1, o1), (r2, o2) = runs
       @test r1.status == r2.status && r1.iterations == r2.iterations && r1.objective == r2.objective
       name = nameof(typeof(mkopt()))
-      @test occursin("(default for $name)", o1) && !occursin("(default for", o2)
+      @test occursin("over 10 iterations (default)", o1) && !occursin("iterations (default)", o2)
       @test occursin("at most 5 attempts (default)", o1) && occursin("at most 5 attempts\n", o2)
     end
     io = IOBuffer()

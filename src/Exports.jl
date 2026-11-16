@@ -24,6 +24,7 @@ end
 @publish Methods Euclidean
 @publish Methods Continuation
 @publish Methods StopCriteria
+@publish Methods Grey
 @publish Methods RejectStep
 @publish Methods Checkpoint
 @publish Methods load_checkpoint
