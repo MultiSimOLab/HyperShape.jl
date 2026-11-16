@@ -519,6 +519,8 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
     # solving it now would cost one more forward solve (the first iteration solves it again at the new stage)
     jump_first = schedule !== nothing && stage < schedule.nstages && stage_iters >= schedule.every
     if post.initial && post.last != k0 && !jump_first
+      # a resumed run writes k0 again: files without a collection entry (VTKHDF) keep only the steps before it
+      resume !== nothing && (post.resume_upto = k0 - 1)
       # the forward solve of the first iteration, done now (the first step takes it from the value cache)
       if isfinite(_sync!(oracle))
         _postprocess!(post, oracle, hist)
@@ -541,9 +543,11 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
     set_context!(ctx, :iteration, run.k)       # after a stall, the iteration tried was run.k + 1
     _postprocess!(post, oracle, hist)
   end
+  post === nothing || _post_close!(post)      # pending writes finished; an error of a write is thrown here
   OptResult(status, reason, run.k, f_final, _trim!(hist), state, t_start)
   finally
     opt isa OC && set_move!(opt, move0)
+    post isa OptPostProcessor && _post_close!(post; quiet = true)   # failure or interruption: finish the writes
   end
 end
 

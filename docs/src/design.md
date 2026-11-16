@@ -267,15 +267,32 @@ post = OptPostProcessor(every = 10, filepath = "results/mbb") do post, ctx
 end
 ```
 
-- `write_step` writes with `createvtk` (options such as `compress = true` pass through); any other file can be added
-  with `get_pvd(post)[ctx.iteration] = file`.
+- `write_step` writes with a `FieldWriter` (one per triangulation and name, built at the first call, closed when
+  `solve!` returns, fails or is interrupted). The mesh is written once with the node numbering of the grid
+  (continuous, not one copy of each node per cell as `createvtk`) and the values come straight from the degrees of
+  freedom: P0 as cell data, P1/Q1 as point data, pointwise operations on them (`θ.ρ`, `E ∘ θ.ρ`) and `extend_field`.
+  Other fields (gradients, discontinuous spaces) are evaluated by Gridap at the vertices, with a warning.
+- `format = :vtu` (default, any ParaView, a `.pvd` collection) or `:vtkhdf` (one HDF5 file with every iteration and the
+  mesh once; `using HDF5`; ParaView ≥ 5.12). `precision = Float32` halves the values; `async` (default with more than
+  one thread) writes in another task, so the loop only waits for a copy of the values.
+- `createvtk` stays available: `get_pvd(post)[ctx.iteration] = createvtk(Ω, file; cellfields = …)`.
 - The `.pvd` collection (iteration as time) is written again after every entry, so ParaView can open it during the
-  run and it stays valid after an interruption; a resumed run keeps the entries up to its checkpoint.
+  run and it stays valid after an interruption; a resumed run keeps the entries up to its checkpoint (VTKHDF files
+  drop the later steps).
 - `filepath/history.csv` holds the history of the run, written again at every call.
 - No extra solves: the forward solve of the starting design is the one of the first iteration, done earlier.
 
-Planned (`fast-output`): a writer with the mesh written once and the degrees of freedom written directly, VTKHDF,
-asynchronous writing, MPI and GPU (see HyperFEM issue #257).
+Per step, three fields (P0, a projected P1 and a P1 vector), Apple M5 Max, Julia 1.13.0, 4 threads:
+
+| | 150×50 | 40³ | 64³ |
+|---|---|---|---|
+| `createvtk` | 4.5 ms, 2.0 MB | 44 ms, 34 MB | 196 ms, 139 MB |
+| VTU | 0.28 ms, 0.76 MB | 1.3 ms, 8.6 MB | 5.5 ms, 35 MB |
+| VTKHDF, Float32 | 0.57 ms, 0.22 MB | 0.97 ms, 2.2 MB | 2.4 ms, 8.7 MB |
+| loop blocked with `async` (VTKHDF, Float32) | 0.05 ms | 0.40 ms | 1.5 ms |
+
+The first step builds the mesh and the maps (about 1 s at 64³). Planned: PVTU and VTKHDF with MPI, XDMF, GPU, quadratic
+cells, and moving the writers to HyperFEM (HyperFEM issue #257).
 
 ## Defaults and how to replace them
 
@@ -291,7 +308,7 @@ A default never removes generality: everything it sets can be replaced from the 
 | `default_stop(optimizer)` | `solve!(…; stop)` | `stop = StopCriteria(…)` or `stop = nothing` |
 | `Euclidean()` (unused) | `SIMP(OC())` | `metric = …` |
 | `initial = true`, `history = true`, `name = "optimization"` | `OptPostProcessor` | the keyword of the same name |
-| `createvtk` | `write_step` | its keywords (`compress = true`, …), or any writer in the driver with `get_pvd(post)[it] = file` |
+| `format = :vtu`, `precision = Float64`, `compress = false`, `async = Threads.nthreads() > 1` | `OptPostProcessor` (writers of `write_step`) | the keyword of the same name; `write_step(post, w::FieldWriter, …)` with a writer of your own; or `createvtk` in the driver |
 
 The solver is always the one of the user's model. For example, with PETSc (GridapPETSc) build the model with
 `ls = PETScLinearSolver()`; the default `solve` then calls it. Any other solve (a preconditioner rebuilt only every few

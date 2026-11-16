@@ -5,20 +5,27 @@ Post-processing of an optimisation, one call per design iteration (the pattern o
 
 - [`OptPostProcessor`](@ref): calls the user's `driver(post, ctx)` every `every` iterations, keeps the `.pvd`
   collection (the iteration is the time) and writes the history of the run to `history.csv`.
-- [`write_step`](@ref): writes the fields of the current iteration with `createvtk` and adds them to the collection.
+- [`write_step`](@ref): writes the fields of the current iteration with a [`FieldWriter`](@ref) (VTU or VTKHDF, the
+  mesh once, values from the degrees of freedom, optionally without blocking the loop).
+- [`FieldWriter`](@ref), [`write_fields`](@ref): the writer, usable on its own (also outside an optimisation).
 - [`extend_field`](@ref): a field defined on the design zone, on a larger triangulation, with a fixed value outside.
 """
 module PostProcess
 
 using Gridap
-using Gridap.Geometry: get_background_model, get_glue, num_cell_dims
-using Gridap.CellData: CellField, get_triangulation, change_domain, ReferenceDomain, Operation
-using Gridap.TensorValues: MultiValue, num_indep_components
+using Gridap.ReferenceFEs: num_dims, is_n_cube, num_vertices, get_vertex_coordinates, get_polytope
+using Gridap.Geometry: get_background_model, get_glue, num_cell_dims, num_point_dims, get_grid, get_reffes,
+                       get_node_coordinates, get_cell_node_ids
+using Gridap.Arrays: array_cache, getindex!
+using Gridap.FESpaces: get_fe_dof_basis, get_cell_dof_ids, get_dirichlet_dof_values, get_fe_space
+using Gridap.CellData: CellField, get_triangulation, change_domain, ReferenceDomain, Operation, get_data
+import Gridap.CellData: DomainStyle
+using Gridap.TensorValues: MultiValue, num_indep_components, VectorValue
 using WriteVTK: WriteVTK
 import HyperFEM: get_pvd
 using ..Operators: OptContext
 
-export OptPostProcessor, write_step, extend_field, get_pvd
+export OptPostProcessor, write_step, extend_field, get_pvd, FieldWriter, write_fields
 
 # ---------------------------------------------------------------------------------------------------------------
 # Collection
@@ -37,13 +44,19 @@ mutable struct PVDCollection
   times::Vector{Float64}
   files::Vector{String}
   parts::Vector{Int}
+  lock::ReentrantLock             # entries also come from the tasks of asynchronous writers
 end
 
-PVDCollection(path::AbstractString) = PVDCollection(String(path), Float64[], String[], Int[])
+PVDCollection(path::AbstractString) = PVDCollection(String(path), Float64[], String[], Int[], ReentrantLock())
 
 Base.length(c::PVDCollection) = length(c.times)
 
 function Base.setindex!(c::PVDCollection, file::AbstractString, t::Real)
+  lock(() -> _add!(c, file, t), c.lock)
+  c
+end
+
+function _add!(c::PVDCollection, file, t)
   tf = Float64(t)
   rel = relpath(abspath(file), dirname(abspath(c.path)))
   any(i -> c.times[i] == tf && c.files[i] == rel, eachindex(c.times)) &&
@@ -101,15 +114,29 @@ function _load(path::AbstractString; upto::Real)
       push!(c.parts, mp === nothing ? count(==(t), c.times) - 1 : parse(Int, mp[1]))
       push!(c.files, _unescape(mf[1]))
     end
+    _save(c)
   end
-  _save(c)
+  c
 end
+
+# the result of extend_field: a CellField on Ω that remembers the field and the value outside (for the FieldWriter)
+struct ExtendedField{F,O,C<:CellField} <: CellField
+  f::F
+  outside::O
+  cf::C
+end
+Gridap.CellData.get_data(e::ExtendedField) = get_data(e.cf)
+Gridap.CellData.get_triangulation(e::ExtendedField) = get_triangulation(e.cf)
+DomainStyle(::Type{<:ExtendedField{F,O,C}}) where {F,O,C} = DomainStyle(C)
+
+include("FieldWriters.jl")
 
 # ---------------------------------------------------------------------------------------------------------------
 # OptPostProcessor
 
 """
-    OptPostProcessor(driver; every, filepath = nothing, initial = true, history = true, name = "optimization")
+    OptPostProcessor(driver; every, filepath = nothing, initial = true, history = true, name = "optimization",
+                     format = :vtu, precision = Float64, compress = false, async = Threads.nthreads() > 1)
 
 Post-processing of an optimisation: pass it to `solve!(…; post)`. `solve!` calls `driver(post, ctx)` (written
 by the user, as the driver of HyperFEM's `PostProcessor`) with the fields, the variables and the forward state at the
@@ -134,6 +161,12 @@ iteration as time; written after every entry, so it can be opened in ParaView du
 `filepath/history.csv` (the columns of [`OptHistory`](@ref HyperShape.Methods.OptHistory), written again at every call). Without `filepath` the
 driver writes what it wants (or nothing: a callback). Each `solve!` starts a new collection (files of an earlier run
 in the folder are left there, outside it); a resumed run keeps the entries up to the iteration of the checkpoint.
+The collection file is created with its first entry (none with `format = :vtkhdf`).
+
+`format`, `precision`, `compress` and `async` are the options of the [`FieldWriter`](@ref)s that [`write_step`](@ref)
+builds: `format = :vtkhdf` (one file per triangulation and name with every iteration; needs `using HDF5`) suits large
+3D runs, `:vtu` (default) any ParaView. The writers are closed (their pending writes finished) when `solve!` returns,
+fails or is interrupted.
 After a stall in a continuation stage whose last iteration was already written, the result of `solve!` is at the new
 stage but that iteration is not written again.
 
@@ -160,18 +193,28 @@ mutable struct OptPostProcessor{F}
   iteration::Int
   pvd::Union{Nothing,PVDCollection}
   last::Int                       # last iteration post-processed in the current solve! (-1: none)
+  format::Symbol
+  precision::Type
+  compress::Bool
+  async::Bool
+  writers::Dict{Tuple{UInt,String},Any}   # the writers of write_step, by triangulation and name
+  resume_upto::Union{Nothing,Int}         # a resumed run: VTKHDF files keep their steps up to this iteration
 end
 
 function OptPostProcessor(driver; every::Integer, filepath = nothing, initial::Bool = true, history::Bool = true,
-                          name::AbstractString = "optimization")
+                          name::AbstractString = "optimization", format::Symbol = :vtu, precision::Type = Float64,
+                          compress::Bool = false, async::Bool = Threads.nthreads() > 1)
   every >= 1 || throw(ArgumentError("OptPostProcessor: every must be at least 1"))
   filepath === nothing || filepath isa AbstractString || throw(ArgumentError("OptPostProcessor: filepath must be a folder name or nothing"))
   _check_name(name, "OptPostProcessor")
   hasmethod(driver, Tuple{OptPostProcessor{typeof(driver)},OptContext}) ||
     throw(ArgumentError("OptPostProcessor: the driver must take two arguments, driver(post, ctx)"))
+  format in FORMATS || throw(ArgumentError("OptPostProcessor: format must be one of $(join(FORMATS, ", "))"))
+  precision in (Float32, Float64) || throw(ArgumentError("OptPostProcessor: precision must be Float32 or Float64"))
+  format === :vtkhdf && !_hdf5_loaded() && throw(ArgumentError("OptPostProcessor: format = :vtkhdf needs `using HDF5` in the script"))
   # absolute: a change of directory during the run does not move the output
   OptPostProcessor(driver, Int(every), filepath === nothing ? nothing : abspath(filepath), initial, history, String(name),
-                   nothing, -1, nothing, -1)
+                   nothing, -1, nothing, -1, format, precision, compress, async, Dict{Tuple{UInt,String},Any}(), nothing)
 end
 
 _check_name(name, who) =
@@ -190,36 +233,66 @@ function get_pvd(p::OptPostProcessor)
 end
 
 """
-    write_step(post::OptPostProcessor, Ω, fields::Pair...; name = post.name, kwargs...)
+    write_step(post::OptPostProcessor, Ω, fields::Pair...; name = post.name)
+    write_step(post::OptPostProcessor, w::FieldWriter, fields::Pair...)
 
-Writes `fields` (`"name" => CellField`) on the triangulation `Ω` with `createvtk` to
-`post.filepath/<name>_<iteration>` and adds it to the collection at the current iteration. `kwargs` go to
-`createvtk` (`compress = true` for smaller files, `order`, `nsubcells`, `celldata`). For other formats, write the
-file in the driver and add it with `get_pvd(post)[ctx.iteration] = file`. Several calls in one iteration are parts
-of the same time and need different names (the same file twice at one time is an error).
+Writes `fields` (`"name" => CellField`) of the current iteration on the triangulation `Ω`, with the
+[`FieldWriter`](@ref) of `(Ω, name)` (built at the first call with the `format`, `precision`, `compress` and `async`
+of the post-processor): `post.filepath/<name>_<iteration>.vtu` added to the collection once written, or
+`post.filepath/<name>.vtkhdf`. Several calls in one iteration need different `Ω` or `name`. The second form writes
+with a writer built by the user (the user closes it). For `createvtk` (any field, the discontinuous mesh of Gridap),
+write in the driver and add the file: `get_pvd(post)[ctx.iteration] = createvtk(Ω, file; cellfields = …)`.
 """
-function write_step(p::OptPostProcessor, Ω, fields::Pair...; name::AbstractString = p.name, kwargs...)
+function write_step(p::OptPostProcessor, Ω::Triangulation, fields::Pair...; name::AbstractString = p.name)
   p.filepath === nothing && throw(ArgumentError("write_step: the OptPostProcessor has no filepath"))
   _check_name(name, "write_step")
-  file = joinpath(p.filepath, string(name, "_", lpad(p.iteration, 4, '0')))
-  get_pvd(p)[p.iteration] = createvtk(Ω, file; cellfields = collect(Pair{String,Any}, (String(f.first) => f.second for f in fields)),
-                                      kwargs...)
-  nothing
+  w = get!(p.writers, (objectid(Ω), String(name))) do
+    FieldWriter(Ω, joinpath(p.filepath, name); format = p.format, precision = p.precision, compress = p.compress,
+                async = p.async, collection = p.format === :vtu ? get_pvd(p) : nothing, resume_upto = p.resume_upto)
+  end
+  write_fields(w, p.iteration, fields...; index = p.iteration)
 end
+
+write_step(p::OptPostProcessor, w::FieldWriter, fields::Pair...) = write_fields(w, p.iteration, fields...; index = p.iteration)
 
 # called by solve! at the start of each run: k0 is the starting iteration, a resumed run keeps its entries up to k0
 function _post_start!(p::OptPostProcessor, problem, k0::Integer, resumed::Bool)
+  _post_close!(p; quiet = true)                # writers left by an earlier run
   p.problem = problem
   p.iteration = k0
   p.last = -1
   p.pvd = nothing
+  p.resume_upto = resumed ? Int(k0) : nothing
   if p.filepath !== nothing
     mkpath(p.filepath)
     path = joinpath(p.filepath, p.name * ".pvd")
-    p.pvd = resumed ? _load(path; upto = k0) : _save(PVDCollection(path))
-    resumed && any(==(Float64(k0)), p.pvd.times) && (p.last = k0)     # the starting design is already written
+    if resumed
+      p.pvd = _load(path; upto = k0)
+      any(==(Float64(k0)), p.pvd.times) && (p.last = k0)     # the starting design is already written
+    else
+      isfile(path) && rm(path)                   # created again with the first entry of this run
+      p.pvd = PVDCollection(path)
+    end
   end
   p
+end
+
+# called by solve! when it returns (errors of the writers are thrown) and in its `finally` (quiet: reported only)
+function _post_close!(p::OptPostProcessor; quiet::Bool = false)
+  err = nothing
+  for w in values(p.writers)
+    try
+      close(w)
+    catch e
+      e isa InterruptException && rethrow()
+      err === nothing && (err = e)
+    end
+  end
+  empty!(p.writers)
+  if err !== nothing
+    quiet ? (@error "OptPostProcessor: a write failed" exception = err) : throw(err)
+  end
+  nothing
 end
 
 _post_due(p::OptPostProcessor, k::Integer) = k % p.every == 0 && k != p.last
@@ -270,7 +343,8 @@ function extend_field(f::CellField, Ω::Triangulation; outside)
   Ωd = get_triangulation(f)
   Ωd === Ω && return f
   inside = CellField(_cell_map(Ωd, Ω) .> 0, Ω)
-  Operation(_Select(outside))(inside, change_domain(f, Ω, ReferenceDomain()))
+  ExtendedField(f, outside, Operation(_Select(outside))(inside, change_domain(f, Ω, ReferenceDomain())))
 end
+
 
 end
