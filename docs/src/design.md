@@ -198,8 +198,7 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
   objective, below 0.1 %. With a Heaviside projection `change` and `kkt` are rarely reached; the objective settles
   (half MBB beam 150×50: OC with adaptive move limits stops at iteration 214, 0.4 % above its value at 500 iterations; SiMPL at 210, within 0.3 % of 350 iterations). Other criteria:
   `kkt`, `kkt_rel` (relative to the first iteration), `change`; `stop = nothing` runs `maxiter` iterations. A run that
-  oscillates (OC on a thermal problem) or whose physical volume keeps growing (design volume with projection) may still
-  end at `maxiter`.
+  oscillates or whose physical volume keeps growing may still end at `maxiter`.
 - **Grey monitor:** `solve!(…; grey = Grey(θ, dΩ))` adds the measure of grey `4/|Ω| ∫ρ(1 − ρ)` to the history, the
   table and the closing line. It is fixed mostly by β, so it is a measure of quality, not a stopping criterion.
 - **Context:** `OptContext` (iteration, attempt, trial, phase, continuation values) reaches every solve function of
