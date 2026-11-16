@@ -1,7 +1,7 @@
 name = "HyperShape"
 uuid = "1a07404e-cd44-4b01-9b9c-59424ef2e75e"
-authors = ["MultiSimOLab"]
 version = "0.1.0"
+authors = ["MultiSimOLab"]
 
 [deps]
 Gridap = "56d4f2e9-7ea1-5844-9cf6-b9c51ca7ce8e"
@@ -13,12 +13,16 @@ Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 TimerOutputs = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
 
-[sources]
-HyperFEM = {url = "https://github.com/MultiSimOLab/HyperFEM.jl", rev = "main"}
-HyperFEMKernels = {url = "https://github.com/MultiSimOLab/HyperFEMKernels.jl", rev = "main"}
+[sources.HyperFEM]
+rev = "main"
+url = "https://github.com/MultiSimOLab/HyperFEM.jl"
+
+[sources.HyperFEMKernels]
+rev = "main"
+url = "https://github.com/MultiSimOLab/HyperFEMKernels.jl"
 
 [compat]
-Gridap = "=0.20.8"
+Gridap = "=0.20.8, 0.20"
 HyperFEM = "0.2"
 HyperFEMKernels = "0.2"
 LinearAlgebra = "1"
