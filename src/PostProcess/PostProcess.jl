@@ -136,7 +136,8 @@ include("FieldWriters.jl")
 
 """
     OptPostProcessor(driver; every, filepath = nothing, initial = true, history = true, name = "optimization",
-                     format = :vtu, precision = Float64, compress = false, async = Threads.nthreads() > 1)
+                     format = :vtu, precision = Float64, compress = false, async = Threads.nthreads() > 1,
+                     maxpending = 2)
 
 Post-processing of an optimisation: pass it to `solve!(…; post)`. `solve!` calls `driver(post, ctx)` (written
 by the user, as the driver of HyperFEM's `PostProcessor`) with the fields, the variables and the forward state at the
@@ -163,8 +164,8 @@ driver writes what it wants (or nothing: a callback). Each `solve!` starts a new
 in the folder are left there, outside it); a resumed run keeps the entries up to the iteration of the checkpoint.
 The collection file is created with its first entry (none with `format = :vtkhdf`).
 
-`format`, `precision`, `compress` and `async` are the options of the [`FieldWriter`](@ref)s that [`write_step`](@ref)
-builds: `format = :vtkhdf` (one file per triangulation and name with every iteration; needs `using HDF5`) suits large
+`format`, `precision`, `compress`, `async` and `maxpending` are the options of the [`FieldWriter`](@ref)s that
+[`write_step`](@ref) builds (with `async`, the collection lags behind the loop by the queued steps): `format = :vtkhdf` (one file per triangulation and name with every iteration; needs `using HDF5`) suits large
 3D runs, `:vtu` (default) any ParaView. The writers are closed (their pending writes finished) when `solve!` returns,
 fails or is interrupted.
 After a stall in a continuation stage whose last iteration was already written, the result of `solve!` is at the new
@@ -197,13 +198,14 @@ mutable struct OptPostProcessor{F}
   precision::Type
   compress::Bool
   async::Bool
-  writers::Dict{Tuple{UInt,String},Any}   # the writers of write_step, by triangulation and name
+  maxpending::Int
+  writers::Dict{String,Any}               # the writers of write_step, by name
   resume_upto::Union{Nothing,Int}         # a resumed run: VTKHDF files keep their steps up to this iteration
 end
 
 function OptPostProcessor(driver; every::Integer, filepath = nothing, initial::Bool = true, history::Bool = true,
                           name::AbstractString = "optimization", format::Symbol = :vtu, precision::Type = Float64,
-                          compress::Bool = false, async::Bool = Threads.nthreads() > 1)
+                          compress::Bool = false, async::Bool = Threads.nthreads() > 1, maxpending::Integer = 2)
   every >= 1 || throw(ArgumentError("OptPostProcessor: every must be at least 1"))
   filepath === nothing || filepath isa AbstractString || throw(ArgumentError("OptPostProcessor: filepath must be a folder name or nothing"))
   _check_name(name, "OptPostProcessor")
@@ -211,10 +213,11 @@ function OptPostProcessor(driver; every::Integer, filepath = nothing, initial::B
     throw(ArgumentError("OptPostProcessor: the driver must take two arguments, driver(post, ctx)"))
   format in FORMATS || throw(ArgumentError("OptPostProcessor: format must be one of $(join(FORMATS, ", "))"))
   precision in (Float32, Float64) || throw(ArgumentError("OptPostProcessor: precision must be Float32 or Float64"))
+  maxpending >= 1 || throw(ArgumentError("OptPostProcessor: maxpending must be at least 1"))
   format === :vtkhdf && !_hdf5_loaded() && throw(ArgumentError("OptPostProcessor: format = :vtkhdf needs `using HDF5` in the script"))
   # absolute: a change of directory during the run does not move the output
   OptPostProcessor(driver, Int(every), filepath === nothing ? nothing : abspath(filepath), initial, history, String(name),
-                   nothing, -1, nothing, -1, format, precision, compress, async, Dict{Tuple{UInt,String},Any}(), nothing)
+                   nothing, -1, nothing, -1, format, precision, compress, async, Int(maxpending), Dict{String,Any}(), nothing)
 end
 
 _check_name(name, who) =
@@ -237,19 +240,24 @@ end
     write_step(post::OptPostProcessor, w::FieldWriter, fields::Pair...)
 
 Writes `fields` (`"name" => CellField`) of the current iteration on the triangulation `Ω`, with the
-[`FieldWriter`](@ref) of `(Ω, name)` (built at the first call with the `format`, `precision`, `compress` and `async`
-of the post-processor): `post.filepath/<name>_<iteration>.vtu` added to the collection once written, or
-`post.filepath/<name>.vtkhdf`. Several calls in one iteration need different `Ω` or `name`. The second form writes
+[`FieldWriter`](@ref) of `name` (built at the first call with the `format`, `precision`, `compress`, `async` and
+`maxpending` of the post-processor): `post.filepath/<name>_<iteration>.vtu` added to the collection once written, or
+`post.filepath/<name>.vtkhdf`. A `name` belongs to one triangulation: several calls in one iteration (other fields,
+other triangulations) need different names. The second form writes
 with a writer built by the user (the user closes it). For `createvtk` (any field, the discontinuous mesh of Gridap),
 write in the driver and add the file: `get_pvd(post)[ctx.iteration] = createvtk(Ω, file; cellfields = …)`.
 """
-function write_step(p::OptPostProcessor, Ω::Triangulation, fields::Pair...; name::AbstractString = p.name)
+function write_step(p::OptPostProcessor, Ω::Triangulation, fields::Pair...; name::AbstractString = p.name, kwargs...)
+  isempty(kwargs) || throw(ArgumentError("write_step: options ($(join(keys(kwargs), ", "))) are given to OptPostProcessor " *
+                                         "(format, precision, compress, async, maxpending)"))
   p.filepath === nothing && throw(ArgumentError("write_step: the OptPostProcessor has no filepath"))
   _check_name(name, "write_step")
-  w = get!(p.writers, (objectid(Ω), String(name))) do
+  w = get!(p.writers, String(name)) do
     FieldWriter(Ω, joinpath(p.filepath, name); format = p.format, precision = p.precision, compress = p.compress,
-                async = p.async, collection = p.format === :vtu ? get_pvd(p) : nothing, resume_upto = p.resume_upto)
+                async = p.async, maxpending = p.maxpending, collection = p.format === :vtu ? get_pvd(p) : nothing,
+                resume_upto = p.resume_upto)
   end
+  w.Ω === Ω || throw(ArgumentError("write_step: name \"$name\" is already written on another triangulation; give each triangulation its own name"))
   write_fields(w, p.iteration, fields...; index = p.iteration)
 end
 
@@ -280,15 +288,18 @@ end
 # called by solve! when it returns (errors of the writers are thrown) and in its `finally` (quiet: reported only)
 function _post_close!(p::OptPostProcessor; quiet::Bool = false)
   err = nothing
-  for w in values(p.writers)
-    try
-      close(w)
-    catch e
-      e isa InterruptException && rethrow()
-      err === nothing && (err = e)
+  try
+    for w in values(p.writers)
+      try
+        close(w)
+      catch e
+        e isa InterruptException && rethrow()
+        err === nothing && (err = e)
+      end
     end
+  finally
+    empty!(p.writers)
   end
-  empty!(p.writers)
   if err !== nothing
     quiet ? (@error "OptPostProcessor: a write failed" exception = err) : throw(err)
   end

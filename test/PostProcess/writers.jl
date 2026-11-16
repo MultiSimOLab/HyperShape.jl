@@ -161,4 +161,69 @@ vtu_npoints(file) = parse(Int, match(r"NumberOfPoints=\"(\d+)\"", read(file, Str
     end
     @test_throws ArgumentError OptPostProcessor((p, c) -> nothing; every = 1, format = :xdmf)
   end
+
+  @testset "Review fixes" begin
+    model = CartesianDiscreteModel((0, 1, 0, 1), (6, 4))
+    Ω = Triangulation(model)
+    V0 = FESpace(model, ReferenceFE(lagrangian, Float64, 0); conformity = :L2)
+    V1 = FESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
+    Vt = FESpace(model, ReferenceFE(lagrangian, TensorValue{2,2,Float64}, 1); conformity = :H1)
+    f0 = interpolate_everywhere(x -> x[1], V0)
+    f1 = interpolate_everywhere(x -> x[2], V1)
+    ft = interpolate_everywhere(x -> TensorValue(x[1], x[2], -x[2], 2x[1]), Vt)
+    Vm = MultiFieldFESpace([V1, V1])
+    fm = interpolate_everywhere([x -> x[1], x -> 2x[2]], Vm)
+    dir = mktempdir()
+    w = FieldWriter(Ω, joinpath(dir, "a"); async = false)
+    # constants, tensors and the components of a multifield function by the fast path
+    for f in (1.0 - f1, 2.0 * f1 + 1.0, ft, fm[2])
+      @test _plan(w, f) isa Union{HyperShape.PostProcess._OpNode,HyperShape.PostProcess._Leaf} && fast_vs_gridap(w, f)
+    end
+    # a field built again at every call keeps its plan
+    E(r) = 1e-3 + r^3
+    write_fields(w, 0, "e" => E ∘ f1)
+    node = w.plans["e"][2]
+    write_fields(w, 1, "e" => E ∘ f1)
+    @test w.plans["e"][2] === node
+    # a function of x (as createvtk accepts) goes by the slow path
+    @test_logs (:warn, r"evaluated by Gridap") write_fields(w, 2, "g" => (x -> x[1] + x[2]))
+    @test_throws ArgumentError write_fields(w, 3, "a" => f1, "a" => f0)            # repeated names
+    @test length(sprint(show, w)) < 200
+    close(w)
+    # VTKHDF: the same fields at every step, increasing times
+    h = FieldWriter(Ω, joinpath(dir, "h"); format = :vtkhdf, async = false)
+    write_fields(h, 0, "a" => f1, "b" => f0)
+    @test_throws ArgumentError write_fields(h, 1, "a" => f1)                     # a field missing
+    @test_throws ArgumentError write_fields(h, 1, "a" => f1, "b" => f1)          # b changes from cells to points
+    @test_throws ArgumentError write_fields(h, 0, "a" => f1, "b" => f0)          # repeated time
+    write_fields(h, 1, "b" => f0, "a" => f1)                                     # another order is fine
+    close(h)
+    @test h5open(f -> (read(attributes(f["VTKHDF/Steps"])["NSteps"]), length(f["VTKHDF/Steps/PointDataOffsets/a"])),
+                 joinpath(dir, "h.vtkhdf")) == (2, 2)
+    other = Triangulation(CartesianDiscreteModel((0, 1, 0, 1), (3, 3)))
+    @test_throws ArgumentError FieldWriter(other, joinpath(dir, "h"); format = :vtkhdf, async = false, resume_upto = 0)
+    # asynchronous: wait returns, an allocation bound per step for the synchronous VTKHDF path
+    wa = FieldWriter(Ω, joinpath(dir, "w"); async = true)
+    write_fields(wa, 0, "a" => f1)
+    @test wait(wa) === wa
+    close(wa)
+    hs = FieldWriter(Ω, joinpath(dir, "s"); format = :vtkhdf, async = false)
+    write_fields(hs, 0, "b" => f0)
+    write_fields(hs, 1, "b" => f0)
+    @test (@allocated write_fields(hs, 2, "b" => f0)) < 200_000
+    close(hs)
+    # write_step: a name belongs to one triangulation; options go to OptPostProcessor
+    q = compliance_problem()
+    Ωq = get_triangulation(q.uh)
+    Ωh = Triangulation(get_background_model(Ωq), [isodd(i) for i in 1:num_cells(Ωq)])
+    bad = OptPostProcessor(every = 1, filepath = mktempdir(), async = false) do p, ctx
+      write_step(p, Ωq, "rho" => q.θ.ρ)
+      write_step(p, Ωh, "x" => q.x.ρ)
+    end
+    @test_throws ArgumentError solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 1, verbose = 0, stop = nothing, post = bad)
+    opts = OptPostProcessor((p, ctx) -> write_step(p, Ωq, "rho" => q.θ.ρ; compress = true); every = 1, filepath = mktempdir())
+    @test_throws ArgumentError solve!(compliance_problem().problem, SIMP(OC(); metric = Euclidean()); maxiter = 1, verbose = 0,
+                                      stop = nothing, post = opts)
+    @test_throws ArgumentError OptPostProcessor((p, c) -> nothing; every = 1, maxpending = 0)
+  end
 end

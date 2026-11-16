@@ -61,7 +61,7 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
   @testset "Names" begin
     @test extend_field === HyperShape.PostProcess.extend_field
     @test get_pvd === HyperFEM.get_pvd
-    @test all(n -> n in names(HyperShape), (:OptPostProcessor, :write_step, :extend_field, :get_pvd))
+    @test all(n -> n in names(HyperShape), (:OptPostProcessor, :write_step, :extend_field, :get_pvd, :FieldWriter, :write_fields))
     @test_throws ArgumentError OptPostProcessor(recorder([]); every = 0)
     @test_throws ArgumentError OptPostProcessor(recorder([]); every = 1, name = "")
     q = compliance_problem()

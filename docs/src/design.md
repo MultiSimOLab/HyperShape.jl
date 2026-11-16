@@ -267,13 +267,14 @@ post = OptPostProcessor(every = 10, filepath = "results/mbb") do post, ctx
 end
 ```
 
-- `write_step` writes with a `FieldWriter` (one per triangulation and name, built at the first call, closed when
-  `solve!` returns, fails or is interrupted). The mesh is written once with the node numbering of the grid
-  (continuous, not one copy of each node per cell as `createvtk`) and the values come straight from the degrees of
-  freedom: P0 as cell data, P1/Q1 as point data, pointwise operations on them (`θ.ρ`, `E ∘ θ.ρ`) and `extend_field`.
-  Other fields (gradients, discontinuous spaces) are evaluated by Gridap at the vertices, with a warning.
-- `format = :vtu` (default, any ParaView, a `.pvd` collection) or `:vtkhdf` (one HDF5 file with every iteration and the
-  mesh once; `using HDF5`; ParaView ≥ 5.12). `precision = Float32` halves the values; `async` (default with more than
+- `write_step` writes with a `FieldWriter` (one per name, built at the first call, closed when `solve!` returns,
+  fails or is interrupted). The mesh is built once and is continuous (one point per vertex of the grid, not one per
+  cell and vertex as `createvtk`); the values come straight from the degrees of freedom: P0 as cell data, P1/Q1 as
+  point data, pointwise operations on them and on constants (`θ.ρ`, `E ∘ θ.ρ`, `1 - ρ`) and `extend_field`. Other
+  fields (gradients, discontinuous spaces) are evaluated by Gridap at the vertices, with a warning.
+- `format = :vtu` (default, any ParaView, a `.pvd` collection; each file carries the mesh) or `:vtkhdf` (one HDF5
+  file with every iteration and the mesh written once; `using HDF5`; ParaView ≥ 5.12; the same fields at every
+  iteration). `precision = Float32` halves the values; `async` (default with more than
   one thread) writes in another task, so the loop only waits for a copy of the values.
 - `createvtk` stays available: `get_pvd(post)[ctx.iteration] = createvtk(Ω, file; cellfields = …)`.
 - The `.pvd` collection (iteration as time) is written again after every entry, so ParaView can open it during the
@@ -282,7 +283,8 @@ end
 - `filepath/history.csv` holds the history of the run, written again at every call.
 - No extra solves: the forward solve of the starting design is the one of the first iteration, done earlier.
 
-Per step, three fields (P0, a projected P1 and a P1 vector), Apple M5 Max, Julia 1.13.0, 4 threads:
+Per step, three fields (P0, a projected P1 and a P1 vector), Apple M5 Max, Julia 1.13.0, 4 threads (minimum of 6
+consecutive steps; VTU sizes include the mesh):
 
 | | 150×50 | 40³ | 64³ |
 |---|---|---|---|

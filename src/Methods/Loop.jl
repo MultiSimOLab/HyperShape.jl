@@ -525,6 +525,7 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
       if isfinite(_sync!(oracle))
         _postprocess!(post, oracle, hist)
       else
+        post.resume_upto = resume === nothing ? nothing : k0      # k0 is not written again: keep it
         _print_event(pr, "· the forward problem does not converge at the starting design: it is not post-processed", :yellow)
       end
     end

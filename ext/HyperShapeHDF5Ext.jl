@@ -70,41 +70,65 @@ function _vtkhdf_create(file, m::WriterMesh, job::_Job{R}, compress) where {R}
   nothing
 end
 
+# one step, all or nothing: if a write fails, every dataset goes back to its size before the step
 function _vtkhdf_append(file, job::_Job)
   h5open(file, "r+") do h
     g = h["VTKHDF"]
     s = g["Steps"]
     k = read(attributes(s)["NSteps"])
-    for (n, l, a) in zip(job.names, job.locs, job.arrays)
-      haskey(g[_grp(l)], n) ||
-        throw(ArgumentError("FieldWriter: field \"$n\" was not in the first step of $(file) (VTKHDF needs the same fields at every step)"))
-      d = g[_grp(l)*"/"*n]
-      off = size(a, 1) == 1 ? _append1!(d, vec(a)) : _append2!(d, a)
-      _append1!(s[_grp(l)*"Offsets/"*n], [off])
+    touched = Tuple{Any,Tuple}[]
+    grow!(d) = push!(touched, (d, size(d)))
+    try
+      for (n, l, a) in zip(job.names, job.locs, job.arrays)
+        d = g[_grp(l)*"/"*n]
+        grow!(d)
+        off = size(a, 1) == 1 ? _append1!(d, vec(a)) : _append2!(d, a)
+        o = s[_grp(l)*"Offsets/"*n]
+        grow!(o)
+        _append1!(o, [off])
+      end
+      for nm in ("Values", "PartOffsets", "NumberOfParts", "PointOffsets", "CellOffsets", "ConnectivityIdOffsets")
+        grow!(s[nm])
+      end
+      _append1!(s["Values"], [job.time])
+      _append1!(s["PartOffsets"], [0])
+      _append1!(s["NumberOfParts"], [1])
+      _append1!(s["PointOffsets"], [0])
+      _append2!(s["CellOffsets"], reshape([0], 1, 1))
+      _append2!(s["ConnectivityIdOffsets"], reshape([0], 1, 1))
+      HDF5.delete_attribute(s, "NSteps")
+      attributes(s)["NSteps"] = k + 1
+    catch
+      for (d, dims) in touched
+        try
+          HDF5.set_extent_dims(d, dims)
+        catch
+        end
+      end
+      rethrow()
     end
-    _append1!(s["Values"], [job.time])
-    _append1!(s["PartOffsets"], [0])
-    _append1!(s["NumberOfParts"], [1])
-    _append1!(s["PointOffsets"], [0])
-    _append2!(s["CellOffsets"], reshape([0], 1, 1))
-    _append2!(s["ConnectivityIdOffsets"], reshape([0], 1, 1))
-    HDF5.delete_attribute(s, "NSteps")
-    attributes(s)["NSteps"] = k + 1
   end
   nothing
 end
 
-# a resumed run: keep the steps with time ≤ upto and return their number
-function _vtkhdf_truncate(file, upto)
+# a resumed run: check that the file is of this mesh, keep the steps with time ≤ upto; returns their number, the fields
+# (sorted (name, loc, size per step)) and the last time kept
+function _vtkhdf_truncate(file, upto, np, nc)
   h5open(file, "r+") do h
     g = h["VTKHDF"]
+    (read(g["NumberOfPoints"])[1] == np && read(g["NumberOfCells"])[1] == nc) ||
+      throw(ArgumentError("FieldWriter: $(file) is of another mesh; remove it or write elsewhere"))
     s = g["Steps"]
-    n = count(<=(upto), read(s["Values"]))
-    for (grpname, N) in (("PointData", read(g["NumberOfPoints"])[1]), ("CellData", read(g["NumberOfCells"])[1])),
-        name in keys(g[grpname])
+    vals = read(s["Values"])
+    n = count(<=(upto), vals)
+    issorted(vals) || throw(ArgumentError("FieldWriter: the times of $(file) are not increasing"))
+    schema = Tuple{String,Symbol,Tuple{Int,Int}}[]
+    for (grpname, N, loc) in (("PointData", np, :point), ("CellData", nc, :cell)), name in keys(g[grpname])
       d = g[grpname*"/"*name]
       dims = size(d)
-      HDF5.set_extent_dims(d, length(dims) == 1 ? (n * N,) : (dims[1], n * N))
+      K = length(dims) == 1 ? 1 : dims[1]
+      push!(schema, (name, loc, (K, N)))
+      HDF5.set_extent_dims(d, length(dims) == 1 ? (n * N,) : (K, n * N))
       HDF5.set_extent_dims(s[grpname*"Offsets/"*name], (n,))
     end
     for nm in ("Values", "PartOffsets", "NumberOfParts", "PointOffsets")
@@ -115,7 +139,7 @@ function _vtkhdf_truncate(file, upto)
     end
     HDF5.delete_attribute(s, "NSteps")
     attributes(s)["NSteps"] = n
-    n
+    n, sort!(schema), n == 0 ? -Inf : vals[n]
   end
 end
 
