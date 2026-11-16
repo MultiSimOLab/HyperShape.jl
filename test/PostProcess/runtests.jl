@@ -61,7 +61,7 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
   @testset "Names" begin
     @test extend_field === HyperShape.PostProcess.extend_field
     @test get_pvd === HyperFEM.get_pvd
-    @test all(n -> n in names(HyperShape), (:OptPostProcessor, :write_step, :extend_field, :get_pvd))
+    @test all(n -> n in names(HyperShape), (:OptPostProcessor, :write_step, :extend_field, :get_pvd, :FieldWriter, :write_fields))
     @test_throws ArgumentError OptPostProcessor(recorder([]); every = 0)
     @test_throws ArgumentError OptPostProcessor(recorder([]); every = 1, name = "")
     q = compliance_problem()
@@ -104,7 +104,7 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
     q = compliance_problem(; design)
     Ω = get_triangulation(q.uh)
     seen = Int[]
-    post = OptPostProcessor(every = 5, filepath = dir) do post, ctx
+    post = OptPostProcessor(every = 5, filepath = dir, async = false) do post, ctx
       # the collection is on disk after every entry: readable during the run
       ctx.iteration > 0 && push!(seen, length(first(pvd_entries(joinpath(dir, "optimization.pvd")))))
       @test post.problem === q.problem
@@ -122,8 +122,8 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
     @test first(pvd_entries(joinpath(dir, "optimization.pvd"))) == [0, 3]
     # other files and options: compress, a file written by the driver, several parts at one time
     dir2 = mktempdir()
-    post2 = OptPostProcessor(every = 2, filepath = dir2, name = "run", history = false) do post, ctx
-      write_step(post, Ω, "rho" => q.θ.ρ; compress = true)
+    post2 = OptPostProcessor(every = 2, filepath = dir2, name = "run", history = false, async = false, compress = true) do post, ctx
+      write_step(post, Ω, "rho" => q.θ.ρ)
       write_step(post, Ω, "u" => q.uh; name = "state")
       f = joinpath(post.filepath, "mine_$(ctx.iteration).vtu")
       write(f, "")
@@ -302,4 +302,6 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
            maxiter = 6, verbose = 0, stop = nothing, post)
     @test length(ok) == 7 && all(ok)
   end
+
+  include("writers.jl")
 end

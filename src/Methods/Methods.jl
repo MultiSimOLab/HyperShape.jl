@@ -23,7 +23,7 @@ using ..Operators: OptContext, set_context!, StateOperator, num_solves
 using ..Variables: PhysicalFields, OptVariables, Heaviside, set_beta!, get_values, get_bounds, set_values!, get_designfields,
                    get_optvariables, filter_operators
 using ..Functionals: Functional, functional_value, functional_gradient!
-using ..PostProcess: OptPostProcessor, _post_start!, _post_due, _post_call!
+using ..PostProcess: OptPostProcessor, _post_start!, _post_due, _post_call!, _post_close!
 
 export Optimization, SIMP, LumpedMass, Euclidean
 export Continuation, StopCriteria, RejectStep, Checkpoint, load_checkpoint, Grey

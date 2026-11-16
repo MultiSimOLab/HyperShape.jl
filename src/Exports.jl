@@ -20,6 +20,8 @@ end
 @publish PostProcess write_step
 @publish PostProcess extend_field
 @publish PostProcess get_pvd
+@publish PostProcess FieldWriter
+@publish PostProcess write_fields
 @publish Optimizers OC
 @publish Optimizers SiMPL
 @publish Methods Optimization
