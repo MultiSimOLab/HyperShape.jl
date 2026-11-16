@@ -10,6 +10,7 @@ mutable struct _Printer{IO_}
   tlast::Float64
   header::Bool          # the column header is pending: printed before the next row
   widths::Vector{Int}   # widths of the continuation columns
+  red::Float64          # a constraint value above this is shown in red
 end
 
 _verbose_level(v::Bool) = v ? 2 : 0
@@ -19,7 +20,7 @@ _verbose_level(v) = throw(ArgumentError("solve!: verbose must be 0, 1, 2 or a Bo
 function _Printer(io, verbose, schedule)
   widths = schedule === nothing ? Int[] :
            [max(6, textwidth(string(n)), maximum(x -> textwidth(_g(x)), v)) for (n, v) in zip(schedule.names, schedule.values)]
-  _Printer(io, _verbose_level(verbose), time(), time(), false, widths)
+  _Printer(io, _verbose_level(verbose), time(), time(), false, widths, _RED_CONSTRAINT)
 end
 
 # a constraint value above this (scaled) is shown in red; OC meets the constraint only to its bisection tolerance
@@ -49,6 +50,9 @@ function _describe_stop(stop)
 end
 
 _metric_name(m::Euclidean) = "Euclidean"
+_constraint_label(problem, opt) = only(problem.constraints).linear ? "linear" :
+                                  "nonlinear (tol $(_g_or_e(constraint_tol(opt))))"
+_g_or_e(x) = isfinite(x) ? @sprintf("%.0e", x) : "—"
 _metric_label(method) = method.optimizer isa OC ? "not used by OC" :
                         _metric_name(method.metric) * (method.default_metric ? " (default)" : "")
 _metric_name(m::LumpedMass) = "lumped mass"
@@ -62,8 +66,8 @@ function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, 
   W = textwidth(_header(p, ntuple(_ -> "", length(p.widths))))   # as wide as the table
   _styled(p, "━━" * title * "━"^max(3, W - 2 - textwidth(title)) * "\n", :cyan; bold = true)
   blocks = join(("$n ($(length(r)))" for (n, r) in zip(z.names, z.ranges)), ", ")
-  nc = length(problem.linear_constraints)
-  println(p.io, "  design variables $(length(z)): $blocks · constraint: ", nc == 0 ? "none" : "linear", " · metric: ",
+  nc = length(problem.constraints)
+  println(p.io, "  design variables $(length(z)): $blocks · constraint: ", nc == 0 ? "none" : _constraint_label(problem, opt), " · metric: ",
           _metric_label(method))
   if schedule !== nothing
     for (n, v) in zip(schedule.names, schedule.values)
@@ -102,7 +106,7 @@ function _print_row(p::_Printer, hist::OptHistory)
   g = hist.constraint[k]
   @printf(p.io, "  %5d  %13.6e  %9s  ", hist.iteration[k], f, isfinite(df) ? @sprintf("%+9.1e", df) : "        —")
   if isfinite(g)
-    _styled(p, @sprintf("%10.2e", g), g > _RED_CONSTRAINT ? :red : :normal)
+    _styled(p, @sprintf("%10.2e", g), g > p.red ? :red : :normal)
   else
     print(p.io, "         —")
   end

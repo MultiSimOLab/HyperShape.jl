@@ -163,9 +163,8 @@ accept or reject, continuation, stopping, checkpoint); only the step is specific
 Implemented: `Optimization` and `SIMP` with the common loop.
 
 ```julia
-θv  = PhysicalFields(x; ρ = Identity())                    # unprojected density: the volume is linear in z
-Vol = Functional(θ -> sum(∫(θ.ρ)dΩ) - Vmax, θv; derivative = θ -> (δ -> ∫(δ)dΩ), scale = Vmax)   # g(z) ≤ 0
-problem = Optimization(z; objective = J, linear_constraints = (Vol,))
+Vol = Volume(θ, dΩ; max_fraction = 0.5)   # physical (projected) density: nonlinear in z; Volume(x, dΩ; …) is linear
+problem = Optimization(z; objective = J, constraints = Vol)
 result  = solve!(problem, SIMP(SiMPL(); metric = LumpedMass(dΩ));
                  maxiter = 300, stop = StopCriteria(kkt = 1e-5),
                  schedule = Continuation(β = H => [1, 2, 4, 8, 16, 32]; every = 40),
@@ -174,12 +173,18 @@ result  = solve!(problem, SIMP(SiMPL(); metric = LumpedMass(dΩ));
 result.status, result.history.objective
 ```
 
-The linear constraint bounds the volume of the design `x`. The Helmholtz filter preserves it, the Heaviside projection
-does not, so with projection the physical volume can exceed `Vmax` (0.64–0.68 instead of 0.5 on a 150×50 half MBB
-beam). A constraint on the physical volume is nonlinear in `z` and comes with the next step of the plan.
+`Volume(θ, dΩ; max_fraction)` bounds the fraction of the domain filled by the physical density, the one the weak
+forms read; `Volume(x, dΩ; max_fraction)` that of the design
+density. The Helmholtz filter preserves the volume, the Heaviside projection does not: on a 150×50 half MBB beam with
+target 0.5, the design volume leaves the physical one at 0.64–0.68, the physical volume holds it at 0.5000.
 
-- **Constraint:** in phase 0, at most one linear constraint, a design-only functional. Its vector `a` is computed once
-  and its linearity in z is checked at the start; a projected volume is a nonlinear constraint (phase 1).
+- **Constraint:** in phase 0, at most one, a design-only functional (`Volume`, or a `Functional(J, θ; derivative,
+  scale, linear)`). A linear one (`Volume` over identity or filter maps, or `linear = true`) is checked to be linear at
+  the start and its vector `a` is computed once. A nonlinear one is linearised by the optimiser at every step and
+  corrected with evaluations of the true constraint until it holds to `constraint_tol` (OC `1e-4`, SiMPL `1e-6`;
+  SiMPL keeps every iterate feasible; at an infeasible design, after a continuation jump, it first takes restoration
+  steps that must reduce the violation, which can take several steps or end the stage as stalled). Cost per step: one
+  transposed filter for its derivative and one filter per correction (about 1.5–3), no forward solve.
 - **Metric:** `LumpedMass(dΩ)` (cell volumes for P0, lumped mass for P1) or `Euclidean()`; mandatory for SiMPL, OC
   does not use it (default `Euclidean()`).
 - **Rejection** (`on_failure`, default `RejectStep(shrink = 0.5, max = 5)`): if the forward problem does not converge at the new design, the loop restores the previous one,
@@ -193,8 +198,11 @@ beam). A constraint on the physical volume is nonlinear in `z` and comes with th
   the user; phases `:setup`, `:check`, `:optimization` and `:linesearch`.
 - **Checkpoint:** `checkpoint.toml`, `z_<k>.bin` and `history_<k>.csv` in a folder; resume with
   `solve!(…; resume = load_checkpoint(path))`. The optimiser memory is not saved (OC resumes exactly).
-- **Start:** a starting design that violates the linear constraint is scaled towards the lower bound on the entries
-  the constraint acts on; the factor is in `result.start_scaling`. A resumed design is not touched.
+- **Start:** a starting design that violates the constraint is scaled towards the lower bound (a linear constraint:
+  on the entries it acts on, with equality; a nonlinear one: by regula falsi to `-1e-6 ≤ g ≤ 0`); the factor is in
+  `result.start_scaling`. A resumed design is not touched, nor the design at a continuation jump.
+- **Convergence with a nonlinear constraint:** the stopping criteria count only when the constraint also holds to
+  `constraint_tol`.
 - **Screen output:** `verbose = 2` (default) prints a banner, a row per iteration (objective, its relative change,
   constraint, optimality measure, change, step, multiplier, continued parameters, solves, time), the events and a
   closing line with the solves of the call; `1` omits the rows; `0` prints nothing. The output goes to `io`.

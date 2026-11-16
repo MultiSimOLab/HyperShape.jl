@@ -143,9 +143,9 @@ end
     OptHistory
 
 History of an optimisation, one entry per accepted iteration (vectors): `iteration`, `objective` (scaled value at
-the accepted design), `constraint` (scaled value of the linear constraint, `NaN` without one), `kkt` (optimality
+the accepted design), `constraint` (scaled value of the constraint, `NaN` without one), `kkt` (optimality
 measure, `NaN` if the optimiser does not compute it), `change` (`maximum(abs, Δz)`), `step` (step size or move
-limit), `attempts`, `forward`, `adjoint`, `filter` (solves in the iteration), `multiplier` (of the linear constraint,
+limit), `attempts`, `forward`, `adjoint`, `filter` (solves in the iteration), `multiplier` (of the constraint,
 as reported by the optimiser) and `continuation` (one column per iteration, one row per continued parameter, names in
 `names`).
 """
@@ -244,7 +244,7 @@ function _write_checkpoint(c::Checkpoint, problem, opt, zk, hist, k, stage, stag
     "length" => length(zk),
     "blocks" => String.(collect(problem.z.names)),
     "continuation" => String.(collect(cont_names)),
-    "scales" => [F.scale[] for F in (problem.objective, problem.linear_constraints...)],
+    "scales" => [F.scale[] for F in (problem.objective, problem.constraints...)],
     "z_file" => zfile,
     "history_file" => hfile,
     "optimizer" => string(nameof(typeof(opt))))
@@ -260,7 +260,8 @@ end
 
 Reads a checkpoint written by [`Checkpoint`](@ref): `z`, `iteration`, `stage`, `stage_iterations`, `scales`,
 `blocks`, `continuation` (names) and `history` (named tuple of columns). Pass it to `solve!(…; resume = …)`. The
-memory of the optimiser is not saved: OC resumes exactly, SiMPL restarts its step size.
+memory of the optimiser is not saved: OC resumes exactly (with a nonlinear constraint, up to the correction shift,
+which restarts at zero), SiMPL restarts its step size.
 """
 function load_checkpoint(path::AbstractString)
   meta = TOML.parsefile(joinpath(path, "checkpoint.toml"))
@@ -297,7 +298,7 @@ function _counters(problem)
   fwd = J.S === nothing ? () : (J.S,)
   adj = (J.A === nothing || J.A === J.S) ? () : (J.A,)
   filters = Any[]
-  for F in (J, problem.linear_constraints...), op in filter_operators(F.θ)
+  for F in (J, problem.constraints...), op in filter_operators(F.θ)
     any(o -> o === op, filters) || push!(filters, op)
   end
   fwd, adj, Tuple(filters)
@@ -339,16 +340,20 @@ constraint (red above 1e-3), optimality measure, change of z, step, multiplier, 
 adjoint and filter solves, and time. `true` is `2`, `false` is `0`. The summary counts every solve of the call
 (those of rejected or stalled trials, the setup and the final synchronisation included).
 
-If the starting design (not a resumed one) violates the linear constraint, it is scaled towards the lower bound,
-`z = lb + t (z − lb)` on the entries the constraint acts on, so that it holds with equality; `t` is returned in
-`result.start_scaling` and reported as an event when `verbose ≥ 1`.
+If the starting design (not a resumed one) violates the constraint, it is scaled towards the lower bound,
+`z = lb + t (z − lb)` on the entries the constraint acts on (a linear constraint: so that it holds with equality; a
+nonlinear one: with `t` found by regula falsi so that `-1e-6 ≤ g ≤ 0`); `t` is returned in `result.start_scaling`
+and reported as an event when `verbose ≥ 1`. At a continuation jump the design is not touched: an optimiser that
+finds it infeasible restores feasibility in its next step.
 
 Each iteration: the optimiser takes a step from the current design; the loop evaluates the new design (no solve when
 the optimiser already did, as SiMPL); if the forward problem does not converge there, the design is restored, the
 step shrunk and tried again. Solves per iteration: OC one filter, one forward, one adjoint (none for a self-adjoint
 functional) and one transposed filter; SiMPL one filter and one forward per trial of its line search (usually one),
-one adjoint and one transposed filter; one more forward after each continuation jump. The linear constraint costs
-nothing in the loop (its vector is computed once at the start).
+one adjoint and one transposed filter; one more forward after each continuation jump. A linear constraint costs
+nothing in the loop (its vector is computed once at the start); a nonlinear one costs, per step, one transposed filter
+for its derivative and one filter per correction (see `OC` and `SiMPL`), and no forward solve. With a nonlinear
+constraint the run only converges when the constraint also holds to the `constraint_tol` of the optimiser.
 """
 function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failure = _DefaultFailure(), stop = _DefaultStop(),
                 schedule = nothing, checkpoint = nothing, post = nothing, resume = nothing, verbose = 2, io::IO = stdout)
@@ -362,10 +367,12 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
   checkpoint === nothing || checkpoint isa Checkpoint || throw(ArgumentError("solve!: checkpoint must be a Checkpoint"))
   maxiter >= 1 || throw(ArgumentError("solve!: maxiter must be at least 1"))
   pr = _Printer(io, verbose, schedule)
+  # a nonlinear constraint is met to the tolerance of the optimiser: above it, the value is shown in red
+  any(c -> !c.linear, problem.constraints) && (pr.red = min(_RED_CONSTRAINT, constraint_tol(opt)))
   lb, ub = get_bounds(z)
   (all(isfinite, lb) && all(isfinite, ub)) || throw(ArgumentError("SIMP: the bounds of z must be finite"))
   cont_names = schedule === nothing ? () : schedule.names
-  Fs = (problem.objective, problem.linear_constraints...)
+  Fs = (problem.objective, problem.constraints...)
 
   k0, stage, stage_iters = 0, schedule === nothing ? 0 : 1, 0
   hist = OptHistory(maxiter, cont_names)
@@ -396,14 +403,14 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
   oracle = FunctionalOracle(problem, method.metric)
   ops = _counters(problem)
   cstart = map(_count, ops)
-  isempty(problem.linear_constraints) || _setup_constraint!(oracle, only(problem.linear_constraints), ctx)
+  _is_linear(oracle) && _setup_constraint!(oracle, only(problem.constraints), ctx)
   set_context!(ctx, :phase, :optimization)
   zk = oracle.zk
   copyto!(zk, get_values(z))
   t_start = nothing
   if resume === nothing                       # a resumed design is the one the run left
     t_start = _make_feasible!(oracle, zk)
-    t_start === nothing || _print_event(pr, "· the starting design violated the linear constraint; it was scaled " *
+    t_start === nothing || _print_event(pr, "· the starting design violated the constraint; it was scaled " *
                                             "towards the lower bound by $(round(t_start, sigdigits = 4)) to meet it", :yellow)
   end
   zprev = similar(zk)
@@ -421,10 +428,12 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
   OptResult(status, reason, run.k, f_final, _trim!(hist), state, t_start)
 end
 
-# A start that violates the linear constraint is scaled towards the lower bound, z = lb + t (z - lb), so that aᵀz = V:
-# the pattern of the design is kept, the bounds hold, and optimisers that need a feasible start (SiMPL) can start.
+# A start that violates the constraint is scaled towards the lower bound, z = lb + t (z - lb), so that it holds (with
+# equality for a linear constraint, -1e-6 ≤ g ≤ 0 for a nonlinear one): the pattern of the design is kept, the bounds
+# hold, and optimisers that need a feasible start (SiMPL) can start.
 function _make_feasible!(o, zk)
-  o.a === nothing && return nothing
+  o.C === nothing && return nothing
+  o.a === nothing && return _make_feasible_nonlinear!(o, zk)
   a, V = o.a, o.V
   az = dot(a, zk)
   az - V <= 1e-12 * max(abs(V), 1.0) && return nothing
@@ -433,6 +442,46 @@ function _make_feasible!(o, zk)
     throw(ArgumentError("Optimization: the linear constraint cannot be met within the bounds (aᵀlb ≥ V or a has negative entries)"))
   t = (V - alb) / (az - alb)
   @. zk = ifelse(a > 0, o.lb + t * (zk - o.lb), zk)     # entries outside the constraint are left as they are
+  set_values!(o.z, zk)
+  t
+end
+
+# t by regula falsi (Illinois) on g(lb + t (z - lb)) = -tol/2 in (0, 1], on the entries the constraint depends on (a
+# nonzero derivative at the start); each evaluation costs the filter solves
+function _make_feasible_nonlinear!(o, zk; tol = 1e-6, maxit = 60)
+  g1 = constraint(o, zk)
+  isfinite(g1) || throw(ArgumentError("Optimization: the constraint is not finite at the starting design"))
+  g1 <= 0 && return nothing
+  # entries the constraint depends on: nonzero derivative at the start or at the middle of the bounds (a saturated
+  # projection gives exact zeros where the constraint still depends on the entry)
+  acts = constraint_gradient!(similar(zk), o, zk) .!= 0
+  zmid = (o.lb .+ o.ub) ./ 2
+  constraint(o, zmid)
+  acts .|= constraint_gradient!(similar(zk), o, zmid) .!= 0
+  constraint(o, zk)
+  z0 = copy(zk)
+  zt = similar(zk)
+  gt(t) = (@. zt = ifelse(acts, o.lb + t * (z0 - o.lb), z0); constraint(o, zt) + tol / 2)
+  t0, t1 = 0.0, 1.0
+  h0, h1 = gt(t0), g1 + tol / 2
+  h0 < 0 || throw(ArgumentError("Optimization: the constraint cannot be met within the bounds (it is violated at the lower bound)"))
+  t, side = t0, 0
+  for _ in 1:maxit
+    t = (t0 * h1 - t1 * h0) / (h1 - h0)
+    h = gt(t)
+    abs(h) <= tol / 2 && break
+    if h > 0
+      t1, h1 = t, h
+      side == -1 && (h0 /= 2)
+      side = -1
+    else
+      t0, h0 = t, h
+      side == 1 && (h1 /= 2)
+      side = 1
+    end
+  end
+  constraint(o, zt) <= 0 || (t = t0; @. zt = ifelse(acts, o.lb + t * (z0 - o.lb), z0))   # end on the feasible side
+  copyto!(zk, zt)
   set_values!(o.z, zk)
   t
 end
@@ -540,6 +589,8 @@ function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_
     _print_row(pr, hist)
     post === nothing || post(ctx)
     r = _stop_reason(stop, info, hist, run.stage_start)
+    # with a nonlinear constraint, convergence also needs the constraint met to the tolerance of the optimiser
+    (r !== nothing && !_is_linear(oracle) && has_constraint(oracle) && info.violation > constraint_tol(opt)) && (r = nothing)
     done = false
     if r !== nothing
       if schedule === nothing || run.stage == schedule.nstages

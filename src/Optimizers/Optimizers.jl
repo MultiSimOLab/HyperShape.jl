@@ -1,7 +1,8 @@
 """
     HyperShape.Optimizers
 
-Optimisers for problems with a box-bounded design vector `z` and one linear (volume) constraint.
+Optimisers for problems with a box-bounded design vector `z` and at most one constraint `g(z) ≤ 0`, linear or not
+(for example the volume of a projected density).
 
 The module is independent of finite elements: an optimiser sees vectors, bounds and an oracle (see
 [`AbstractOracle`](@ref)). A new optimiser is a subtype of [`Optimizer`](@ref) that implements the four functions of
@@ -20,8 +21,8 @@ using LinearAlgebra
 
 export Optimizer, StepInfo
 export AbstractOracle, FunctionOracle
-export objective, gradient!, bounds, linear_constraint, riesz!
-export OC, SiMPL
+export objective, gradient!, bounds, linear_constraint, has_constraint, constraint, constraint_gradient!, riesz!
+export OC, SiMPL, constraint_tol
 
 include("Oracle.jl")
 include("Interface.jl")

@@ -12,9 +12,10 @@ using HyperFEM: HyperFEM, get_state, get_spaces
 using ..Operators: StateOperator, apply!, version, dirichlet_values
 import ..Operators: invalidate!
 using ..Operators: get_model as HyperShape_get_model
-using ..Variables: PhysicalFields, update_fields!, design_gradient!, get_designfields, get_optvariables
+using ..Variables: PhysicalFields, DesignFields, Identity, update_fields!, design_gradient!, get_designfields,
+                   get_optvariables, is_linear_field
 
-export Functional, functional_value, functional_gradient!
+export Functional, Volume, functional_value, functional_gradient!
 
 """
     Functional(J, S::StateOperator; derivative, adjoint, scale, fields = nothing)
@@ -57,6 +58,7 @@ struct Functional{FJ,FD,S,A,T<:PhysicalFields}
   scale_mode::Symbol            # :fixed or :initial
   scale::Base.RefValue{Float64} # NaN while :initial is not set
   cache::Vector{Float64}        # [version of θ, version of S, raw value] of the last evaluation
+  linear::Bool                  # design-only and affine in z (declared; checked when used as a constraint)
 end
 
 function _scale(scale)
@@ -102,12 +104,42 @@ function Functional(J, S::StateOperator; derivative, adjoint = _NoAdjoint(), sca
   else
     throw(ArgumentError("Functional: adjoint must be a StateOperator (AdjointOperator(S, model)) or :self, got $(repr(adjoint))"))
   end
-  Functional(J, derivative, S, A, θ, mode, Ref(value), [-1.0, -1.0, NaN])
+  Functional(J, derivative, S, A, θ, mode, Ref(value), [-1.0, -1.0, NaN], false)
 end
 
-function Functional(J, θ::PhysicalFields; derivative, scale)
+function Functional(J, θ::PhysicalFields; derivative, scale, linear::Bool = false)
   mode, value = _scale(scale)
-  Functional(J, derivative, nothing, nothing, θ, mode, Ref(value), [-1.0, -1.0, NaN])
+  Functional(J, derivative, nothing, nothing, θ, mode, Ref(value), [-1.0, -1.0, NaN], linear)
+end
+
+"""
+    Volume(θ::PhysicalFields, dΩ; max_fraction, field = nothing, scale = Vmax)
+    Volume(x::DesignFields, dΩ; max_fraction, field = nothing, scale = Vmax)
+
+Volume constraint `g = ∫ θ.field dΩ - Vmax ≤ 0` with `Vmax = max_fraction ⋅ |Ω|` (`0 < max_fraction ≤ 1`, `|Ω|` the
+measure of `dΩ`), a design-only [`Functional`](@ref) with its value and derivative written in. With physical fields θ, the volume of the physical density: nonlinear in z if its chain has a
+[`Heaviside`](@ref HyperShape.Variables.Heaviside) projection, linear otherwise. With design fields x, the volume of
+the design density (linear; the identity physical fields are built inside). `field` is mandatory when there are
+several fields. `scale` divides the value and the derivative; default `Vmax`.
+"""
+function Volume(θ::PhysicalFields, dΩ; max_fraction::Real, field = nothing, scale = nothing)
+  names = getfield(θ, :names)
+  f = field === nothing ?
+      (length(names) == 1 ? names[1] : throw(ArgumentError("Volume: several fields ($(join(names, ", "))); give field = …"))) :
+      field
+  f in names || throw(ArgumentError("Volume: no field named $f; available: $(join(names, ", "))"))
+  0 < max_fraction <= 1 || throw(ArgumentError("Volume: max_fraction must be in (0, 1], got $max_fraction"))
+  vmax = Float64(max_fraction) * sum(∫(1.0)dΩ)
+  scale = scale === nothing ? vmax : scale
+  J = θ -> sum(∫(getproperty(θ, f))dΩ) - vmax
+  DJ = θ -> NamedTuple{(f,)}((δ -> ∫(δ)dΩ,))
+  Functional(J, θ; derivative = DJ, scale, linear = is_linear_field(θ, f))
+end
+
+function Volume(x::DesignFields, dΩ; kwargs...)
+  names = getfield(x, :names)
+  θ = PhysicalFields(x; NamedTuple{names}(ntuple(_ -> Identity(), length(names)))...)
+  Volume(θ, dΩ; kwargs...)
 end
 
 _total(v::Real) = Float64(v)

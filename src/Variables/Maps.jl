@@ -40,6 +40,9 @@ update_stage!(s::IdentityStage, ctx) = s
 pullback(s::IdentityStage, L, ctx, key) = L
 parameter_version(s) = 0
 
+# whether the stage is linear in its input (a nonlinear stage makes a volume a nonlinear constraint)
+is_linear_stage(s) = false
+
 """
     HelmholtzFilter(op::LinearOperator; measure, backend = :compiled)
 
@@ -175,3 +178,6 @@ function pullback(s::HeavisideStage, L, ctx, key)
   slope = s.slope
   δ -> L(slope * δ)
 end
+
+is_linear_stage(::IdentityStage) = true
+is_linear_stage(::FilterStage) = true

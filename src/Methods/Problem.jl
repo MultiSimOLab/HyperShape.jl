@@ -22,40 +22,36 @@ _optvariables(F::Functional) = get_optvariables(get_designfields(F.θ))
 struct _Validated end   # only the keyword constructors build problems
 
 """
-    Optimization(z; objective, linear_constraints = ())
+    Optimization(z; objective, constraints = ())
 
 Optimisation problem over the variables `z`: minimise the [`Functional`](@ref) `objective` subject to the bounds of
-`z` and, in phase 0, at most one linear constraint `g(z) ≤ 0`, given as a design-only functional (for example the
-volume of an unprojected density, `Functional(θ -> sum(∫(θ.ρ)dΩ) - Vmax, θv; derivative = θ -> (δ -> ∫(δ)dΩ), scale = Vmax)` with
-`θv = PhysicalFields(x; ρ = Identity())`). Its
-linearity in z is checked when the optimisation starts. Nonlinear constraints (`constraints = …`) come in phase 1.
+`z` and, in phase 0, at most one constraint `g(z) ≤ 0`, a design-only functional: typically
+[`Volume`](@ref HyperShape.Functionals.Volume)`(θ, dΩ; max_fraction)` (volume of the physical density, nonlinear in z with a Heaviside
+projection) or `Volume(x, dΩ; max_fraction)` (volume of the design density, linear).
 
-!!! note "Volume and projection"
-    A linear constraint acts on the design, not on the physical density. The Helmholtz filter preserves the volume,
-    but a [`Heaviside`](@ref) projection does not: with projection the physical volume can differ markedly from the
-    constrained one (half MBB beam, 150×50, target 0.5: the projected density ends at 0.64–0.68). Constraining the
-    physical volume needs a nonlinear constraint, planned for the next step.
+A constraint built as linear (`Volume` over identity or filter maps, or a `Functional(…; linear = true)`) is checked
+to be linear when the optimisation starts, and costs nothing in the loop (its vector is computed once). A nonlinear
+one is linearised at every step by the optimiser, which then corrects it with evaluations of the true constraint
+(one filter solve each, no forward solve): see `OC` and `SiMPL`.
 
 The problem owns the context `ctx` ([`OptContext`](@ref)) that reaches the solve functions of the user.
 """
 struct Optimization{Z<:OptVariables,J<:Functional,C<:Tuple}
   z::Z
   objective::J
-  linear_constraints::C
+  constraints::C
   ctx::OptContext
   Optimization(::_Validated, z, J, cs) = new{typeof(z),typeof(J),typeof(cs)}(z, J, cs, OptContext(:optimization))
 end
 
-function Optimization(z::OptVariables; objective, linear_constraints = (), constraints = nothing)
-  constraints === nothing ||
-    throw(ArgumentError("Optimization: nonlinear constraints come in phase 1; give a linear constraint with linear_constraints"))
+function Optimization(z::OptVariables; objective, constraints = ())
   objective isa Functional || throw(ArgumentError("Optimization: the objective must be a Functional"))
-  cs = linear_constraints isa Functional ? (linear_constraints,) : Tuple(linear_constraints)
-  length(cs) <= 1 || throw(ArgumentError("Optimization: at most one linear constraint in phase 0"))
+  cs = constraints isa Functional ? (constraints,) : Tuple(constraints)
+  length(cs) <= 1 || throw(ArgumentError("Optimization: at most one constraint in phase 0"))
   _optvariables(objective) === z || throw(ArgumentError("Optimization: the objective is not built on these variables z"))
   for c in cs
-    c isa Functional || throw(ArgumentError("Optimization: a linear constraint must be a Functional"))
-    c.S === nothing || throw(ArgumentError("Optimization: a linear constraint must be a design-only Functional (no states)"))
+    c isa Functional || throw(ArgumentError("Optimization: a constraint must be a Functional"))
+    c.S === nothing || throw(ArgumentError("Optimization: a constraint must be a design-only Functional (no states) in phase 0"))
     _optvariables(c) === z || throw(ArgumentError("Optimization: a constraint is not built on these variables z"))
   end
   Optimization(_Validated(), z, objective, cs)
@@ -126,8 +122,9 @@ end
     FunctionalOracle
 
 Oracle (see `HyperShape.Optimizers.AbstractOracle`) of an [`Optimization`](@ref): `objective` and `gradient!` call the
-objective functional at the requested design, `linear_constraint` gives `(a, V)` computed once at the start, and
-`inner`/`riesz!` use the metric of the method.
+objective functional at the requested design; a linear constraint gives `(a, V)` computed once at the start
+(`linear_constraint`), a nonlinear one is evaluated at the requested design (`constraint`, `constraint_gradient!`:
+the fields only, no forward solve); `inner`/`riesz!` use the metric of the method.
 
 - It is the only writer of the variables `z`; a design equal to the current one is not set again, so the value cache
   of the functional avoids repeated forward solves.
@@ -135,8 +132,9 @@ objective functional at the requested design, `linear_constraint` gives `(a, V)`
   asks again at that design and gets them without solves.
 - A gradient that is not finite throws [`OptimizationFailure`](@ref).
 """
-mutable struct FunctionalOracle{J,Z,M} <: AbstractOracle
+mutable struct FunctionalOracle{J,C,Z,M} <: AbstractOracle
   J::J
+  C::C                          # the constraint (a Functional) or nothing
   z::Z
   ctx::OptContext
   zk::Vector{Float64}           # the loop's current design (shared with the loop)
@@ -157,7 +155,8 @@ function FunctionalOracle(problem::Optimization, metric)
   lb, ub = get_bounds(z)
   m = _metric_vector(metric, z)
   m === nothing || all(>(0), m) || throw(ArgumentError("SIMP: the metric has non-positive entries"))
-  FunctionalOracle(problem.objective, z, problem.ctx, copy(get_values(z)), copy(lb), copy(ub), nothing, 0.0, m,
+  C = isempty(problem.constraints) ? nothing : only(problem.constraints)
+  FunctionalOracle(problem.objective, C, z, problem.ctx, copy(get_values(z)), copy(lb), copy(ub), nothing, 0.0, m,
                    zeros(n), zeros(n), NaN, false)
 end
 
@@ -216,8 +215,27 @@ end
 
 bounds(o::FunctionalOracle) = (o.lb, o.ub)
 linear_constraint(o::FunctionalOracle) = o.a === nothing ? nothing : (o.a, o.V)
+has_constraint(o::FunctionalOracle) = o.C !== nothing
+_is_linear(o::FunctionalOracle) = o.C !== nothing && o.C.linear
 
-inner(o::FunctionalOracle{J,Z,Nothing}, x, y) where {J,Z} = dot(x, y)
+function constraint(o::FunctionalOracle, v)
+  o.a === nothing || return dot(o.a, v) - o.V
+  v = _canonical(o, v)
+  _set_design!(o, v)
+  functional_value(o.C, o.ctx)
+end
+
+function constraint_gradient!(dG, o::FunctionalOracle, v)
+  o.a === nothing || return copyto!(dG, o.a)
+  v = _canonical(o, v)
+  get_values(o.z) == v ||
+    throw(ArgumentError("FunctionalOracle: constraint_gradient! asked at a design different from the last constraint"))
+  functional_gradient!(dG, o.C, o.ctx)
+  all(isfinite, dG) || throw(OptimizationFailure("the gradient of the constraint is not finite"))
+  dG
+end
+
+inner(o::FunctionalOracle{J,C,Z,Nothing}, x, y) where {J,C,Z} = dot(x, y)
 function inner(o::FunctionalOracle, x, y)
   m = o.metric
   s = zero(eltype(m))
@@ -227,7 +245,7 @@ function inner(o::FunctionalOracle, x, y)
   s
 end
 
-riesz!(g, o::FunctionalOracle{J,Z,Nothing}, dF) where {J,Z} = copyto!(g, dF)
+riesz!(g, o::FunctionalOracle{J,C,Z,Nothing}, dF) where {J,C,Z} = copyto!(g, dF)
 riesz!(g, o::FunctionalOracle, dF) = (g .= dF ./ o.metric)
 
 # a and V of the linear constraint g(z) = aᵀz − V ≤ 0 (scaled as the functional), with a check of linearity at four
@@ -252,8 +270,8 @@ function _setup_constraint!(o::FunctionalOracle, c::Functional, ctx)
     tol = 1e-6 * (abs(v0) + abs(v1) + sum(i -> abs(a[i] * (z1[i] - z0[i])), eachindex(a)))
     if !(abs(v1 - pred) <= tol)
       set_values!(z, z0)
-      throw(ArgumentError("Optimization: the linear constraint is not linear in z (value $(v1) where the " *
-        "linearisation gives $(pred)); a projected volume is a nonlinear constraint (phase 1)"))
+      throw(ArgumentError("Optimization: the constraint was declared linear but is not linear in z (value $(v1) " *
+        "where the linearisation gives $(pred)); declare it with linear = false"))
     end
   end
   set_values!(z, z0)
@@ -261,4 +279,4 @@ function _setup_constraint!(o::FunctionalOracle, c::Functional, ctx)
   o
 end
 
-_constraint_value(o::FunctionalOracle, zk) = o.a === nothing ? NaN : dot(o.a, zk) - o.V
+_constraint_value(o::FunctionalOracle, zk) = o.C === nothing ? NaN : constraint(o, zk)

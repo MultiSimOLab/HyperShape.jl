@@ -12,6 +12,7 @@ end
 @publish Operators is_converged
 @publish Operators OptContext
 @publish Functionals Functional
+@publish Functionals Volume
 @publish Functionals functional_value
 @publish Functionals functional_gradient!
 @publish Checks check_consistency

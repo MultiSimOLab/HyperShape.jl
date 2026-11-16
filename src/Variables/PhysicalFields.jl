@@ -182,3 +182,15 @@ function filter_operators(θ::PhysicalFields)
   end
   ops
 end
+
+"""
+    is_linear_field(θ::PhysicalFields, name) -> Bool
+
+Whether the physical field `name` depends linearly on its design field: every map of its chain is linear
+([`Identity`](@ref), [`HelmholtzFilter`](@ref)); a [`Heaviside`](@ref) projection is not.
+"""
+function is_linear_field(θ::PhysicalFields, name::Symbol)
+  j = findfirst(==(name), getfield(θ, :names))
+  j === nothing && throw(ArgumentError("PhysicalFields: no physical field named $name"))
+  all(is_linear_stage, getfield(θ, :chains)[j])
+end
