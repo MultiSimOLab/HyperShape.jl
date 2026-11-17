@@ -29,7 +29,7 @@ function state_problem(; n = 8, dim = 2, design = :P0, backend = :lazy, gD = 0.0
   ρ0 = init === nothing ? [0.3 + 0.5 * abs(sin(2.3i)) for i in 1:num_free_dofs(Vρ)] : init
   H = Heaviside(β = 3.0, η = 0.5)
   z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = ρ0, backend = vector_backend,
-                                physical = H ∘ HelmholtzFilter(Sf; measure = dΩ, backend = vector_backend))
+                                physical = H ∘ HelmholtzFilter(Sf, dΩ; backend = vector_backend))
 
   kmin = 1e-2
   k(ρ) = kmin + ρ^3

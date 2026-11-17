@@ -32,6 +32,9 @@ of the limits over all entries (those at a bound included).
 The objective is evaluated once per step and the new design is not evaluated (`f_new = NaN`, `kkt = NaN`). If the
 move limit does not allow meeting the constraint (infeasible start), the step is still taken and `violation > 0` in
 the [`StepInfo`](@ref).
+
+It also reports the stationarity measure of the design before the step ([`stationarity!`](@ref), with the metric of
+the oracle, which the step does not use).
 """
 mutable struct OC <: Optimizer
   move::Float64
@@ -87,6 +90,9 @@ mutable struct OCState{V}
   meff::V        # m scaled by the factors of shrink!
   dprev::V       # previous step, for the sign test
   k::Int         # steps taken since init or reset!
+  sg::V          # stationarity measure: M⁻¹ ∂F/∂z, M⁻¹a and a work vector
+  sga::V
+  sw::V
 end
 
 function init(opt::OC, z, oracle)
@@ -94,7 +100,7 @@ function init(opt::OC, z, oracle)
   c = linear_constraint(oracle)
   c === nothing || minimum(c[1]) > 0 || throw(ArgumentError("OC needs a linear constraint with a > 0"))
   v() = similar(z)
-  s = OCState(opt.move, false, v(), copy(z), v(), 0.0, v(), v(), v(), 0)
+  s = OCState(opt.move, false, v(), copy(z), v(), 0.0, v(), v(), v(), 0, v(), v(), v())
   fill!(s.m, opt.move)
   fill!(s.dprev, 0)
   s
@@ -204,13 +210,14 @@ function _oc_step!(opt::OC, s::OCState, z, oracle, m)
   c === nothing && return _oc_step_nonlinear!(opt, s, z, oracle, f, m)
   a, V = c
   lb, ub = bounds(oracle)
+  stat = _oc_stationarity!(s, oracle, z, a, V)
   copyto!(s.z_old, z)
   zo, B, η = s.z_old, s.dF, opt.damping
   @. B = _oc_power(max(zero(B), -B) / a, η)
   vol, λ, _, _ = _oc_bisect!(z, zo, B, a, lb, ub, V, m, η, opt.bisection_tol, opt.max_bisections)
   @. B = z - zo   # B is free now: use it as work vector
   change = maximum(abs, B)
-  StepInfo(true, f, NaN, NaN, change, _step_size(m), max(0.0, vol - V), 1, λ)
+  StepInfo(true, f, NaN, NaN, change, _step_size(m), max(0.0, vol - V), 1, λ, stat)
 end
 
 # Next shift of the linearised constraint from the corrections so far: regula falsi kept inside the bracket once the
@@ -238,6 +245,7 @@ function _oc_step_nonlinear!(opt::OC, s::OCState, z, oracle, f, m)
   # volume here: the floor lets them move up to the move limit in the direction of descent
   @. a = max(a, 1e-12 * amax)
   lb, ub = bounds(oracle)
+  stat = _oc_stationarity!(s, oracle, z, a, dot(a, z) - g)
   copyto!(s.z_old, z)
   zo, B, η = s.z_old, s.dF, opt.damping
   @. B = _oc_power(max(zero(B), -B) / a, η)
@@ -260,5 +268,12 @@ function _oc_step_nonlinear!(opt::OC, s::OCState, z, oracle, f, m)
   end
   s.shift = isfinite(sh) ? sh : 0.0
   @. B = z - zo
-  StepInfo(true, f, NaN, NaN, maximum(abs, B), _step_size(m), isfinite(G) ? max(0.0, G) : Inf, 1, λ)
+  StepInfo(true, f, NaN, NaN, maximum(abs, B), _step_size(m), isfinite(G) ? max(0.0, G) : Inf, 1, λ, stat)
+end
+
+# stationarity measure at z, before the step (s.dF holds ∂F/∂z)
+function _oc_stationarity!(s::OCState, oracle, z, a, V)
+  riesz!(s.sg, oracle, s.dF)
+  riesz!(s.sga, oracle, a)
+  stationarity!(s.sw, oracle, z, s.sg, s.sga, a, V)
 end

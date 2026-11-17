@@ -45,12 +45,23 @@ include(joinpath(@__DIR__, "..", "..", "validation", "cases.jl"))
     dΩ = Measure(Triangulation(model), 2)
     Vρ = design_space(model, 0)
     ρ0 = [0.2 + 0.6 * abs(sin(1.7i)) for i in 1:num_free_dofs(Vρ)]
-    z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = ρ0, physical = density_chain(model, dΩ, 2.4; cellmean = true))
+    z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = ρ0, physical = density_chain(dΩ, 2.4; cellmean = true))
     @test gridap_to_top88(cell_means(θ, dΩ, 1.0), 60, 20) ≈ filt(T88(60, 20, 2.4), gridap_to_top88(ρ0, 60, 20)) atol = 1e-12
   end
 
   @testset "Taylor test of the SiMPL setup (plane strain, body force, partial roller)" begin
     @test mbb(; case = :simpl, nx = 48, ny = 16, vf = 0.3, rmin = 0.1, Emin = 1e-6, check = true).passed
+  end
+
+  @testset "SiMPL with the authors' sensitivity: first iterate of their code (192×64)" begin
+    # log SiMPL-B-MBB2-6-0.csv of dohyun-cse/mfem (rmin 0.05): S₀ 6.96277500e-2, step 1.25394956, F₁ 1.24728893e-2
+    r = mbb(; case = :simpl, nx = 192, ny = 64, vf = 0.3, rmin = 0.05, Emin = 1e-6, opt = SiMPL(), sensitivity = :authors,
+            maxiter = 1, stop = nothing)
+    h = r.result.history
+    @test h.stationarity[1] ≈ 6.962775e-2 rtol = 1e-6
+    @test h.step[1] ≈ 1.2539496 rtol = 1e-6
+    @test h.objective[1] ≈ 1.2472889e-2 rtol = 1e-6
+    @test_throws ArgumentError mbb(; case = :simpl, nx = 12, ny = 4, vf = 0.3, rmin = 0.1, Emin = 1e-6, sensitivity = :half)
   end
 
   @testset "3D cantilever 8×4×4" begin

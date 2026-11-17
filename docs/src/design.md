@@ -22,16 +22,19 @@ Three linked levels, built in order; each one can only be created from the previ
 Implemented (filter by PDE, Heaviside projection, P0 and P1 design fields):
 
 ```julia
-af(ρ̃, v) = ∫(r^2 * ∇(ρ̃) ⋅ ∇(v) + ρ̃ * v)dΩ
-Sf = LinearOperator(StaticLinearModel(af, Uf, Vf, NothingBC(); ls = LUSolver()))   # constant matrix, default solve
+F = HelmholtzFilter(dΩ; rmin = 0.05, ls = LUSolver())   # r = rmin/(2√3), P1, Neumann; ls goes to StaticLinearModel
 
 z = OptVariables(ρ = FieldVariable(Vρ; bounds = (0.0, 1.0), init = 0.5))
 x = DesignFields(z; ρ = Identity())
-θ = PhysicalFields(x; ρ = Heaviside(β = 1.0, η = 0.5) ∘ HelmholtzFilter(Sf; measure = dΩ))
+θ = PhysicalFields(x; ρ = Heaviside(β = 1.0, η = 0.5) ∘ F)
 
 # the same in one line
-z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = 0.5,
-                              physical = Heaviside(β = 1.0, η = 0.5) ∘ HelmholtzFilter(Sf; measure = dΩ))
+z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = 0.5, physical = Heaviside(β = 1.0, η = 0.5) ∘ F)
+
+# any other filter: a LinearOperator over a model written by the user (symmetric form)
+af(ρ̃, v) = ∫(r^2 * ∇(ρ̃) ⋅ ∇(v) + ρ̃ * v)dΩ + ∫(r * ρ̃ * v)dΓ                     # Robin term on Γ
+Sf = LinearOperator(StaticLinearModel(af, Uf, Vf, NothingBC(); ls = LUSolver()))
+θ = PhysicalFields(x; ρ = HelmholtzFilter(Sf, dΩ))
 ```
 
 - Maps are composed with `∘` in the mathematical order: `H ∘ F` filters first and projects after.
@@ -45,16 +48,15 @@ z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = 0.5,
   which is the same solve because the filter form is symmetric).
 - The vectors HyperShape assembles (load vector of the filter, sensitivities) use `backend = :compiled` by default
   (HyperFEMKernels: forms compiled once into threaded kernels) or `backend = :lazy` (Gridap), chosen in
-  `HelmholtzFilter(Sf; measure, backend)` and `PhysicalFields(x; …, backend)`. Both give the same vectors up to
+  `HelmholtzFilter(Sf, dΩ; backend)` and `PhysicalFields(x; …, backend)`. Both give the same vectors up to
   rounding. On 65 000 cells the compiled backend computes a design gradient 1.5 times faster than the lazy one with
   one thread and 5 to 7 times faster with four (`julia -t N`); on meshes of about a thousand cells both take well
   under a millisecond.
 - Bounds, initial values and maps are mandatory; write `Identity()` when there is no transformation.
 - Only HyperShape writes `x` and `θ`; the user reads them as Gridap fields.
 - The filtered density is a P1 field and `θ` is evaluated at the quadrature points, so the stiffness varies inside an
-  element. Codes such as top88 use one value per element, the cell mean of the filtered field; composing an L2
-  projection onto P0 after the filter gives that formulation (see the [Validation](validation.md) page; a named map,
-  `CellMean`, is planned).
+  element. Codes such as top88 use one value per element, the cell mean of the filtered field:
+  `CellMean(dΩ) ∘ F` gives that formulation (see the [Validation](validation.md) page).
 
 Planned: global parameters as blocks (applied voltage, fibre angle), frozen regions and scaling in the map `z → x`,
 physical fields that depend on several design fields, material interpolation in the map `x → θ`.
@@ -191,7 +193,7 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
   steps that must reduce the violation, which can take several steps or end the stage as stalled). Cost per step: one
   transposed filter for its derivative and one filter per correction (about 1.5–3), no forward solve.
 - **Metric:** `LumpedMass(dΩ)` (cell volumes for P0, lumped mass for P1) or `Euclidean()`; mandatory for SiMPL, OC
-  does not use it (default `Euclidean()`).
+  uses it only for the stationarity measure (default `Euclidean()`; give `LumpedMass(dΩ)` to compare it with SiMPL).
 - **Rejection** (`on_failure`, default `RejectStep(shrink = 0.5, max = 5)`): if the forward problem does not converge at the new design, the loop restores the previous one,
   calls `shrink!` and tries again, at most `max` times; then it throws `OptimizationFailure` (checkpoint written).
   SiMPL handles failures inside its line search; if it finds no step, the current continuation stage ends (in the last stage, or without continuation, the result is `:stalled`).
@@ -202,7 +204,9 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
   (`default_stop`): the range of the objective over the last 10 iterations of the last stage, relative to the
   objective, below 0.1 %. With a Heaviside projection `change` and `kkt` are rarely reached; the objective settles
   (half MBB beam 150×50: OC with adaptive move limits stops at iteration 214, 0.4 % above its value at 500 iterations; SiMPL at 210, within 0.3 % of 350 iterations). Other criteria:
-  `kkt`, `kkt_rel` (relative to the first iteration), `change`; `stop = nothing` runs `maxiter` iterations. A run that
+  `kkt`, `kkt_rel` (relative to the first iteration), `stationarity`, `stationarity_rel` (the measure
+  `‖z − P(z − g)‖_M` of the SiMPL paper, computed by OC and SiMPL at the design before each step and shown in the
+  column `S` of the table and the history), `change`; `stop = nothing` runs `maxiter` iterations. A run that
   oscillates or whose physical volume keeps growing may still end at `maxiter`.
 - **Grey monitor:** `solve!(…; grey = Grey(θ, dΩ))` adds the measure of grey `4/|Ω| ∫ρ(1 − ρ)` to the history, the
   table and the closing line. It is fixed mostly by β, so it is a measure of quality, not a stopping criterion.

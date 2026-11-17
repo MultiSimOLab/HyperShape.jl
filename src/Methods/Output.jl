@@ -35,8 +35,8 @@ _pad(s, w) = " "^max(0, w - textwidth(s)) * s
 
 function _header(p::_Printer, names)
   cont = join(("  " * _pad(string(n), w) for (n, w) in zip(names, p.widths)))
-  @sprintf("  %5s  %13s  %9s  %10s  %9s  %9s  %9s  %9s", "it", "objective", "Δobj", "constraint", "kkt", "change",
-           "step", "μ") * cont * (p.grey ? @sprintf("  %7s", "grey") : "") * @sprintf("  %11s  %8s", "f/a/F", "t[s]")
+  @sprintf("  %5s  %13s  %9s  %10s  %9s  %9s  %9s  %9s  %9s", "it", "objective", "Δobj", "constraint", "kkt", "S",
+           "change", "step", "μ") * cont * (p.grey ? @sprintf("  %7s", "grey") : "") * @sprintf("  %11s  %8s", "f/a/F", "t[s]")
 end
 
 _rule(p::_Printer) = _styled(p, "  " * "─"^(textwidth(_header(p, ntuple(_ -> "", length(p.widths)))) - 2) * "\n", :light_black)
@@ -47,11 +47,14 @@ function _describe_stop(stop)
   stop.objective !== nothing && push!(parts, "relative objective range < $(stop.objective) over $(stop.window) iterations")
   stop.kkt !== nothing && push!(parts, "kkt < $(stop.kkt)")
   stop.kkt_rel !== nothing && push!(parts, "kkt/kkt₁ < $(stop.kkt_rel)")
+  stop.stationarity !== nothing && push!(parts, "S < $(stop.stationarity)")
+  stop.stationarity_rel !== nothing && push!(parts, "S/S₁ < $(stop.stationarity_rel)")
   stop.change !== nothing && push!(parts, "change < $(stop.change)")
   isempty(parts) ? "maxiter only" : join(parts, " or ")
 end
 
-_active(stop) = any(x -> x !== nothing, (stop.objective, stop.kkt, stop.kkt_rel, stop.change))
+_active(stop) = any(x -> x !== nothing, (stop.objective, stop.kkt, stop.kkt_rel, stop.stationarity, stop.stationarity_rel,
+                                         stop.change))
 _stage_rule(stop, schedule) = (stop === nothing || schedule === nothing || !_active(stop)) ? "" :
                               schedule.close_early ? " · every stage (close_early)" : " · last stage only"
 
@@ -59,8 +62,8 @@ _metric_name(m::Euclidean) = "Euclidean"
 _constraint_label(problem, opt) = only(problem.constraints).linear ? "linear" :
                                   "nonlinear (tol $(_g_or_e(constraint_tol(opt))))"
 _g_or_e(x) = isfinite(x) ? @sprintf("%.0e", x) : "—"
-_metric_label(method) = method.optimizer isa OC ? "not used by OC" :
-                        _metric_name(method.metric) * (method.default_metric ? " (default)" : "")
+_metric_label(method) = _metric_name(method.metric) * (method.default_metric ? " (default)" : "") *
+                        (method.optimizer isa OC ? " (OC: only for the stationarity measure)" : "")
 _metric_name(m::LumpedMass) = "lumped mass"
 _metric_name(m::NamedTuple) = join(("$k: $(_metric_name(v))" for (k, v) in pairs(m)), ", ")
 
@@ -118,7 +121,8 @@ function _print_row(p::_Printer, hist::OptHistory)
   else
     print(p.io, "         —")
   end
-  @printf(p.io, "  %9s  %9s  %9s  %9s", _e(hist.kkt[k]), _e(hist.change[k]), _e(hist.step[k]), _e(hist.multiplier[k]))
+  @printf(p.io, "  %9s  %9s  %9s  %9s  %9s", _e(hist.kkt[k]), _e(hist.stationarity[k]), _e(hist.change[k]),
+          _e(hist.step[k]), _e(hist.multiplier[k]))
   for j in axes(hist.continuation, 1)
     print(p.io, "  ", _pad(_g(hist.continuation[j, k]), p.widths[j]))
   end
@@ -143,6 +147,8 @@ end
 
 const _STOP_TEXT = Dict(:change => "change of z below the tolerance", :kkt => "optimality measure below the tolerance",
                         :kkt_rel => "optimality measure below the tolerance relative to the first iteration",
+                        :stationarity => "stationarity measure below the tolerance",
+                        :stationarity_rel => "stationarity measure below the tolerance relative to the first iteration",
                         :objective => "relative range of the objective below the tolerance over the window")
 
 function _print_end(p::_Printer, status, reason, k, f, grey = NaN)

@@ -92,7 +92,7 @@ end
 
   @testset "Helmholtz filter = direct solve ($(name))" for (name, V, ρ) in (("P0", p.V0, ρ0), ("P1", p.V1, ρ1))
     z, x, θ = single_field_design(:ρ, V; bounds = (0.0, 1.0), init = ρ,
-                                  physical = HelmholtzFilter(p.Sf; measure = p.dΩ))
+                                  physical = HelmholtzFilter(p.Sf, p.dΩ))
     xh = FEFunction(V, ρ)
     dΩ = p.dΩ
     ref = solve(LUSolver(), AffineFEOperator(p.af, v -> ∫(xh * v)dΩ, p.Uf, p.Vf))
@@ -103,7 +103,7 @@ end
   @testset "Transpose of the filter ($(name))" for (name, V, ρ) in (("P0", p.V0, ρ0), ("P1", p.V1, ρ1))
     # J(z) = ∫(y F(z)) dΩ is linear in z with J(0) = 0, so J(z) = g⋅z exactly
     z, x, θ = single_field_design(:ρ, V; bounds = (0.0, 1.0), init = ρ,
-                                  physical = HelmholtzFilter(p.Sf; measure = p.dΩ))
+                                  physical = HelmholtzFilter(p.Sf, p.dΩ))
     yh = interpolate(cfun, p.Uf)
     dΩ = p.dΩ
     g = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(yh * δ)dΩ,), nothing)
@@ -114,7 +114,7 @@ end
   @testset "Taylor test: projection ∘ filter ($(name))" for (name, V, ρ) in (("P0", p.V0, ρ0), ("P1", p.V1, ρ1))
     H = Heaviside(β = 4.0, η = 0.5)
     z, x, θ = single_field_design(:ρ, V; bounds = (0.0, 1.0), init = ρ,
-                                  physical = H ∘ HelmholtzFilter(p.Sf; measure = p.dΩ))
+                                  physical = H ∘ HelmholtzFilter(p.Sf, p.dΩ))
     c = CellField(cfun, p.Ω)
     dΩ = p.dΩ
     J() = (update_fields!(θ, nothing); sum(∫(c * θ.ρ * θ.ρ)dΩ))
@@ -133,7 +133,7 @@ end
     H = Heaviside(β = 6.0, η = 0.4)
     z = OptVariables(ρ = FieldVariable(p.V0; bounds = (0.0, 1.0), init = ρ0))
     x = DesignFields(z; ρ = Identity())
-    θ = PhysicalFields(x; ρ = H ∘ HelmholtzFilter(p.Sf; measure = p.dΩ), ρf = :ρ => HelmholtzFilter(p.Sf; measure = p.dΩ))
+    θ = PhysicalFields(x; ρ = H ∘ HelmholtzFilter(p.Sf, p.dΩ), ρf = :ρ => HelmholtzFilter(p.Sf, p.dΩ))
     dΩ = p.dΩ
     hv = HeavisideValue(H)
     @test sum(∫(θ.ρ)dΩ) ≈ sum(∫(Operation(hv)(θ.ρf))dΩ) rtol = 1e-14
@@ -145,8 +145,8 @@ end
     z = OptVariables(a = FieldVariable(p.V0; bounds = (0.0, 1.0), init = ρ0),
                      b = FieldVariable(p.V1; bounds = (0.0, 1.0), init = ρ1))
     x = DesignFields(z; a = Identity(), b = Identity())
-    θ = PhysicalFields(x; ρ = :a => H ∘ HelmholtzFilter(p.Sf; measure = p.dΩ),
-                          E = :a => HelmholtzFilter(p.Sf; measure = p.dΩ),
+    θ = PhysicalFields(x; ρ = :a => H ∘ HelmholtzFilter(p.Sf, p.dΩ),
+                          E = :a => HelmholtzFilter(p.Sf, p.dΩ),
                           b = Identity())
     c = CellField(cfun, p.Ω)
     dΩ = p.dΩ
@@ -157,7 +157,7 @@ end
     rates = taylor_rates(J, g, z, d)
     @test all(r -> 1.9 < r < 2.1, rates)
     # a design field that no physical field uses
-    @test_throws ArgumentError PhysicalFields(x; ρ = HelmholtzFilter(p.Sf; measure = p.dΩ))
+    @test_throws ArgumentError PhysicalFields(x; ρ = HelmholtzFilter(p.Sf, p.dΩ))
     @test_throws ArgumentError PhysicalFields(x; ρ = :c => Identity(), b = Identity())
     @test_throws ArgumentError PhysicalFields(x; a = 1.0, b = Identity())
     @test_throws ArgumentError design_gradient!(zeros(length(z)), θ, (q = δ -> ∫(δ)dΩ,), nothing)
@@ -166,7 +166,7 @@ end
   @testset "Versions and number of filter solves" begin
     H = Heaviside(β = 2.0, η = 0.5)
     z, x, θ = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0,
-                                  physical = H ∘ HelmholtzFilter(p.Sf; measure = p.dΩ))
+                                  physical = H ∘ HelmholtzFilter(p.Sf, p.dΩ))
     n = p.nsolves[]
     vθ = version(θ)
     update_fields!(θ, nothing)
@@ -188,7 +188,7 @@ end
     # projection before the filter: a new β changes the input of the filter
     H2 = Heaviside(β = 2.0, η = 0.5)
     z2, x2, θ2 = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0,
-                                     physical = HelmholtzFilter(p.Sf; measure = p.dΩ) ∘ H2)
+                                     physical = HelmholtzFilter(p.Sf, p.dΩ) ∘ H2)
     n = p.nsolves[]
     set_beta!(H2, 5.0)
     update_fields!(θ2, nothing)
@@ -222,10 +222,10 @@ end
     Sd = LinearOperator(StaticLinearModel(af, Ud, Vd, NothingBC(); ls = LUSolver()); depends = (),
                         solve = (m, b, ctx, stale) -> solve!(m, b; Assembly = stale))
     z, x, θ = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0,
-                                  physical = Heaviside(β = 3.0, η = 0.5) ∘ HelmholtzFilter(Sd; measure = dΩ))
+                                  physical = Heaviside(β = 3.0, η = 0.5) ∘ HelmholtzFilter(Sd, dΩ))
     xh = FEFunction(p.V0, ρ0)
     ref = solve(LUSolver(), AffineFEOperator(af, v -> ∫(xh * v)dΩ, Ud, Vd))
-    filtered = PhysicalFields(x; ρ = HelmholtzFilter(Sd; measure = dΩ))
+    filtered = PhysicalFields(x; ρ = HelmholtzFilter(Sd, dΩ))
     @test maximum(abs, get_free_dof_values(filtered.ρ) .- get_free_dof_values(ref)) < 1e-12
     c = CellField(cfun, p.Ω)
     J() = (update_fields!(θ, nothing); sum(∫(c * θ.ρ * θ.ρ)dΩ))
@@ -235,13 +235,13 @@ end
     Un = TrialFESpace(Vd, 1.0)
     Sn = LinearOperator(StaticLinearModel(af, Un, Vd, NothingBC(); ls = LUSolver()); depends = (),
                         solve = (m, b, ctx, stale) -> solve!(m, b; Assembly = stale))
-    @test_throws ArgumentError PhysicalFields(x; ρ = HelmholtzFilter(Sn; measure = dΩ))
+    @test_throws ArgumentError PhysicalFields(x; ρ = HelmholtzFilter(Sn, dΩ))
   end
 
   @testset "Transpose with independent vectors ($(name))" for (name, V, ρ) in (("P0", p.V0, ρ0), ("P1", p.V1, ρ1))
     # g is the gradient of z ↦ ∫(y F(z)) dΩ at one design; ∫(y F(z₂)) dΩ = g⋅z₂ for another design z₂
     z, x, θ = single_field_design(:ρ, V; bounds = (0.0, 1.0), init = ρ,
-                                  physical = HelmholtzFilter(p.Sf; measure = p.dΩ))
+                                  physical = HelmholtzFilter(p.Sf, p.dΩ))
     yh = interpolate(x -> sin(4x[1]) * cos(3x[2]), p.Uf)
     dΩ = p.dΩ
     g = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(yh * δ)dΩ,), nothing)
@@ -256,7 +256,7 @@ end
                                                                                      ("F ∘ H", (F, H, H2) -> F ∘ H),
                                                                                      ("F ∘ F", (F, H, H2) -> F ∘ F),
                                                                                      ("H ∘ H ∘ F", (F, H, H2) -> H2 ∘ H ∘ F))
-    F = HelmholtzFilter(p.Sf; measure = p.dΩ)
+    F = HelmholtzFilter(p.Sf, p.dΩ)
     map = mk(F, Heaviside(β = 3.0, η = 0.45), Heaviside(β = 2.0, η = 0.55))
     z, x, θ = single_field_design(:ρ, V; bounds = (0.0, 1.0), init = ρ, physical = map)
     c = CellField(cfun, p.Ω)
@@ -270,8 +270,8 @@ end
     z = OptVariables(a = FieldVariable(p.V0; bounds = (0.0, 1.0), init = ρ0),
                      b = FieldVariable(p.V1; bounds = (0.0, 1.0), init = ρ1))
     x = DesignFields(z; a = Identity(), b = Identity())
-    θ = PhysicalFields(x; a = Heaviside(β = 3.0, η = 0.5) ∘ HelmholtzFilter(p.Sf; measure = p.dΩ),
-                          b = Heaviside(β = 5.0, η = 0.4) ∘ HelmholtzFilter(p.Sf; measure = p.dΩ))
+    θ = PhysicalFields(x; a = Heaviside(β = 3.0, η = 0.5) ∘ HelmholtzFilter(p.Sf, p.dΩ),
+                          b = Heaviside(β = 5.0, η = 0.4) ∘ HelmholtzFilter(p.Sf, p.dΩ))
     c = CellField(cfun, p.Ω)
     dΩ = p.dΩ
     J() = (update_fields!(θ, nothing); sum(∫(c * θ.a * θ.b + θ.b * θ.b)dΩ))
@@ -284,7 +284,7 @@ end
     bytes = map((8, 16)) do n
       q = filter_problem(; n)
       z, x, θ = single_field_design(:ρ, q.V0; bounds = (0.0, 1.0), init = 0.5,
-                                    physical = Heaviside(β = 3.0, η = 0.5) ∘ HelmholtzFilter(q.Sf; measure = q.dΩ))
+                                    physical = Heaviside(β = 3.0, η = 0.5) ∘ HelmholtzFilter(q.Sf, q.dΩ))
       dΩ = q.dΩ
       forms = (ρ = δ -> ∫(δ)dΩ,)
       g = zeros(length(z))
@@ -335,7 +335,7 @@ end
   @testset "Weak forms capture θ: lazy and compiled backends" begin
     H = Heaviside(β = 4.0, η = 0.5)
     z, x, θ = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0,
-                                  physical = H ∘ HelmholtzFilter(p.Sf; measure = p.dΩ))
+                                  physical = H ∘ HelmholtzFilter(p.Sf, p.dΩ))
     Ω, dΩ = p.Ω, p.dΩ
     bc = BoundaryConditions(BoundaryCondition("boundary", 0.0))
     V = TestFESpace(Ω, ReferenceFE(lagrangian, Float64, 1), bc, conformity = :H1)
@@ -365,7 +365,7 @@ end
     out = map((:compiled, :lazy)) do backend
       H = Heaviside(β = 3.0, η = 0.45)
       z, x, θ = single_field_design(:ρ, V; bounds = (0.0, 1.0), init = ρ, backend,
-                                    physical = mk(HelmholtzFilter(p.Sf; measure = dΩ, backend), H))
+                                    physical = mk(HelmholtzFilter(p.Sf, dΩ; backend), H))
       g1 = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(2 * c * θ.ρ * δ)dΩ,), nothing; key = 1)
       # another quantity under another key, then the first one again after changing z and β
       g2 = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(δ)dΩ,), nothing; key = 2)
@@ -389,7 +389,7 @@ end
     out = map((:compiled, :lazy)) do backend
       H = Heaviside(β = 3.0, η = 0.45)
       z, x, θ = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0, backend,
-                                    physical = H ∘ HelmholtzFilter(p.Sf; measure = dΩ, backend))
+                                    physical = H ∘ HelmholtzFilter(p.Sf, dΩ; backend))
       gs = Vector{Float64}[]
       for a in (1.0, 2.5)                                  # a number captured by the form
         push!(gs, design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(a * θ.ρ * δ)dΩ,), nothing; key = 1))
@@ -420,7 +420,7 @@ end
 
   @testset "Taylor test with the lazy backend ($(name))" for (name, V, ρ) in (("P0", p.V0, ρ0), ("P1", p.V1, ρ1))
     z, x, θ = single_field_design(:ρ, V; bounds = (0.0, 1.0), init = ρ, backend = :lazy,
-                                  physical = Heaviside(β = 4.0, η = 0.5) ∘ HelmholtzFilter(p.Sf; measure = p.dΩ, backend = :lazy))
+                                  physical = Heaviside(β = 4.0, η = 0.5) ∘ HelmholtzFilter(p.Sf, p.dΩ; backend = :lazy))
     c = CellField(cfun, p.Ω)
     dΩ = p.dΩ
     J() = (update_fields!(θ, nothing); sum(∫(c * θ.ρ * θ.ρ)dΩ))
@@ -431,21 +431,98 @@ end
   @testset "Backend options" begin
     zb = OptVariables(ρ = FieldVariable(p.V0; bounds = (0.0, 1.0), init = ρ0))
     @test_throws ArgumentError PhysicalFields(DesignFields(zb; ρ = Identity()); ρ = Identity(), backend = Identity())
-    @test_throws ArgumentError HelmholtzFilter(p.Sf; measure = p.dΩ, backend = :gpu)
+    @test_throws ArgumentError HelmholtzFilter(p.Sf, p.dΩ; backend = :gpu)
     z = OptVariables(ρ = FieldVariable(p.V0; bounds = (0.0, 1.0), init = ρ0))
     x = DesignFields(z; ρ = Identity())
     @test_throws ArgumentError PhysicalFields(x; ρ = Identity(), backend = :gpu)
     @test_throws ArgumentError single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = 0.5, physical = Identity(), backend = :gpu)
-    F = HelmholtzFilter(p.Sf; measure = p.dΩ)
+    F = HelmholtzFilter(p.Sf, p.dΩ)
     @test F.backend === :compiled                                    # the default
-    @test HelmholtzFilter(p.Sf; measure = p.dΩ, backend = :lazy).backend === :lazy
+    @test HelmholtzFilter(p.Sf, p.dΩ; backend = :lazy).backend === :lazy
+  end
+
+  @testset "Short constructor of the filter ($(name))" for (name, V, ρ) in (("P0", p.V0, ρ0), ("P1", p.V1, ρ1))
+    rmin = 0.1 * 2sqrt(3)                       # r = rmin / (2√3) = 0.1, as in filter_problem
+    zs, xs, θs = single_field_design(:ρ, V; bounds = (0.0, 1.0), init = ρ,
+                                     physical = HelmholtzFilter(p.dΩ; rmin, ls = LUSolver()))
+    zg, xg, θg = single_field_design(:ρ, V; bounds = (0.0, 1.0), init = ρ, physical = HelmholtzFilter(p.Sf, p.dΩ))
+    @test maximum(abs, get_free_dof_values(θs.ρ) .- get_free_dof_values(θg.ρ)) < 1e-12
+    dΩ = p.dΩ
+    yh = interpolate(cfun, p.Uf)
+    gs = design_gradient!(zeros(length(zs)), θs, (ρ = δ -> ∫(yh * δ)dΩ,), nothing)
+    gg = design_gradient!(zeros(length(zg)), θg, (ρ = δ -> ∫(yh * δ)dΩ,), nothing)
+    @test maximum(abs, gs .- gg) < 1e-12
+  end
+
+  @testset "Short constructor of the filter: options" begin
+    @test_throws UndefKeywordError HelmholtzFilter(p.dΩ)
+    @test_throws ArgumentError HelmholtzFilter(p.dΩ; rmin = 0.0)
+    @test_throws ArgumentError HelmholtzFilter(p.dΩ; rmin = 0.1, order = 0)
+    # the solve given by the user is the one used
+    n = Ref(0)
+    F = HelmholtzFilter(p.dΩ; rmin = 0.2, ls = LUSolver(), solve = (m, b, ctx, stale) -> (n[] += 1; solve!(m, b; Assembly = stale)))
+    z, x, θ = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0, physical = F)
+    @test n[] >= 1
+    # order 2 and a filter on part of the domain
+    F2 = HelmholtzFilter(p.dΩ; rmin = 0.2, order = 2, ls = LUSolver())
+    z2, x2, θ2 = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0, physical = F2)
+    @test sum(∫(θ2.ρ)p.dΩ) ≈ sum(∫(x2.ρ)p.dΩ) rtol = 1e-10        # Neumann filter conserves the integral
+    cell_ids = findall(i -> i <= num_cells(p.model) ÷ 2, 1:num_cells(p.model))
+    Ωh = Triangulation(p.model, cell_ids)
+    dΩh = Measure(Ωh, 2)
+    Vh = TestFESpace(Ωh, ReferenceFE(lagrangian, Float64, 0); conformity = :L2)
+    zh, xh, θh = single_field_design(:ρ, Vh; bounds = (0.0, 1.0), init = 0.5,
+                                     physical = HelmholtzFilter(dΩh; rmin = 0.2, ls = LUSolver()))
+    @test maximum(abs, get_free_dof_values(θh.ρ) .- 0.5) < 1e-12      # constant field is kept
+    # the backend of the filter model is set with model_backend (backend is the one of the vectors)
+    zc, xc, θc = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0,
+                                     physical = HelmholtzFilter(p.dΩ; rmin = 0.2, ls = LUSolver(), model_backend = :compiled))
+    zl, xl, θl = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0,
+                                     physical = HelmholtzFilter(p.dΩ; rmin = 0.2, ls = LUSolver(), backend = :lazy))
+    @test maximum(abs, get_free_dof_values(θc.ρ) .- get_free_dof_values(θl.ρ)) < 1e-12
+    # checks of the positional constructors and a hint for the old keyword
+    @test_throws ArgumentError HelmholtzFilter(p.Sf, p.dΩ, :gpu)
+    @test_throws ArgumentError HelmholtzFilter(p.Sf; measure = p.dΩ)
+    @test_throws ArgumentError CellMean(p.dΩ, :gpu)
+    @test_throws MethodError CellMean(p.Ω)
+  end
+
+  @testset "CellMean" begin
+    # P0 projection of the filtered field (the trick used before CellMean)
+    F = HelmholtzFilter(p.Sf, p.dΩ)
+    z, x, θ = single_field_design(:ρ, p.V1; bounds = (0.0, 1.0), init = ρ1, physical = CellMean(p.dΩ) ∘ F)
+    zf, xf, θf = single_field_design(:ρ, p.V1; bounds = (0.0, 1.0), init = ρ1, physical = F)
+    dΩ = p.dΩ
+    ρf = θf.ρ
+    ref = solve(LUSolver(), AffineFEOperator((u, v) -> ∫(u * v)dΩ, v -> ∫(ρf * v)dΩ, TrialFESpace(p.V0), p.V0))
+    @test maximum(abs, get_free_dof_values(θ.ρ) .- get_free_dof_values(ref)) < 1e-12
+    @test sum(∫(θ.ρ)dΩ) ≈ sum(∫(θf.ρ)dΩ) rtol = 1e-12             # the volume is kept
+    # transpose: J = ∫(y CellMean(F(z))) is linear in z
+    yh = interpolate(cfun, p.Uf)
+    g = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(yh * δ)dΩ,), nothing)
+    @test dot(g, get_values(z)) ≈ sum(∫(yh * θ.ρ)dΩ) rtol = 1e-12
+    # Taylor test in a chain with a projection after the mean
+    for backend in (:compiled, :lazy)
+      H = Heaviside(β = 4.0, η = 0.5)
+      zt, xt, θt = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0,
+                                       physical = H ∘ CellMean(p.dΩ; backend) ∘ F)
+      c = CellField(cfun, p.Ω)
+      J() = (update_fields!(θt, nothing); sum(∫(c * θt.ρ * θt.ρ)dΩ))
+      gt = design_gradient!(zeros(length(zt)), θt, (ρ = δ -> ∫(2 * c * θt.ρ * δ)dΩ,), nothing)
+      rates = taylor_rates(J, gt, zt, [sin(0.7i) for i in 1:length(zt)])
+      @test all(r -> 1.9 < r < 2.1, rates)
+    end
+    @test_throws ArgumentError CellMean(p.dΩ; backend = :gpu)
+    # a volume after the mean stays linear
+    zv, xv, θv = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0, physical = CellMean(p.dΩ) ∘ F)
+    @test HyperShape.Variables.is_linear_field(θv, :ρ)
   end
 
   @testset "Exported names do not clash with Gridap and HyperFEM" begin
     M = Module()
     Core.eval(M, :(using Gridap, HyperFEM, HyperShape))
     for name in (:FieldVariable, :OptVariables, :DesignFields, :PhysicalFields, :Identity, :HelmholtzFilter,
-                 :Heaviside, :single_field_design, :LinearOperator)
+                 :Heaviside, :CellMean, :single_field_design, :LinearOperator)
       @test Core.eval(M, name) === getfield(HyperShape, name)
     end
   end

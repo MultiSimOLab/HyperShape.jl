@@ -32,9 +32,9 @@ HyperShape (adaptive move limits, stop when the objective settles).
 
 - **Cell mean or Gauss points.** top88 gives each element one physical density, the cell mean of the filtered nodal
   field (`xPhys = TF'·K⁻¹·TF·x`). HyperShape evaluates the filtered field at the Gauss points, so the stiffness varies
-  inside an element: a different formulation, 1.1 % stiffer at 60×20 and 0.3 % at 150×50. The cell mean is obtained by composing an L2
-  projection onto P0 after the filter (a second `HelmholtzFilter` whose model is the P0 mass matrix, see
-  `validation/cases.jl`); with it HyperShape reproduces top88 to four digits. A named map for it (`CellMean`) is planned.
+  inside an element: a different formulation, 1.1 % stiffer at 60×20 and 0.3 % at 150×50. The cell mean is obtained by composing
+  [`CellMean`](@ref) after the filter, `CellMean(dΩ) ∘ HelmholtzFilter(dΩ; rmin, ls)`; with it HyperShape reproduces
+  top88 to four digits.
 - **Point load.** It is written as the traction dual to the shape function of the corner node on the first top edge,
   `t(x) = −(4 − 6x/h)/h` for x < h: its work on a P1 field is the value at the corner.
 - The filter has homogeneous Neumann conditions, as in top88 and SiMPL: the design sticks to the boundary of the domain.
@@ -42,29 +42,32 @@ HyperShape (adaptive move limits, stop when the objective settles).
 ## MBB beam against SiMPL
 
 Kim, Lazarov, Surowiec, Keith, *A simple and efficient algorithm for topology optimization* (SiMPL),
-arXiv:2411.19421v3, table 1: SiMPL 1.2078e-3, OC 1.2234e-3. Setup of the authors' code (problem MBB2 of
-`miniapps/simpl` in dohyun-cse/mfem): (0, 3)×(0, 1), 768×256, plane strain, ν = 0.3, Emin = 1e-6, volume 0.3,
-P0 control, body force (0, −1) in the disc of radius 0.05 at (0, 1), roller on the bottom edge for x > 3 − 1/32.
+arXiv:2411.19421v3. Table 1 (768×256): SiMPL 1.2078e-3 in 50 iterations, OC 1.2234e-3 after 300; table 2 (h = 1/256,
+30 iterations): 1.0566e-3. Setup of the authors' code (problem MBB2 of `miniapps/simpl` in dohyun-cse/mfem):
+(0, 3)×(0, 1), 768×256, plane strain, ν = 0.3, Emin = 1e-6, volume 0.3, P0 control, body force (0, −1) in the disc of
+radius 0.05 at (0, 1), roller on the bottom edge for x > 3 − 1/32, stop at the stationarity measure
+Sₖ = ‖z − P(z − g)‖ ≤ 1e-5 (L2 metric, `StopCriteria(stationarity = 1e-5)` with `LumpedMass(dΩ)`).
 
 | Case | C | vs reference | iterations | time |
 |---|---|---|---|---|
-| P0, `SiMPL()` (Armijo), `StopCriteria(kkt = 1e-5)` | 1.2097e-3 | +0.16 % | 33 | 38.6 s |
-| P1, `SiMPL()`, `StopCriteria(kkt = 1e-5)` | 1.2132e-3 | +0.45 % | 32 | 43.4 s |
-| P0, `OC()`, default stop (vs OC of the paper) | 1.2113e-3 | −0.99 % | 102 | 124.6 s |
+| rmin 0.05, P0, `SiMPL()`, authors' sensitivity (table 1) | 1.2078e-3 | +0.00 % | 50 | 81.7 s |
+| rmin 0.05, P0, `SiMPL()`, exact sensitivity | 1.1960e-3 | −0.97 % | 104 | 146.3 s |
+| rmin 0.05, P1, `SiMPL()`, exact sensitivity | 1.2030e-3 | −0.40 % | 73 | 120.2 s |
+| rmin 0.02, P0, `SiMPL()`, authors' sensitivity, 29 steps (table 2) | 1.0566e-3 | +0.00 % | 29 | 42.7 s |
+| rmin 0.05, P0, `OC()`, default stop (vs OC of table 1) | 1.2113e-3 | −0.99 % | 102 | 151.7 s |
 
-- **Filter radius and sensitivity of the reference.** Table 1 of the paper was computed with rmin = 0.05: the
-  `run_local.sh` of dohyun-cse/mfem 28e17f2 (2024-11-25, before the paper) holds the command of table 1 without
-  `-fr`, and 0.05 was the default of MBB2 until commit c5b9f24 (2025-02-14), which changed it to 0.02. The commit
-  given in the paper (022954b) only runs the mesh study of table 2, with 0.02; with 0.02 HyperShape gives 1.0605e-3
-  here. Besides, the sensitivity of the authors' code halves the shear term (`topopt.cpp`: `M = mu*0.5`, then
-  `2.0*M*grad:adjgrad`), so it is not the exact derivative of their stiffness. Replicating both (rmin = 0.05 and their
-  sensitivity), HyperShape reproduces their iterates to eight digits and the value of table 1, 1.2078e-3 in 49
-  iterations; with the exact derivative it reaches 1.1960e-3 (−0.97 %). These replica runs are added with the
-  stationarity criterion of the paper in the next PR.
-- **Stopping.** The paper stops at its L2 stationarity measure Sₖ ≤ 1e-5; HyperShape's `kkt` is about ten times smaller
-  here, so the runs above stop earlier (33 iterations), which is why they land at +0.16 %. With `kkt = 1e-7` the
-  compliance after 300 iterations is 1.1951e-3, and the OC value of the paper is taken at 300 iterations without
-  convergence. The 1.0605e-3, 1.1960e-3 and 1.1951e-3 values come from exploratory runs, not from the scripts.
+- **Filter radius.** Table 1 was computed with rmin = 0.05: the `run_local.sh` of dohyun-cse/mfem 28e17f2
+  (2024-11-25, before the paper) holds the command of table 1 without `-fr`, and 0.05 was the default of MBB2 until
+  commit c5b9f24 (2025-02-14), which changed it to 0.02. The commit given in the paper (022954b) only runs the mesh
+  study of table 2, with 0.02.
+- **Sensitivity of the authors' code.** It halves the shear term (`topopt.cpp`: `M = mu*0.5`, then
+  `2.0*M*grad:adjgrad`), so it is the derivative of `λ tr(ε)² + μ ε:ε` instead of `λ tr(ε)² + 2μ ε:ε`: not the exact
+  derivative of their stiffness. `mbb(…; sensitivity = :authors)` in `validation/cases.jl` replicates it. With it,
+  HyperShape reproduces the iterates of the authors' log to eight digits (first iterate checked in the test suite at
+  192×64) and both tables. With the exact derivative the same setup reaches a 0.97 % stiffer design, in more iterations.
+- **Iterations.** The authors count the initial design as iteration 0, so their 30 iterations of table 2 are 29 steps.
+- **OC.** The OC value of the paper is taken after 300 iterations without convergence; `OC()` with adaptive move
+  limits and the default stop reaches −0.99 %.
 
 ## 3D cantilever
 
