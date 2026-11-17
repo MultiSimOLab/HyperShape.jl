@@ -64,7 +64,19 @@ end
 
 version(z::OptVariables) = z.version
 Base.length(z::OptVariables) = length(z.values)
+"""
+    get_values(z::OptVariables) -> Vector{Float64}
+
+The design vector, all blocks in order (the same object, not a copy). After writing into it in place call
+`changed!(z)`; or use [`set_values!`](@ref).
+"""
 get_values(z::OptVariables) = z.values
+
+"""
+    get_bounds(z::OptVariables) -> (lb, ub)
+
+Lower and upper bounds of every entry of the design vector.
+"""
 get_bounds(z::OptVariables) = (z.lb, z.ub)
 block_range(z::OptVariables, name::Symbol) = z.ranges[_index(z.names, name)]
 

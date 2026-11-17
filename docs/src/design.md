@@ -196,18 +196,18 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
 - **Metric:** `LumpedMass(dΩ)` (cell volumes for P0, lumped mass for P1) or `Euclidean()`; mandatory for SiMPL, OC
   uses it only for the stationarity measure (default `Euclidean()`; give `LumpedMass(dΩ)` to compare it with SiMPL).
 - **Rejection** (`on_failure`, default `RejectStep(shrink = 0.5, max_attempts = 5)`): if the forward problem does not converge at the new design, the loop restores the previous one,
-  calls `shrink!` and tries again, at most `max` times; then it throws `OptimizationFailure` (checkpoint written).
+  calls `shrink!` and tries again, at most `max_attempts` times; then it throws `OptimizationFailure` (checkpoint written).
   SiMPL handles failures inside its line search; if it finds no step, the current continuation stage ends (in the last stage, or without continuation, the result is `:stalled`).
 - **Continuation:** explicit list of values per stage, a jump every `every` iterations (or when the optimiser finds no
   step); with `close_early = true` also when the stopping criteria are met. The optimiser forgets its memory at each
   jump; the optimisation only stops in the last stage.
 - **Stopping:** `maxiter` is mandatory. `stop` defaults to `StopCriteria(objective_range = 1e-3)` for every optimiser
   (`default_stop`): the range of the objective over the last 10 iterations of the last stage, relative to the
-  objective, below 0.1 %. With a tanh projection `change` and `kkt` are rarely reached; the objective settles
+  objective, below 0.1 %. With a tanh projection `change_tol` and `kkt_tol` are rarely reached; the objective settles
   (half MBB beam 150×50: OC with adaptive move limits stops at iteration 214, 0.4 % above its value at 500 iterations; SiMPL at 210, within 0.3 % of 350 iterations). Other criteria:
-  `kkt`, `kkt_rel` (relative to the first iteration), `stationarity`, `stationarity_rel` (the measure
+  `kkt_tol`, `kkt_rtol` (relative to the first iteration), `stationarity_tol`, `stationarity_rtol` (the measure
   `‖z − P(z − g)‖_M` of the SiMPL paper, computed by OC and SiMPL at the design before each step and shown in the
-  column `S` of the table and the history), `change`; `stop = nothing` runs `maxiter` iterations. A run that
+  column `S` of the table and the history), `change_tol`; `stop = nothing` runs `maxiter` iterations. A run that
   oscillates or whose physical volume keeps growing may still end at `maxiter`.
 - **Grey monitor:** `solve!(…; monitors = (grey = Grey(θ, dΩ),))` adds the measure of grey `4/|Ω| ∫ρ(1 − ρ)` to the history, the
   table and the closing line. It is fixed mostly by β, so it is a measure of quality, not a stopping criterion.

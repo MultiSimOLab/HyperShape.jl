@@ -9,7 +9,7 @@ using HyperShape.Methods: FunctionalOracle, _setup_constraint!, OptHistory, _rec
 using LinearAlgebra
 using Test
 
-# an optimiser that does not compute the stationarity measure: SiMPL with the 9-argument StepInfo
+# an optimiser that does not compute the stationarity measure: SiMPL reporting NaN
 struct NoStatOpt <: HyperShape.Optimizers.Optimizer end
 const _NS = HyperShape.Optimizers
 _NS.init(::NoStatOpt, z, oracle) = _NS.init(SiMPL(), z, oracle)
@@ -26,6 +26,13 @@ struct _CountMonitor
   n::Base.RefValue{Int}
 end
 HyperShape.monitor_value(m::_CountMonitor) = (m.n[] += 1; Float64(m.n[]))
+struct _VecMonitor end
+HyperShape.monitor_value(::_VecMonitor) = [1.0, 2.0]
+struct _BadMonitor
+  at::Int
+  n::Base.RefValue{Int}
+end
+HyperShape.monitor_value(m::_BadMonitor) = (m.n[] += 1; m.n[] == m.at ? error("boom") : 1)   # an Int: converted
 
 # heat compliance (self-adjoint) and the volume of the unprojected design density
 function compliance_problem(; design = :P0, n = 8, dim = 2, init = 0.4, fraction = 0.4, solve_flag = nothing,
@@ -100,6 +107,43 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test rm_.z === qm.z && rm_.time > 0 && occursin("OptResult(:maxiter", sprint(show, rm_))
     @test_throws ArgumentError solve!(qm.problem, DensityMethod(OC()); maxiter = 2, verbose = 0, monitors = (bad = 1.0,))
     @test_throws ArgumentError solve!(qm.problem, DensityMethod(OC()); maxiter = 2, verbose = 0, monitors = Grey(qm.θ, qm.dΩ))
+    @test rm_.history.monitors.count[end] == 3.0                  # evaluated once per iteration, not at the close
+    for bad in (:objective, :kkt, :S, :μ, :constraint)
+      @test_throws ArgumentError solve!(qm.problem, DensityMethod(OC()); maxiter = 2, verbose = 0,
+                                        monitors = NamedTuple{(bad,)}((Grey(qm.θ, qm.dΩ),)))
+    end
+    @test_throws ArgumentError solve!(qm.problem, DensityMethod(OC()); maxiter = 2, verbose = 0,
+                                      continuation = Continuation(β = qm.H => [1.0]; every = 2),
+                                      monitors = (β = Grey(qm.θ, qm.dΩ),))
+    # a monitor that throws: OptimizationFailure with the history and the checkpoint of that iteration
+    qb = compliance_problem()
+    dirb = mktempdir()
+    e = try
+      solve!(qb.problem, DensityMethod(OC()); maxiter = 6, verbose = 0, stop = nothing, monitors = (b = _BadMonitor(3, Ref(0)),),
+             checkpoint = Checkpoint(filepath = dirb, every = 10))
+    catch err
+      err
+    end
+    @test e isa OptimizationFailure && occursin("monitor threw at iteration 3", e.msg) && e.iterations == 3
+    @test e.history.monitors.b[1:2] == [1.0, 1.0] && isnan(e.history.monitors.b[3])
+    @test load_checkpoint(dirb).iteration == 3
+    # a monitor that returns something else than a number
+    qn = compliance_problem()
+    @test_throws OptimizationFailure solve!(qn.problem, DensityMethod(OC()); maxiter = 2, verbose = 0, stop = nothing,
+                                            monitors = (v = _VecMonitor(),))
+    # wrong resume, positional constructors validated, public names
+    @test_throws ArgumentError solve!(qm.problem, DensityMethod(OC()); maxiter = 2, verbose = 0, resume = Checkpoint(filepath = dirb, every = 1))
+    @test_throws ArgumentError StopCriteria(-1.0, 10, nothing, nothing, nothing, nothing, nothing)
+    @test_throws ArgumentError RejectStep(2.0, 1)
+    @test_throws ArgumentError Checkpoint("x", 0)
+    for n in (:get_bounds, :changed!, :set_beta!, :design_gradient!, :update_fields!, :is_linear_field, :version,
+              :invalidate!, :refresh!, :default_stop, :default_metric, :monitor_value)
+      @test Base.ispublic(HyperShape, n) && !Base.isexported(HyperShape, n) && isdefined(HyperShape, n)
+    end
+    for obj in (Grey(qm.θ, qm.dΩ), Continuation(β = qm.H => [1.0, 2.0]; every = 2), DensityMethod(OC()), qm.H,
+                TanhProjection(β = 2.0, η = 0.5) ∘ HelmholtzFilter(qm.Sf, qm.dΩ), Checkpoint(filepath = "x", every = 2))
+      @test length(sprint(show, obj)) < 120
+    end
     @test DensityMethod(OC()).metric isa Euclidean           # default metric of OC (which does not use it)
     @test_throws ArgumentError DensityMethod(SiMPL())         # SiMPL needs one
     @test_throws ArgumentError DensityMethod(OC(); metric = :lumped)
@@ -278,7 +322,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     r1 = solve!(q1.problem, DensityMethod(OC(); metric = LumpedMass(q1.dΩ)); maxiter = 1, stop = nothing, verbose = 0)
     r2 = solve!(q2.problem, DensityMethod(SiMPL(); metric = LumpedMass(q2.dΩ)); maxiter = 1, stop = nothing, verbose = 0)
     @test r1.history.stationarity[1] ≈ r2.history.stationarity[1] rtol = 1e-10
-    # an optimiser that does not compute it (9-argument StepInfo): error when a criterion asks for it
+    # an optimiser that does not compute it (stationarity NaN): error when a criterion asks for it
     q = compliance_problem()
     @test_throws ArgumentError solve!(q.problem, DensityMethod(NoStatOpt(); metric = LumpedMass(q.dΩ)); maxiter = 3, verbose = 0,
                                       stop = StopCriteria(stationarity_tol = 1e-3))
@@ -612,7 +656,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test_throws ArgumentError Optimization(q.z; objective = q.C, constraints = (a = V, b = V))
   end
 
-  @testset "Stopping: range of the objective, kkt_rel, the grey monitor" begin
+  @testset "Stopping: range of the objective, kkt_rtol, the grey monitor" begin
     h = OptHistory(30, ())
     rec!(f; kkt = NaN) = _record!(h, (h.n + 1, f, kkt, NaN, 0.1, 0.1, 1, 1, 0, 1), (), (), (), ())
     info(kkt = NaN) = HyperShape.Optimizers.StepInfo(true, 1.0, 1.0, kkt, 0.1, 0.1, 0.0, 1, NaN, NaN)
@@ -640,7 +684,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test _stop_reason(StopCriteria(objective_range = 1e-3, window = 4), info(), hn, 0) === nothing
     # kkt relative to the first iteration
     hk = OptHistory(10, ())
-    # stationarity_rel: reference = first finite value (NaN rows from an old checkpoint are skipped)
+    # stationarity_rtol: reference = first finite value (NaN rows are skipped)
     hs = OptHistory(10, ())
     for (k, sv) in enumerate((NaN, NaN, 1.0, 0.5, 0.05))
       _record!(hs, (k, 1.0, NaN, sv, 0.1, 0.1, 1, 1, 0, 1), (), (), (), ())

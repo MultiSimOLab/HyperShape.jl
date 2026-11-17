@@ -10,7 +10,8 @@ struct _Validated end   # only the keyword constructors build problems
 
 Optimisation problem: minimise the [`Functional`](@ref) `objective` over the variables `z` behind it (given or not;
 when given they are checked) subject to the bounds of `z` and the named `constraints` `g(z) ≤ 0`, for example
-`constraints = (volume = Vol,)`. The names go to the history, the table and the checkpoint. In phase 0, at most one
+`constraints = (volume = Vol,)`. The names go to the history (`history.constraints.volume`), the banner and the
+checkpoint. In phase 0, at most one
 constraint, a design-only functional: typically [`Volume`](@ref HyperShape.Functionals.Volume)`(θ, dΩ; max_fraction)`
 (volume of the physical density, nonlinear in z with a tanh projection) or `Volume(x, dΩ; max_fraction)` (volume of
 the design density, linear).
@@ -282,3 +283,5 @@ end
 
 _constraint_values(o::FunctionalOracle, zk) = o.C === nothing ? () : (constraint(o, zk),)
 _multipliers(o::FunctionalOracle, info) = o.C === nothing ? () : (info.multiplier,)
+
+Base.show(io::IO, m::DensityMethod) = print(io, "DensityMethod(", nameof(typeof(m.optimizer)), ")")

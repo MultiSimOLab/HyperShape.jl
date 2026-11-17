@@ -14,13 +14,14 @@ applies if a step is accepted at a design that cannot be evaluated again.
 struct RejectStep
   shrink::Float64
   max_attempts::Int
+  function RejectStep(shrink::Real, max_attempts::Integer)
+    0 < shrink < 1 || throw(ArgumentError("RejectStep: shrink must be in (0, 1)"))
+    max_attempts >= 1 || throw(ArgumentError("RejectStep: max_attempts must be at least 1"))
+    new(Float64(shrink), Int(max_attempts))
+  end
 end
 
-function RejectStep(; shrink = 0.5, max_attempts = 5)
-  0 < shrink < 1 || throw(ArgumentError("RejectStep: shrink must be in (0, 1)"))
-  max_attempts >= 1 || throw(ArgumentError("RejectStep: max_attempts must be at least 1"))
-  RejectStep(Float64(shrink), Int(max_attempts))
-end
+RejectStep(; shrink = 0.5, max_attempts = 5) = RejectStep(shrink, max_attempts)
 
 """
     StopCriteria(; objective_range = nothing, window = 10, kkt_tol = nothing, kkt_rtol = nothing,
@@ -57,19 +58,20 @@ struct StopCriteria
   stationarity_tol::Union{Nothing,Float64}
   stationarity_rtol::Union{Nothing,Float64}
   change_tol::Union{Nothing,Float64}
+  function StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol)
+    for (k, v) in ((:objective_range, objective_range), (:kkt_tol, kkt_tol), (:kkt_rtol, kkt_rtol),
+                   (:stationarity_tol, stationarity_tol), (:stationarity_rtol, stationarity_rtol), (:change_tol, change_tol))
+      v === nothing || v > 0 || throw(ArgumentError("StopCriteria: $k must be positive"))
+    end
+    window >= 2 || throw(ArgumentError("StopCriteria: window must be at least 2"))
+    f(v) = v === nothing ? nothing : Float64(v)
+    new(f(objective_range), Int(window), f(kkt_tol), f(kkt_rtol), f(stationarity_tol), f(stationarity_rtol), f(change_tol))
+  end
 end
 
-function StopCriteria(; objective_range = nothing, window = 10, kkt_tol = nothing, kkt_rtol = nothing,
-                      stationarity_tol = nothing, stationarity_rtol = nothing, change_tol = nothing)
-  for (k, v) in ((:objective_range, objective_range), (:kkt_tol, kkt_tol), (:kkt_rtol, kkt_rtol),
-                 (:stationarity_tol, stationarity_tol), (:stationarity_rtol, stationarity_rtol), (:change_tol, change_tol))
-    v === nothing || v > 0 || throw(ArgumentError("StopCriteria: $k must be positive"))
-  end
-  window >= 2 || throw(ArgumentError("StopCriteria: window must be at least 2"))
-  f(v) = v === nothing ? nothing : Float64(v)
-  StopCriteria(f(objective_range), Int(window), f(kkt_tol), f(kkt_rtol), f(stationarity_tol), f(stationarity_rtol),
-               f(change_tol))
-end
+StopCriteria(; objective_range = nothing, window = 10, kkt_tol = nothing, kkt_rtol = nothing, stationarity_tol = nothing,
+             stationarity_rtol = nothing, change_tol = nothing) =
+  StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol)
 
 """
     default_stop(optimizer) -> Union{StopCriteria,Nothing}
@@ -137,6 +139,9 @@ _valid_parameter(h::TanhProjection, v) = isfinite(v) && v > 0
 _set_parameter!(o::OC, v) = set_move!(o, v)
 _valid_parameter(o::OC, v) = _valid_move(o, v)
 
+Base.show(io::IO, c::Continuation) =
+  print(io, "Continuation(", join(c.names, ", "), "; ", c.nstages, " stages, every ", c.every, ")")
+
 function _apply_stage!(c::Continuation, s, buf)
   foreach((o, v) -> _set_parameter!(o, v[s]), c.objects, c.values)
   for (j, v) in enumerate(c.values)
@@ -159,12 +164,14 @@ result of [`load_checkpoint`](@ref)).
 struct Checkpoint
   filepath::String
   every::Int
+  function Checkpoint(filepath::AbstractString, every::Integer)
+    every >= 1 || throw(ArgumentError("Checkpoint: every must be at least 1"))
+    new(String(filepath), Int(every))
+  end
 end
 
-function Checkpoint(; filepath::AbstractString, every::Integer)
-  every >= 1 || throw(ArgumentError("Checkpoint: every must be at least 1"))
-  Checkpoint(String(filepath), Int(every))
-end
+Checkpoint(; filepath::AbstractString, every::Integer) = Checkpoint(filepath, every)
+Base.show(io::IO, c::Checkpoint) = print(io, "Checkpoint(filepath = ", repr(c.filepath), ", every = ", c.every, ")")
 
 """
     Grey(θ::PhysicalFields, dΩ; field = nothing)
@@ -195,10 +202,23 @@ grey_value(g::Grey) = (ρ = getproperty(g.θ, g.field); 4 * sum(∫(ρ * (1 - ρ
 """
     monitor_value(m) -> Real
 
-Value of a monitor of [`solve!`](@ref) (`monitors = (name = m, …)`) at the accepted design, called once per
-iteration after the forward solve. Defined for [`Grey`](@ref).
+Value of a monitor of [`solve!`](@ref) (`monitors = (name = m, …)`) at the accepted design, called once per accepted
+iteration after the forward solve (the closing line shows the last value recorded). It must return a real number; an
+exception ends the optimisation as an [`OptimizationFailure`](@ref) with the history and the checkpoint written.
+Defined for [`Grey`](@ref).
 """
 monitor_value(g::Grey) = grey_value(g)
+
+Base.show(io::IO, g::Grey) = print(io, "Grey(", g.field, ")")
+
+function _monitor(n, m)
+  v = monitor_value(m)
+  v isa Real || throw(ArgumentError("monitor $n returned a $(typeof(v)), not a number"))
+  Float64(v)
+end
+
+_last_monitors(hist, monitors) =
+  NamedTuple{keys(monitors)}(Tuple(hist.n == 0 ? NaN : hist.monitor_values[j, hist.n] for j in 1:length(monitors)))
 
 """
     OptHistory
@@ -563,6 +583,8 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
     applicable(monitor_value, m) || throw(ArgumentError("solve!: monitor $n: no monitor_value method for $(typeof(m))"))
   end
   resume isa AbstractString && (resume = load_checkpoint(resume))
+  resume === nothing || resume isa NamedTuple ||
+    throw(ArgumentError("solve!: resume must be the folder of a Checkpoint or the result of load_checkpoint"))
   defaults = (stop = stop isa _DefaultStop, on_failure = on_failure isa _DefaultFailure)
   defaults.stop && (stop = default_stop(opt))
   defaults.on_failure && (on_failure = RejectStep())
@@ -577,6 +599,11 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
   maxiter >= 1 || throw(ArgumentError("solve!: maxiter must be at least 1"))
   if stop isa StopCriteria && (stop.kkt_tol !== nothing || stop.kkt_rtol !== nothing) && !computes_kkt(opt)
     throw(ArgumentError("StopCriteria: kkt needs an optimiser that computes an optimality measure ($(nameof(typeof(opt))) does not)"))
+  end
+  taken = (HISTORY_COLUMNS..., :constraint, :μ, :S, (schedule === nothing ? () : schedule.names)...)
+  for n in keys(monitors)
+    n in taken && throw(ArgumentError("solve!: $n is the name of a column of the table or a continued parameter; " *
+                                      "choose another name for the monitor"))
   end
   pr = _Printer(io, verbose, schedule, keys(monitors))
   # a nonlinear constraint is met to the tolerance of the optimiser: above it, the value is shown in red
@@ -593,10 +620,10 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
     length(resume.z) == length(z) || throw(ArgumentError("solve!: the checkpoint has $(length(resume.z)) values, z has $(length(z))"))
     resume.blocks == collect(z.names) || throw(ArgumentError("solve!: the checkpoint has blocks $(resume.blocks), z has $(collect(z.names))"))
     resume.continuation == collect(cont_names) ||
-      throw(ArgumentError("solve!: the checkpoint continues $(resume.continuation), the schedule $(collect(cont_names))"))
+      throw(ArgumentError("solve!: the checkpoint continues $(resume.continuation), the continuation $(collect(cont_names))"))
     nst = schedule === nothing ? 0 : schedule.nstages
     (schedule === nothing ? resume.stage == 0 : 1 <= resume.stage <= nst) ||
-      throw(ArgumentError("solve!: the checkpoint is at stage $(resume.stage); the schedule has $nst stages"))
+      throw(ArgumentError("solve!: the checkpoint is at stage $(resume.stage); the continuation has $nst stages"))
     Set(keys(resume.scales)) == Set((:objective, cnames...)) ||
       throw(ArgumentError("solve!: the checkpoint has functionals $(join(keys(resume.scales), ", ")); the problem has " *
                           join((:objective, cnames...), ", ")))
@@ -606,6 +633,9 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
     foreach((F, n) -> (F.scale_mode === :initial && (F.scale[] = getproperty(resume.scales, n))), Fs, (:objective, cnames...))
     k0, stage, stage_iters = resume.iteration, resume.stage, resume.stage_iterations
     _prefill!(hist, resume.history)
+    dropped = setdiff(resume.history.monitor_names, collect(keys(monitors)))
+    isempty(dropped) || _print_event(pr, "· monitors of the checkpoint not given now (their columns are dropped): " *
+                                         join(dropped, ", "), :yellow)
   end
 
   # an OC whose move limit the schedule continues gets its own value back at the end (the stages change it)
@@ -629,7 +659,7 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
   t_start = nothing
   if resume === nothing                       # a resumed design is the one the run left
     t_start = _make_feasible!(oracle, zk)
-    # a start feasible up to rounding (t within 1e-9 of 1) is not worth an event
+    # a start feasible up to rounding (t within 1e-6 of 1) is not worth an event
     (t_start === nothing || t_start > 1 - 1e-6) || _print_event(pr, "· the starting design violated the constraint; it was scaled " *
                                             "towards the lower bound by $(round(t_start, sigdigits = 4)) to meet it", :yellow)
   end
@@ -665,7 +695,7 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
                              on_failure, stop, schedule, checkpoint, post, monitors, fwd, adj, filters, pr)
 
   f_final = _sync!(oracle)                     # fields and forward state at the final design
-  _print_end(pr, status, reason, run.k, f_final, map(m -> isfinite(f_final) ? monitor_value(m) : NaN, monitors))
+  _print_end(pr, status, reason, run.k, f_final, _last_monitors(hist, monitors))
   _print_summary(pr, map(_count, ops) .- cstart, run.k - k0)
   checkpoint === nothing ||
     _write_checkpoint(checkpoint, problem, opt, state, zk, hist, run.k, run.stage, run.stage_iters, cont_names)
@@ -852,9 +882,17 @@ function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_
     run.k = k
     run.stage_iters += 1
     c1 = (_count(fwd), _count(adj), _count(filters))
-    _record!(hist, (k, f_acc, info.kkt, info.stationarity, info.change, info.step, ctx.attempt, c1[1] - c0[1],
-                    c1[2] - c0[2], c1[3] - c0[3]), _constraint_values(oracle, zk), _multipliers(oracle, info),
-             map(monitor_value, values(monitors)), cont_buf)
+    row = (k, f_acc, info.kkt, info.stationarity, info.change, info.step, ctx.attempt, c1[1] - c0[1], c1[2] - c0[2],
+           c1[3] - c0[3])
+    mvals = try
+      map(_monitor, keys(monitors), values(monitors))
+    catch e
+      e isa InterruptException && rethrow()
+      _record!(hist, row, _constraint_values(oracle, zk), _multipliers(oracle, info), map(_ -> NaN, values(monitors)),
+               cont_buf)
+      fail("a monitor threw at iteration $k: " * first(sprint(showerror, e), 300))
+    end
+    _record!(hist, row, _constraint_values(oracle, zk), _multipliers(oracle, info), mvals, cont_buf)
     _print_row(pr, hist)
     r = _stop_reason(stop, info, hist, run.stage_start)
     # with a nonlinear constraint, convergence also needs the constraint met to the tolerance of the optimiser

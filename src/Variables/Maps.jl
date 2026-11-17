@@ -267,3 +267,9 @@ end
 
 is_lazy(::CellMeanStage) = false
 is_linear_stage(::CellMeanStage) = true
+
+Base.show(io::IO, ::Identity) = print(io, "Identity()")
+Base.show(io::IO, f::HelmholtzFilter) = print(io, "HelmholtzFilter(", f.backend, ")")
+Base.show(io::IO, h::TanhProjection) = print(io, "TanhProjection(β = ", h.β, ", η = ", h.η, ")")
+Base.show(io::IO, c::CellMean) = print(io, "CellMean(", c.backend, ")")
+Base.show(io::IO, c::ComposedMap) = join(io, reverse(c.maps), " ∘ ")
