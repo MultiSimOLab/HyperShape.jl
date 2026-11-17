@@ -9,7 +9,8 @@ fast cases run in the test suite. Measured on an Apple M5 Max, Julia 1.13.0, 4 t
 Andreassen et al., *Efficient topology optimization in MATLAB using 88 lines of code*, SMO 43 (2011), section 4.2:
 volume 0.5, E₀ = 1, Emin = 1e-9, ν = 0.3, plane stress, unit square elements, rmin = 0.04 nelx, unit point load at the
 top-left node, OC with move 0.2, stop at max|Δx| ≤ 0.01. Reference compliances 237.60 (60×20) and 235.36 (150×50).
-A plain-Julia port of the code (`validation/top88.jl`) gives 237.5996 in 140 iterations and 235.365 in 461.
+A plain-Julia port of the code (`validation/top88.jl`) gives 237.5996 in 140 iterations and 235.3632 in 461 (the last
+compliance the code prints; the tables below give the compliance of the final design).
 
 | Case | C | vs reference | iterations | time |
 |---|---|---|---|---|
@@ -31,7 +32,7 @@ HyperShape (adaptive move limits, stop when the objective settles).
 
 - **Cell mean or Gauss points.** top88 gives each element one physical density, the cell mean of the filtered nodal
   field (`xPhys = TF'·K⁻¹·TF·x`). HyperShape evaluates the filtered field at the Gauss points, so the stiffness varies
-  inside an element: a different formulation, about 1 % stiffer here. The cell mean is obtained by composing an L2
+  inside an element: a different formulation, 1.1 % stiffer at 60×20 and 0.3 % at 150×50. The cell mean is obtained by composing an L2
   projection onto P0 after the filter (a second `HelmholtzFilter` whose model is the P0 mass matrix, see
   `validation/cases.jl`); with it HyperShape reproduces top88 to four digits. A named map for it (`CellMean`) is planned.
 - **Point load.** It is written as the traction dual to the shape function of the corner node on the first top edge,
@@ -51,16 +52,21 @@ P0 control, body force (0, −1) in the disc of radius 0.05 at (0, 1), roller on
 | P1, `SiMPL()`, `StopCriteria(kkt = 1e-5)` | 1.2132e-3 | +0.45 % | 32 | 43.4 s |
 | P0, `OC()`, default stop (vs OC of the paper) | 1.2113e-3 | −0.99 % | 102 | 124.6 s |
 
-- **Filter radius.** These values use rmin = 0.05, the default of the authors' code; 0.02 gives −12 %. The value in
-  the text of the paper has not been checked against the PDF.
+- **Filter radius: an open discrepancy.** The paper states rmin = 0.02, and so does the MBB2 problem at the commit
+  given in the paper to reproduce its results (dohyun-cse/mfem 022954b), whose filter is the same as here
+  (ε² = rmin²/12, P0 control, P1 filter and state, plane strain, roller on x > 3 − 1/32). With rmin = 0.02 HyperShape
+  gives 1.0605e-3 (−12 %); the values above use rmin = 0.05, the default of MBB2 at a later commit (28e17f2). The
+  cause of the difference has not been found, so the agreement at 0.05 may be a coincidence (decision of Jesús,
+  2026-11-17: keep 0.05 and record the discrepancy).
 - **Stopping.** The paper stops at its L2 stationarity measure Sₖ ≤ 1e-5; HyperShape's `kkt` is a different measure,
-  so the iteration counts are not comparable one to one (with `kkt = 1e-7` the compliance is 1 % lower after 300
-  iterations).
+  so the iteration counts are not comparable one to one. The agreement depends on where the run stops: with
+  `kkt = 1e-7` the compliance after 300 iterations is 1.1951e-3 (−1.05 %), and the OC value of the paper is taken at
+  300 iterations without convergence. The −12 % and −1.05 % values come from exploratory runs, not from the scripts.
 
 ## 3D cantilever
 
 (0, 2)×(0, 1)×(0, 1), 24×12×12 hexahedra (12 168 displacement dofs), clamped at x = 0, downward traction on the bottom
-strip of the face x = 2 (as top3d), Emin = 1e-9, rmin = 2.5h, volume 0.3. No published value: `check_consistency`
+strip (height h) of the face x = 2 (close to the line load of top3d), Emin = 1e-9, rmin = 2.5h, volume 0.3. No published value: `check_consistency`
 passes for P0 and P1, and the design keeps the symmetry in y.
 
 | Case | C | iterations | time | y-asymmetry |

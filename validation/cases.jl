@@ -2,7 +2,7 @@
 #
 #   mbb(; case = :top88 | :simpl, …)  half MBB beam, SIMP, against top88 with the PDE filter (Andreassen et al. 2011)
 #                                     and against SiMPL (Kim, Lazarov, Surowiec, Keith, arXiv:2411.19421)
-#   cantilever3d(; …)                 3D cantilever (as top3d), no published value: runs, Taylor tests, symmetry
+#   cantilever3d(; …)                 3D cantilever (close to top3d), no published value: runs, Taylor tests, symmetry
 #
 # Both return a named tuple with the result of `solve!` and the cell means of the physical density.
 using Gridap, Gridap.Geometry, HyperFEM, HyperShape, Printf
@@ -109,7 +109,7 @@ end
                  verbose = 0)
 
 3D cantilever (0, 2)×(0, 1)×(0, 1), clamped at x = 0, downward traction on the bottom strip (z < h) of the face x = 2
-(as top3d); SIMP p = 3, Emin = 1e-9, ν = 0.3, Helmholtz filter with rmin = 2.5h, no projection, volume fraction `vf`.
+(a strip of height h, close to top3d); SIMP p = 3, Emin = 1e-9, ν = 0.3, Helmholtz filter with rmin = 2.5h, no projection, volume fraction `vf`.
 """
 function cantilever3d(; n = (24, 12, 12), order = 0, opt = OC(), vf = 0.3, maxiter = 300, stop = :default,
                       check = false, verbose = 0)
