@@ -80,8 +80,10 @@ const Metric = Union{Euclidean,LumpedMass}
     DensityMethod(optimizer; metric = default_metric(optimizer))
 
 Density method (SIMP, RAMP or any interpolation written by the user in the weak forms): the step is `optimizer` (any
-`Optimizer`: `OC(…)`, `SiMPL(…)`). `metric`:
-[`LumpedMass`](@ref)`(dΩ)` or [`Euclidean`](@ref)`()`, or a named tuple with one of them per block of z. SiMPL uses
+`Optimizer`: `OC(…)`, `SiMPL(…)`). `metric`: [`LumpedMass`](@ref)`(dΩ)`, [`Euclidean`](@ref)`()`, a vector of
+positive weights (one per entry of z: `inner(x, y) = Σ mᵢ xᵢ yᵢ`), an object of the user with a method
+[`metric_weights`](@ref)`(m, z) -> Vector` (called once, at the start of `solve!`), or a named tuple with one of them
+per block of z. SiMPL uses
 it in its step and its optimality measure, and needs it (no default). OC uses it only for the stationarity measure
 (see [`StopCriteria`](@ref)); its default is `Euclidean()`, which makes that measure depend on the mesh.
 """
@@ -92,8 +94,9 @@ struct DensityMethod{O<:Optimizer,M}
   function DensityMethod(optimizer::Optimizer; metric = nothing)
     given = metric !== nothing
     given || (metric = default_metric(optimizer))
-    ok = metric isa Metric || (metric isa NamedTuple && all(m -> m isa Metric, values(metric)))
-    ok || throw(ArgumentError("DensityMethod: metric must be LumpedMass(dΩ), Euclidean() or a named tuple of them per block"))
+    ok = _valid_metric(metric) || (metric isa NamedTuple && all(_valid_metric, values(metric)))
+    ok || throw(ArgumentError("DensityMethod: metric must be LumpedMass(dΩ), Euclidean(), a vector of positive weights, " *
+                              "an object with a metric_weights(m, z) method, or a named tuple of them per block"))
     new{typeof(optimizer),typeof(metric)}(optimizer, metric, !given)
   end
 end
@@ -108,11 +111,39 @@ default_metric(::OC) = Euclidean()
 default_metric(opt::Optimizer) =
   throw(ArgumentError("DensityMethod: $(nameof(typeof(opt))) needs a metric: DensityMethod(opt; metric = LumpedMass(dΩ)) or Euclidean()"))
 
+# an object of the user is checked when the weights are asked for (its metric_weights may restrict the type of z)
+_valid_metric(m) = !(m isa Union{Nothing,Symbol,AbstractString,Number,Tuple,AbstractVector}) ||
+                   m isa AbstractVector{<:Real}
+
+"""
+    metric_weights(m, z) -> AbstractVector
+
+Weights of a diagonal metric of the user, one per entry of the variables `z` (or of the block, in a named tuple of
+metrics: then `z` is the space of that block). Called once, at the start of [`solve!`](@ref); they must be positive.
+"""
+function metric_weights end
+
 _block_metric(::Euclidean, V) = ones(num_free_dofs(V))
+_block_metric(m::AbstractVector{<:Real}, V) = _checked_weights(m, num_free_dofs(V))
+_block_metric(m, V) = _checked_weights(_weights(m, V), num_free_dofs(V))
+
+function _weights(m, z)
+  applicable(metric_weights, m, z) ||
+    throw(ArgumentError("DensityMethod: no method metric_weights(::$(typeof(m)), ::$(typeof(z))) for the metric"))
+  metric_weights(m, z)
+end
+
+function _checked_weights(w, n)
+  length(w) == n || throw(ArgumentError("DensityMethod: the metric has $(length(w)) weights; $n are needed"))
+  all(x -> isfinite(x) && x > 0, w) || throw(ArgumentError("DensityMethod: the weights of the metric must be positive and finite"))
+  collect(Float64, w)
+end
 _block_metric(m::LumpedMass, V) = collect(assemble_vector(v -> ∫(v)m.measure, V))
 
 _metric_vector(::Euclidean, z::OptVariables) = nothing
 _metric_vector(m::LumpedMass, z::OptVariables) = reduce(vcat, [_block_metric(m, b.space) for b in z.blocks])
+_metric_vector(m::AbstractVector{<:Real}, z::OptVariables) = _checked_weights(m, length(z))
+_metric_vector(m, z::OptVariables) = _checked_weights(_weights(m, z), length(z))
 function _metric_vector(m::NamedTuple, z::OptVariables)
   Set(keys(m)) == Set(z.names) ||
     throw(ArgumentError("DensityMethod: the metric has blocks $(join(keys(m), ", ")); z has $(join(z.names, ", "))"))

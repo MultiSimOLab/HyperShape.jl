@@ -517,11 +517,72 @@ end
     @test HyperShape.Variables.is_linear_field(θv, :ρ)
   end
 
+  @testset "PointwiseMap and Parameter" begin
+    prm = Parameter(4.0)
+    @test prm[] == 4.0 && state_version(prm) == 0
+    prm[] = 4.0
+    @test state_version(prm) == 0                   # same value: no change
+    prm[] = 5.0
+    @test prm[] == 5.0 && state_version(prm) == 1
+    @test_throws ArgumentError Parameter(NaN)
+    @test_throws ArgumentError (prm[] = Inf)
+    @test_throws ArgumentError PointwiseMap(identity, one; parameters = (1.0,))
+    prm[] = 4.0
+    # the tanh projection written by the user equals TanhProjection (values and gradients), also after a change
+    η = 0.5
+    f(ρ) = (tanh(prm[] * η) + tanh(prm[] * (ρ - η))) / (tanh(prm[] * η) + tanh(prm[] * (1 - η)))
+    df(ρ) = prm[] * (1 - tanh(prm[] * (ρ - η))^2) / (tanh(prm[] * η) + tanh(prm[] * (1 - η)))
+    H = TanhProjection(β = 4.0, η = η)
+    dΩ = p.dΩ
+    c = CellField(cfun, p.Ω)
+    for (name, V, ρ) in (("P0", p.V0, ρ0), ("P1", p.V1, ρ1))
+      zp, xp, θp = single_field_design(:ρ, V; bounds = (0.0, 1.0), init = ρ,
+                                       map = PointwiseMap(f, df; parameters = (prm,)) ∘ HelmholtzFilter(p.Sf, p.dΩ))
+      zh, xh, θh = single_field_design(:ρ, V; bounds = (0.0, 1.0), init = ρ, map = H ∘ HelmholtzFilter(p.Sf, p.dΩ))
+      for β in (4.0, 9.0)
+        prm[] = β
+        set_beta!(H, β)
+        update_fields!(θp, nothing); update_fields!(θh, nothing)
+        @test sum(∫(c * θp.ρ)dΩ) ≈ sum(∫(c * θh.ρ)dΩ) rtol = 1e-12
+        gp = design_gradient!(zeros(length(zp)), θp, (ρ = δ -> ∫(c * δ)dΩ,), nothing)
+        gh = design_gradient!(zeros(length(zh)), θh, (ρ = δ -> ∫(c * δ)dΩ,), nothing)
+        @test maximum(abs, gp .- gh) < 1e-12 * maximum(abs, gh)
+      end
+      v = state_version(θp)
+      prm[] = 2.0
+      update_fields!(θp, nothing)
+      @test state_version(θp) == v + 1               # a parameter of the map counts as a change
+      prm[] = 4.0
+      J() = (update_fields!(θp, nothing); sum(∫(c * θp.ρ * θp.ρ)dΩ))
+      g = design_gradient!(zeros(length(zp)), θp, (ρ = δ -> ∫(2 * c * θp.ρ * δ)dΩ,), nothing)
+      @test all(r -> 1.9 < r < 2.1, taylor_rates(J, g, zp, [sin(0.7i) for i in 1:length(zp)]))
+    end
+    @test !HyperShape.Variables.is_linear_field(PhysicalFields(DesignFields(OptVariables(ρ = FieldVariable(p.V0;
+            bounds = (0.0, 1.0), init = 0.5)); ρ = Identity()); ρ = PointwiseMap(f, df)), :ρ)
+    @test occursin("PointwiseMap", sprint(show, PointwiseMap(f, df)))
+    @test PointwiseMap(f, df; parameters = prm).parameters === (prm,)        # a single parameter
+    # a Parameter read by the form of a filter, declared as a dependency of its operator: a change re-solves it
+    r = Parameter(0.1)
+    dΩ = p.dΩ
+    afr(u, v) = ∫(r[]^2 * ∇(u) ⋅ ∇(v) + u * v)dΩ
+    Sr = LinearOperator(StaticLinearModel(afr, p.Uf, p.Vf, NothingBC(); ls = LUSolver()), (r,))
+    zr, xr, θr = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0, map = HelmholtzFilter(Sr, p.dΩ))
+    xh = FEFunction(p.V0, ρ0)
+    for rv in (0.1, 0.3)
+      r[] = rv
+      v0 = state_version(θr)
+      update_fields!(θr, nothing)
+      rv == 0.3 && @test state_version(θr) == v0 + 1
+      ref = solve(LUSolver(), AffineFEOperator((u, v) -> ∫(rv^2 * ∇(u) ⋅ ∇(v) + u * v)dΩ, v -> ∫(xh * v)dΩ, p.Uf, p.Vf))
+      @test maximum(abs, get_free_dof_values(θr.ρ) .- get_free_dof_values(ref)) < 1e-12
+    end
+  end
+
   @testset "Exported names do not clash with Gridap and HyperFEM" begin
     M = Module()
     Core.eval(M, :(using Gridap, HyperFEM, HyperShape))
     for name in (:FieldVariable, :OptVariables, :DesignFields, :PhysicalFields, :Identity, :HelmholtzFilter,
-                 :TanhProjection, :CellMean, :single_field_design, :LinearOperator)
+                 :TanhProjection, :CellMean, :PointwiseMap, :Parameter, :single_field_design, :LinearOperator)
       @test Core.eval(M, name) === getfield(HyperShape, name)
     end
   end

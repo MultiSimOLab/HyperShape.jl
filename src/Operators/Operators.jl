@@ -17,7 +17,7 @@ using HyperFEM: HyperFEM
 using Gridap.FESpaces: get_dirichlet_dof_values
 using Gridap.MultiField: MultiFieldFESpace
 
-export LinearOperator, StateOperator, AdjointOperator, is_converged, OptContext
+export LinearOperator, StateOperator, AdjointOperator, is_converged, OptContext, Parameter
 
 """
     OptContext(phase::Symbol = :setup)
@@ -133,6 +133,39 @@ Brings a dependency up to date before its version is compared: physical fields a
 solved. Nothing for other objects.
 """
 refresh!(obj, ctx) = obj
+
+"""
+    Parameter(value)
+
+A number of the user that may change during the optimisation: the penalty of a material interpolation, a load
+factor, a weight. `p[]` reads it and `p[] = v` changes it (its [`state_version`](@ref) grows only if the value
+changes). Read it inside the weak forms (`E(ρ) = Emin + ρ^p[] * (1 - Emin)`) and give it as a dependency of the
+operators whose models read it (`StateOperator(model, (θ, p))`), so they solve again when it changes; inside a map,
+give it in the `parameters` of a `PointwiseMap`. Continue it in stages with `Continuation(p = p => [1, 2, 3]; every)`.
+A functional that reads it directly (not through a state or θ) lists it in its `parameters`. A parameter read by a
+model but not declared as a dependency is not detected by `check_consistency`: after it changes, the operator would
+keep its old solution.
+"""
+mutable struct Parameter
+  value::Float64
+  version::Int
+  function Parameter(v::Real)
+    isfinite(v) || throw(ArgumentError("Parameter: the value must be finite"))
+    new(Float64(v), 0)
+  end
+end
+
+Base.getindex(p::Parameter) = p.value
+function Base.setindex!(p::Parameter, v::Real)
+  isfinite(v) || throw(ArgumentError("Parameter: the value must be finite"))
+  if v != p.value
+    p.value = Float64(v)
+    p.version += 1
+  end
+  p
+end
+state_version(p::Parameter) = p.version
+Base.show(io::IO, p::Parameter) = print(io, "Parameter(", p.value, ")")
 
 """
     LinearOperator(model[, deps]; depends = (), solve = default_solve(LinearOperator, model))

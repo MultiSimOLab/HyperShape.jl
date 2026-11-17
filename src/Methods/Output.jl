@@ -46,6 +46,7 @@ _rule(p::_Printer) = _styled(p, "  " * "─"^(textwidth(_header(p, ntuple(_ -> "
 
 function _describe_stop(stop)
   stop === nothing && return "maxiter only"
+  stop isa StopCriteria || return "function of the user"
   parts = String[]
   stop.objective_range !== nothing &&
     push!(parts, "relative objective range < $(stop.objective_range) over $(stop.window) iterations")
@@ -57,8 +58,9 @@ function _describe_stop(stop)
   isempty(parts) ? "maxiter only" : join(parts, " or ")
 end
 
-_active(stop) = any(x -> x !== nothing, (stop.objective_range, stop.kkt_tol, stop.kkt_rtol, stop.stationarity_tol,
+_active(stop::StopCriteria) = any(x -> x !== nothing, (stop.objective_range, stop.kkt_tol, stop.kkt_rtol, stop.stationarity_tol,
                                          stop.stationarity_rtol, stop.change_tol))
+_active(stop) = true                     # a function of the user
 _stage_rule(stop, schedule) = (stop === nothing || schedule === nothing || !_active(stop)) ? "" :
                               schedule.close_early ? " · every stage (close_early)" : " · last stage only"
 
@@ -69,6 +71,8 @@ _g_or_e(x) = isfinite(x) ? @sprintf("%.0e", x) : "—"
 _metric_label(method) = _metric_name(method.metric) * (method.default_metric ? " (default)" : "") *
                         (method.optimizer isa OC ? " (OC: only for the stationarity measure)" : "")
 _metric_name(m::LumpedMass) = "lumped mass"
+_metric_name(m::AbstractVector) = "weights of the user"
+_metric_name(m) = string(nameof(typeof(m)))
 _metric_name(m::NamedTuple) = join(("$k: $(_metric_name(v))" for (k, v) in pairs(m)), ", ")
 
 function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, defaults, schedule, resume)

@@ -69,8 +69,9 @@ consistent. The functionals must share the same optimisation variables `z`. Four
    after forcing every state and filter reached through the declared dependencies to assemble and solve again. A
    difference means that one of those operators depends on something it does not declare (for example a filter
    matrix that reads the design with `depends = ()`, or a state listed in `depends` that under-declares its own
-   dependencies). An object that no declared dependency leads to cannot be checked: its stale values go unnoticed
-   when `DJform` treats it as fixed too.
+   dependencies). The check only changes the design: a `Parameter` read by a model but not declared is not detected
+   (it does not change while the check runs). An object that no declared dependency leads to cannot be checked: its
+   stale values go unnoticed when `DJform` treats it as fixed too.
 
 Optionally, `tangents = (S => (res, jac), …)` adds a Taylor test of the tangent `jac(u, du, v)` against the residual
 `res(u, v)` of the state `S` at its current solution, in a random direction of its free values (the user's forms in

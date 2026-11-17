@@ -18,8 +18,8 @@ using ..Variables: PhysicalFields, DesignFields, Identity, update_fields!, desig
 export Functional, Volume, functional_value, functional_gradient!
 
 """
-    Functional(J, S::StateOperator; derivative, adjoint, scale, fields = nothing)
-    Functional(J, θ::PhysicalFields; derivative, scale)
+    Functional(J, S::StateOperator; derivative, adjoint, scale, fields = nothing, parameters = ())
+    Functional(J, θ::PhysicalFields; derivative, scale, linear = false, parameters = ())
 
 Objective or constraint.
 
@@ -43,13 +43,19 @@ Design only (second form, volume, perimeter): `J(θ)` and `derivative(θ)`.
 `scale` is mandatory: a positive number, `:initial` (the absolute value of the first finite evaluation; an error if
 it is zero) or `1.0` for no scaling. The value and the derivative are divided by it.
 
-The value is kept until θ or a state changes; the gradient is assembled at every call (one adjoint solve only when
+`parameters`: [`Parameter`](@ref HyperShape.Operators.Parameter)s (or other objects with a `state_version`) that `J`
+reads directly, not through θ or a state (a weight that is continued, for example): the value is computed again
+when they change. A parameter read by a model goes in the dependencies of its operator instead; one read by a map,
+in the `parameters` of the `PointwiseMap`. `linear` (design-only form) declares a functional affine in z, checked
+when it is used as a constraint.
+
+The value is kept until θ, a state or a parameter changes; the gradient is assembled at every call (one adjoint solve only when
 the design changed, one transposed filter solve per filter and one assembly per call).
 
 If a state does not converge, [`functional_value`](@ref) returns `NaN` and [`functional_gradient!`](@ref) fills the
 gradient with `NaN` (the optimisers treat it as a failed trial).
 """
-struct Functional{FJ,FD,S,A,T<:PhysicalFields}
+struct Functional{FJ,FD,S,A,T<:PhysicalFields,P<:Tuple}
   J::FJ
   DJ::FD
   S::S
@@ -57,8 +63,18 @@ struct Functional{FJ,FD,S,A,T<:PhysicalFields}
   θ::T
   scale_mode::Symbol            # :fixed or :initial
   scale::Base.RefValue{Float64} # NaN while :initial is not set
-  cache::Vector{Float64}        # [version of θ, version of S, raw value] of the last evaluation
+  cache::Vector{Float64}        # [version of θ, version of S, version of the parameters, raw value] of the last evaluation
   linear::Bool                  # design-only and affine in z (declared; checked when used as a constraint)
+  parameters::P
+end
+
+function _parameters(ps)
+  t = ps isa Union{Tuple,AbstractVector} ? Tuple(ps) : (ps,)
+  for q in t
+    applicable(state_version, q) ||
+      throw(ArgumentError("Functional: a parameter must implement state_version (a Parameter); got $(typeof(q))"))
+  end
+  t
 end
 
 Base.show(io::IO, F::Functional) =
@@ -92,7 +108,7 @@ end
 
 struct _NoAdjoint end
 
-function Functional(J, S::StateOperator; derivative, adjoint = _NoAdjoint(), scale, fields = nothing)
+function Functional(J, S::StateOperator; derivative, adjoint = _NoAdjoint(), scale, fields = nothing, parameters = ())
   adjoint isa _NoAdjoint && throw(ArgumentError(
     "Functional: adjoint is mandatory: adjoint = AdjointOperator(S, model), or adjoint = :self for a self-adjoint functional"))
   mode, value = _scale(scale)
@@ -109,12 +125,12 @@ function Functional(J, S::StateOperator; derivative, adjoint = _NoAdjoint(), sca
   else
     throw(ArgumentError("Functional: adjoint must be a StateOperator (AdjointOperator(S, model)) or :self, got $(repr(adjoint))"))
   end
-  Functional(J, derivative, S, A, θ, mode, Ref(value), [-1.0, -1.0, NaN], false)
+  Functional(J, derivative, S, A, θ, mode, Ref(value), [-1.0, -1.0, -1.0, NaN], false, _parameters(parameters))
 end
 
-function Functional(J, θ::PhysicalFields; derivative, scale, linear::Bool = false)
+function Functional(J, θ::PhysicalFields; derivative, scale, linear::Bool = false, parameters = ())
   mode, value = _scale(scale)
-  Functional(J, derivative, nothing, nothing, θ, mode, Ref(value), [-1.0, -1.0, NaN], linear)
+  Functional(J, derivative, nothing, nothing, θ, mode, Ref(value), [-1.0, -1.0, -1.0, NaN], linear, _parameters(parameters))
 end
 
 """
@@ -151,6 +167,7 @@ _total(v::Real) = Float64(v)
 _total(v) = Float64(sum(v))
 
 _state_version(F::Functional{FJ,FD,Nothing}) where {FJ,FD} = 0
+_parameter_version(F::Functional) = sum(state_version, F.parameters; init = 0)
 _state_version(F::Functional) = state_version(F.S)
 
 _compute_value(F::Functional{FJ,FD,Nothing}, ctx) where {FJ,FD} = _total(F.J(F.θ))
@@ -164,10 +181,10 @@ function _raw_value(F::Functional, ctx)::Float64
   update_fields!(F.θ, ctx)
   F.S === nothing || apply!(F.S, ctx)
   c = F.cache
-  vθ, vS = Float64(state_version(F.θ)), Float64(_state_version(F))
-  (c[1] == vθ && c[2] == vS) && return c[3]
+  vθ, vS, vP = Float64(state_version(F.θ)), Float64(_state_version(F)), Float64(_parameter_version(F))
+  (c[1] == vθ && c[2] == vS && c[3] == vP) && return c[4]
   v = _compute_value(F, ctx)
-  c[1], c[2], c[3] = vθ, vS, v
+  c[1], c[2], c[3], c[4] = vθ, vS, vP, v
   v
 end
 
