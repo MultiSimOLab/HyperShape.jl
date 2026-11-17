@@ -52,16 +52,19 @@ P0 control, body force (0, −1) in the disc of radius 0.05 at (0, 1), roller on
 | P1, `SiMPL()`, `StopCriteria(kkt = 1e-5)` | 1.2132e-3 | +0.45 % | 32 | 43.4 s |
 | P0, `OC()`, default stop (vs OC of the paper) | 1.2113e-3 | −0.99 % | 102 | 124.6 s |
 
-- **Filter radius: an open discrepancy.** The paper states rmin = 0.02, and so does the MBB2 problem at the commit
-  given in the paper to reproduce its results (dohyun-cse/mfem 022954b), whose filter is the same as here
-  (ε² = rmin²/12, P0 control, P1 filter and state, plane strain, roller on x > 3 − 1/32). With rmin = 0.02 HyperShape
-  gives 1.0605e-3 (−12 %); the values above use rmin = 0.05, the default of MBB2 at a later commit (28e17f2). The
-  cause of the difference has not been found, so the agreement at 0.05 may be a coincidence (decision of Jesús,
-  2026-11-17: keep 0.05 and record the discrepancy).
-- **Stopping.** The paper stops at its L2 stationarity measure Sₖ ≤ 1e-5; HyperShape's `kkt` is a different measure,
-  so the iteration counts are not comparable one to one. The agreement depends on where the run stops: with
-  `kkt = 1e-7` the compliance after 300 iterations is 1.1951e-3 (−1.05 %), and the OC value of the paper is taken at
-  300 iterations without convergence. The −12 % and −1.05 % values come from exploratory runs, not from the scripts.
+- **Filter radius and sensitivity of the reference.** Table 1 of the paper was computed with rmin = 0.05: the
+  `run_local.sh` of dohyun-cse/mfem 28e17f2 (2024-11-25, before the paper) holds the command of table 1 without
+  `-fr`, and 0.05 was the default of MBB2 until commit c5b9f24 (2025-02-14), which changed it to 0.02. The commit
+  given in the paper (022954b) only runs the mesh study of table 2, with 0.02; with 0.02 HyperShape gives 1.0605e-3
+  here. Besides, the sensitivity of the authors' code halves the shear term (`topopt.cpp`: `M = mu*0.5`, then
+  `2.0*M*grad:adjgrad`), so it is not the exact derivative of their stiffness. Replicating both (rmin = 0.05 and their
+  sensitivity), HyperShape reproduces their iterates to eight digits and the value of table 1, 1.2078e-3 in 49
+  iterations; with the exact derivative it reaches 1.1960e-3 (−0.97 %). These replica runs are added with the
+  stationarity criterion of the paper in the next PR.
+- **Stopping.** The paper stops at its L2 stationarity measure Sₖ ≤ 1e-5; HyperShape's `kkt` is about ten times smaller
+  here, so the runs above stop earlier (33 iterations), which is why they land at +0.16 %. With `kkt = 1e-7` the
+  compliance after 300 iterations is 1.1951e-3, and the OC value of the paper is taken at 300 iterations without
+  convergence. The 1.0605e-3, 1.1960e-3 and 1.1951e-3 values come from exploratory runs, not from the scripts.
 
 ## 3D cantilever
 

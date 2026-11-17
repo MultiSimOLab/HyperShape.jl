@@ -1,7 +1,7 @@
 # MBB beam against SiMPL (Kim, Lazarov, Surowiec, Keith, arXiv:2411.19421v3, table 1: SiMPL-A 1.2078e-3, OC
 # 1.2234e-3): 768×256 on (0, 3)×(0, 1), plane strain, volume 0.3, p = 3, Emin = 1e-6, stop at the stationarity measure
-# 1e-5. rmin = 0.05, the default of MBB2 at dohyun-cse/mfem@28e17f2; the paper and its reproduction commit (022954b)
-# use 0.02, which gives −12 % here (open discrepancy, see the Validation page of the docs).
+# 1e-5. rmin = 0.05, the value used for table 1 (default of MBB2 at dohyun-cse/mfem@28e17f2, the commit with the command
+# of table 1); the authors' sensitivity halves the shear term, see the Validation page of the docs.
 # Run: julia --project=validation -t 4 validation/mbb_simpl.jl
 include(joinpath(@__DIR__, "cases.jl"))
 println("Julia $(VERSION), threads $(Threads.nthreads()), $(Sys.cpu_info()[1].model)\n")
