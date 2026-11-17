@@ -23,5 +23,6 @@ using Test
     include("Checks/runtests.jl")
     include("Methods/runtests.jl")
     include("PostProcess/runtests.jl")
+    include("Validation/runtests.jl")
 
 end

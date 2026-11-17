@@ -51,6 +51,10 @@ z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = 0.5,
   under a millisecond.
 - Bounds, initial values and maps are mandatory; write `Identity()` when there is no transformation.
 - Only HyperShape writes `x` and `θ`; the user reads them as Gridap fields.
+- The filtered density is a P1 field and `θ` is evaluated at the quadrature points, so the stiffness varies inside an
+  element. Codes such as top88 use one value per element, the cell mean of the filtered field; composing an L2
+  projection onto P0 after the filter gives that formulation (see the [Validation](validation.md) page; a named map,
+  `CellMean`, is planned).
 
 Planned: global parameters as blocks (applied voltage, fibre angle), frozen regions and scaling in the map `z → x`,
 physical fields that depend on several design fields, material interpolation in the map `x → θ`.
