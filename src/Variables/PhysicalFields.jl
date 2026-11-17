@@ -187,7 +187,7 @@ end
     is_linear_field(θ::PhysicalFields, name) -> Bool
 
 Whether the physical field `name` depends linearly on its design field: every map of its chain is linear
-([`Identity`](@ref), [`HelmholtzFilter`](@ref)); a [`Heaviside`](@ref) projection is not.
+([`Identity`](@ref), [`HelmholtzFilter`](@ref), [`CellMean`](@ref)); a [`Heaviside`](@ref) projection is not.
 """
 function is_linear_field(θ::PhysicalFields, name::Symbol)
   j = findfirst(==(name), getfield(θ, :names))

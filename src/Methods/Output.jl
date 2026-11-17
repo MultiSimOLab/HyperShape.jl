@@ -47,11 +47,14 @@ function _describe_stop(stop)
   stop.objective !== nothing && push!(parts, "relative objective range < $(stop.objective) over $(stop.window) iterations")
   stop.kkt !== nothing && push!(parts, "kkt < $(stop.kkt)")
   stop.kkt_rel !== nothing && push!(parts, "kkt/kkt₁ < $(stop.kkt_rel)")
+  stop.stationarity !== nothing && push!(parts, "S < $(stop.stationarity)")
+  stop.stationarity_rel !== nothing && push!(parts, "S/S₁ < $(stop.stationarity_rel)")
   stop.change !== nothing && push!(parts, "change < $(stop.change)")
   isempty(parts) ? "maxiter only" : join(parts, " or ")
 end
 
-_active(stop) = any(x -> x !== nothing, (stop.objective, stop.kkt, stop.kkt_rel, stop.change))
+_active(stop) = any(x -> x !== nothing, (stop.objective, stop.kkt, stop.kkt_rel, stop.stationarity, stop.stationarity_rel,
+                                         stop.change))
 _stage_rule(stop, schedule) = (stop === nothing || schedule === nothing || !_active(stop)) ? "" :
                               schedule.close_early ? " · every stage (close_early)" : " · last stage only"
 
@@ -143,6 +146,8 @@ end
 
 const _STOP_TEXT = Dict(:change => "change of z below the tolerance", :kkt => "optimality measure below the tolerance",
                         :kkt_rel => "optimality measure below the tolerance relative to the first iteration",
+                        :stationarity => "stationarity measure below the tolerance",
+                        :stationarity_rel => "stationarity measure below the tolerance relative to the first iteration",
                         :objective => "relative range of the objective below the tolerance over the window")
 
 function _print_end(p::_Printer, status, reason, k, f, grey = NaN)

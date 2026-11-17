@@ -53,7 +53,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
                                       SIMP(OC(); metric = Euclidean()); maxiter = 2, verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     @test get_values(q3.z) == fill(0.3, length(q3.z))     # z restored after the probes
     # the filtered, unprojected volume is linear and has the same vector (Neumann filter)
-    θf = PhysicalFields(q.x; ρ = HelmholtzFilter(q.Sf; measure = q.dΩ))
+    θf = PhysicalFields(q.x; ρ = HelmholtzFilter(q.Sf, q.dΩ))
     Vf = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4 * sum(m), θf; derivative = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4 * sum(m), linear = true)
     of = FunctionalOracle(Optimization(q.z; objective = q.C, constraints = Vf), Euclidean())
     _setup_constraint!(of, Vf, q.problem.ctx)
@@ -220,6 +220,24 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     r = solve!(q.problem, SIMP(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 200, stop = StopCriteria(objective = 1e-4, window = 3),
                verbose = 0, on_failure = RejectStep(shrink = 0.5, max = 3))
     @test r.status === :converged && r.reason === :objective && r.iterations < 200
+    # stationarity measure: recorded by SiMPL and OC, absolute and relative criteria
+    for opt in (SiMPL(), OC())
+      q = compliance_problem()
+      r = solve!(q.problem, SIMP(opt; metric = LumpedMass(q.dΩ)); maxiter = 8, stop = nothing, verbose = 0,
+                 on_failure = RejectStep(shrink = 0.5, max = 3))
+      S = r.history.stationarity
+      @test length(S) == r.iterations && all(isfinite, S) && all(>(0), S)
+      q = compliance_problem()
+      r2 = solve!(q.problem, SIMP(opt; metric = LumpedMass(q.dΩ)); maxiter = 50, verbose = 0,
+                  stop = StopCriteria(stationarity = 2 * minimum(S)), on_failure = RejectStep(shrink = 0.5, max = 3))
+      @test r2.status === :converged && r2.reason === :stationarity && r2.iterations <= 8
+      q = compliance_problem()
+      r3 = solve!(q.problem, SIMP(opt; metric = LumpedMass(q.dΩ)); maxiter = 50, verbose = 0,
+                  stop = StopCriteria(stationarity_rel = 2 * minimum(S) / S[1]), on_failure = RejectStep(shrink = 0.5, max = 3))
+      @test r3.status === :converged && r3.reason === :stationarity_rel && r3.iterations <= 8
+    end
+    @test_throws ArgumentError StopCriteria(stationarity = -1.0)
+    @test_throws ArgumentError StopCriteria(stationarity_rel = -1.0)
   end
 
   @testset "Checkpoint and resume" begin
@@ -348,7 +366,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test all(isnan, r.history.multiplier) && r.start_scaling === nothing
     h = OptHistory(10, (:β,))
     buf = [1.0]
-    row = (1, 1.0, 0.0, NaN, 0.1, 0.2, 1, 1, 0, 2, 0.5, NaN)
+    row = (1, 1.0, 0.0, NaN, 0.1, 0.2, 1, 1, 0, 2, 0.5, NaN, NaN)
     _record!(h, row, buf)
     @test (@allocated _record!(h, row, buf)) == 0
     st = StopCriteria(change = 1e-3, objective = 1e-3, window = 2)
@@ -452,14 +470,18 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
                 on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     ck = load_checkpoint(dir)
     @test ck.history.multiplier == rb.history.multiplier
+    @test ck.history.stationarity == rb.history.stationarity && all(isfinite, ck.history.stationarity)
     hfile = joinpath(dir, "history_2.csv")
     lines = split.(readlines(hfile), ",")
+    js = findfirst(==("stationarity"), lines[1])
+    lines = [deleteat!(copy(l), js) for l in lines]                     # format 4: no stationarity column
     j = findfirst(==("multiplier"), lines[1])
     write(hfile, join((join(deleteat!(copy(l), j), ",") for l in lines), "\n") * "\n")
     tfile = joinpath(dir, "checkpoint.toml")
-    write(tfile, replace(read(tfile, String), "format = 4" => "format = 1"))
+    write(tfile, replace(read(tfile, String), "format = 5" => "format = 1"))
     ck1 = load_checkpoint(dir)
     @test all(isnan, ck1.history.multiplier) && ck1.history.objective == ck.history.objective
+    @test all(isnan, ck1.history.stationarity)
     r1 = solve!(compliance_problem().problem, SIMP(OC(); metric = Euclidean()); maxiter = 4, verbose = 0, resume = ck1,
                 on_failure = RejectStep(shrink = 0.5, max = 3), stop = nothing)
     @test r1.iterations == 4 && isnan(r1.history.multiplier[1]) && r1.history.multiplier[4] > 0
@@ -473,7 +495,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test t ≈ 0.4 / 0.6 && all(==(0.6), zk[1:5]) && dot(a, zk) ≈ 0.4 * sum(a)
     # printing at level 0 allocates nothing
     h = OptHistory(4, (:β,))
-    _record!(h, (1, 1.0, 0.0, NaN, 0.1, 0.2, 1, 1, 0, 2, 0.5, NaN), [1.0])
+    _record!(h, (1, 1.0, 0.0, NaN, 0.1, 0.2, 1, 1, 0, 2, 0.5, NaN, NaN), [1.0])
     p0 = HyperShape.Methods._Printer(IOBuffer(), 0, nothing)
     HyperShape.Methods._print_row(p0, h); HyperShape.Methods._print_event(p0, "x", :red)
     @test (@allocated HyperShape.Methods._print_row(p0, h)) == 0
@@ -550,7 +572,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
 
   @testset "Stopping: range of the objective, kkt_rel, the grey monitor" begin
     h = OptHistory(30, ())
-    rec!(f; kkt = NaN) = _record!(h, (h.n + 1, f, NaN, kkt, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN), ())
+    rec!(f; kkt = NaN) = _record!(h, (h.n + 1, f, NaN, kkt, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN, NaN), ())
     info(kkt = NaN) = HyperShape.Optimizers.StepInfo(true, 1.0, 1.0, kkt, 0.1, 0.1, 0.0, 1, NaN)
     st = StopCriteria(objective = 1e-3, window = 4)
     for f in (1.0, 1.01, 1.0, 1.01, 1.0)          # an oscillation: the ends of the window agree, the range does not
@@ -565,19 +587,19 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     # an objective tending to zero: floor 1e-3 |f₁|; a negative objective
     h0 = OptHistory(10, ())
     for f in (1.0, 1e-6, 0.8e-6, 0.6e-6, 0.5e-6)
-      _record!(h0, (h0.n + 1, f, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN), ())
+      _record!(h0, (h0.n + 1, f, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN, NaN), ())
     end
     @test _stop_reason(StopCriteria(objective = 1e-3, window = 4), info(), h0, 0) === :objective
     hn = OptHistory(10, ())
     for f in (-1.0, -2.0, -2.0005, -2.0004)
-      _record!(hn, (hn.n + 1, f, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN), ())
+      _record!(hn, (hn.n + 1, f, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN, NaN), ())
     end
     @test _stop_reason(StopCriteria(objective = 1e-3, window = 3), info(), hn, 0) === :objective
     @test _stop_reason(StopCriteria(objective = 1e-3, window = 4), info(), hn, 0) === nothing
     # kkt relative to the first iteration
     hk = OptHistory(10, ())
-    _record!(hk, (1, 1.0, NaN, 10.0, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN), ())
-    _record!(hk, (2, 1.0, NaN, 0.05, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN), ())
+    _record!(hk, (1, 1.0, NaN, 10.0, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN, NaN), ())
+    _record!(hk, (2, 1.0, NaN, 0.05, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN, NaN), ())
     @test _stop_reason(StopCriteria(kkt_rel = 1e-2), info(0.05), hk, 0) === :kkt_rel
     @test _stop_reason(StopCriteria(kkt_rel = 1e-2), info(0.05), hk, 1) === nothing   # first iteration of a stage
     @test _stop_reason(StopCriteria(kkt_rel = 1e-3), info(0.05), hk, 0) === nothing

@@ -500,4 +500,42 @@ end
     @test info.accepted && all(>(0.49), z[n÷2+1:end]) && gh(z) <= 1e-4   # +move limit, 0.2 (ub - lb)
   end
 
+
+  @testset "Stationarity measure" begin
+    n = 40
+    t = [1.5 * sin(0.37i)^2 - 0.2 for i in 1:n]
+    c = [0.05 + abs(cos(0.61i)) for i in 1:n]
+    a = ones(n)
+    # quadratic: g = z - t (identity metric); at the solution S = 0, elsewhere S = ‖z − P(z − g)‖ with P computed here
+    V = 0.3n
+    o = FunctionOracle(z -> sum(abs2, z .- t) / 2, (dF, z) -> (dF .= z .- t); constraint = (a, V))
+    exact = quadratic_solution(t, a, V)
+    w = zeros(n)
+    @test stationarity!(w, o, exact, exact .- t, a, a, V) < 1e-10
+    z = fill(0.3, n)
+    y = z .- (z .- t)                                        # = t
+    @test stationarity!(w, o, z, z .- t, a, a, V) ≈ norm(z .- quadratic_solution(y, a, V)) rtol = 1e-9
+    # without constraint: plain clamp; with an inactive constraint the same
+    @test stationarity!(w, o, z, z .- t, nothing, nothing, NaN) ≈ norm(z .- clamp.(t, 0, 1)) rtol = 1e-12
+    @test stationarity!(w, o, z, z .- t, a, a, 10n) ≈ norm(z .- clamp.(t, 0, 1)) rtol = 1e-12
+    # diagonal metric: the norm is ‖⋅‖_M and g = M⁻¹∂F
+    m = [0.5 + 0.01i for i in 1:n]
+    om = FunctionOracle(z -> 0.0, (dF, z) -> dF; metric = m)
+    g = 0.1 .* ones(n)
+    @test stationarity!(w, om, z, g, nothing, nothing, NaN) ≈ sqrt(sum(m .* (z .- clamp.(z .- g, 0, 1)) .^ 2)) rtol = 1e-12
+    # computed by SiMPL and OC; it goes to zero at convergence
+    for opt in (SiMPL(), OC(bisection_tol = 1e-12))
+      oz = FunctionOracle(z -> sum(c ./ z), (dF, z) -> (dF .= .-c ./ z .^ 2); lb = 1e-3, constraint = (a, 0.4n))
+      zz = fill(0.4, n)
+      st = init(opt, zz, oz)
+      s1 = step!(opt, st, zz, oz, nothing).stationarity
+      local info
+      for _ in 1:300
+        info = step!(opt, st, zz, oz, nothing)
+      end
+      @test isfinite(s1) && s1 > 0
+      @test info.stationarity < 1e-4 * s1
+    end
+  end
+
 end

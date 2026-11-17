@@ -25,19 +25,10 @@ function tag_faces!(model, name, pred)
 end
 
 # Helmholtz filter with radius rmin (r = rmin / (2√3), Lazarov and Sigmund 2011) and, with `cellmean`, the cell mean
-# of the filtered field (the xPhys of top88), written as a second "filter" with the P0 mass matrix: an L2 projection
-# onto P0. A named map for the cell mean is planned (CellMean, issue #4).
+# of the filtered field (the xPhys of top88)
 function density_chain(model, dΩ, rmin; cellmean = false)
-  Vf = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
-  r2 = (rmin / (2sqrt(3)))^2
-  Sf = LinearOperator(StaticLinearModel((u, v) -> ∫(r2 * ∇(u) ⋅ ∇(v) + u * v)dΩ, TrialFESpace(Vf), Vf, NothingBC(); ls = LUSolver()))
-  chain = HelmholtzFilter(Sf; measure = dΩ)
-  if cellmean
-    V0 = TestFESpace(model, ReferenceFE(lagrangian, Float64, 0); conformity = :L2)
-    S0 = LinearOperator(StaticLinearModel((u, v) -> ∫(u * v)dΩ, TrialFESpace(V0), V0, NothingBC(); ls = LUSolver()))
-    chain = HelmholtzFilter(S0; measure = dΩ) ∘ chain
-  end
-  chain
+  filter = HelmholtzFilter(dΩ; rmin, ls = LUSolver())
+  cellmean ? CellMean(dΩ) ∘ filter : filter
 end
 
 design_space(model, order) = order == 0 ? TestFESpace(model, ReferenceFE(lagrangian, Float64, 0); conformity = :L2) :
@@ -48,7 +39,7 @@ cell_means(θ, dΩ, vol) = collect(Gridap.get_array(∫(θ.ρ)dΩ)) ./ vol
 
 """
     mbb(; case, nx, ny, order = 0, opt = OC(), vf, rmin, Emin, maxiter = 2000, stop = :default, cellmean = false,
-        check = false, verbose = 0)
+        sensitivity = :exact, check = false, verbose = 0)
 
 Half MBB beam with SIMP (p = 3, ν = 0.3), Helmholtz filter, no projection, volume of the physical density.
 - `case = :top88`: (0, nx)×(0, ny), h = 1, plane stress, unit point load at the top-left node (the traction dual to the
@@ -56,11 +47,13 @@ Half MBB beam with SIMP (p = 3, ν = 0.3), Helmholtz filter, no projection, volu
   formulation is that of top88 with the PDE filter.
 - `case = :simpl`: (0, 3)×(0, 1), plane strain, body force (0, −1) in the disc of radius 0.05 at (0, 1), roller on the
   bottom edge for x > 3 − 1/32 (the MBB2 problem of the authors' code).
+`sensitivity = :authors` replaces the exact derivative of the compliance by the one of the SiMPL code
+(dohyun-cse/mfem, `topopt.cpp`), which halves the shear term: `λ tr(ε)² + μ ε:ε` instead of `λ tr(ε)² + 2μ ε:ε`.
 `stop = :default` uses the default criteria of `solve!`. With `check = true` returns the report of
 `check_consistency` instead of optimising.
 """
 function mbb(; case, nx, ny, order = 0, opt = OC(), vf, rmin, Emin, maxiter = 2000, stop = :default, cellmean = false,
-             check = false, verbose = 0)
+             sensitivity = :exact, check = false, verbose = 0)
   Lx, Ly = case === :top88 ? (Float64(nx), Float64(ny)) : (3.0, 1.0)
   h = Lx / nx
   model = CartesianDiscreteModel((0, Lx, 0, Ly), (nx, ny))
@@ -82,6 +75,8 @@ function mbb(; case, nx, ny, order = 0, opt = OC(), vf, rmin, Emin, maxiter = 20
   E(ρ) = Emin + ρ^3 * (1 - Emin)
   dE(ρ) = 3ρ^2 * (1 - Emin)
   σ(ε) = λ * tr(ε) * one(ε) + 2μ * ε
+  sensitivity in (:exact, :authors) || throw(ArgumentError("mbb: sensitivity must be :exact or :authors"))
+  σd = sensitivity === :exact ? σ : (ε -> λ * tr(ε) * one(ε) + μ * ε)     # :authors halves the shear term
   bc = BoundaryConditions(BoundaryCondition("sym", VectorValue(0.0, 0.0); mask = (true, false)),
                           BoundaryCondition("roller", VectorValue(0.0, 0.0); mask = (false, true)))
   V = TestFESpace(Ω, ReferenceFE(lagrangian, VectorValue{2,Float64}, 1), bc; conformity = :H1)
@@ -94,7 +89,7 @@ function mbb(; case, nx, ny, order = 0, opt = OC(), vf, rmin, Emin, maxiter = 20
   J = case === :top88 ? ((u, θ) -> ∫(tp ⋅ u)dΓ) : ((u, θ) -> ∫(fb ⋅ u)dΩ)
   S = StateOperator(StaticLinearModel(l, a, U, V, bc; ls = LUSolver(), backend = :compiled), θ)
   C = Functional(J, S; adjoint = :self, scale = 1.0,
-                 derivative = (u, w, θ) -> (δ -> ∫(-(dE ∘ θ.ρ) * (ε(w) ⊙ (σ ∘ ε(u))) * δ)dΩ))
+                 derivative = (u, w, θ) -> (δ -> ∫(-(dE ∘ θ.ρ) * (ε(w) ⊙ (σd ∘ ε(u))) * δ)dΩ))
   Vol = Volume(θ, dΩ; max_fraction = vf)
   check && return check_consistency(C, Vol)
   problem = Optimization(z; objective = C, constraints = Vol)

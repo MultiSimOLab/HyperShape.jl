@@ -253,6 +253,10 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
   end
   shift0 = s.shift
   violation_k = nonlinear ? max(0.0, gk) : _violation(c, s.z)
+  # stationarity measure at z (the projection uses the constraint linearised at z)
+  stat = nonlinear ? stationarity!(s.work, oracle, s.z, s.g, s.ga, s.a, Vlin) :
+         c === nothing ? stationarity!(s.work, oracle, s.z, s.g, s.ga, nothing, NaN) :
+                         stationarity!(s.work, oracle, s.z, s.g, s.ga, c[1], c[2])
 
   if s.retry
     guess = s.α_guess
@@ -294,7 +298,7 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
     @. s.work = s.z_trial - s.z
     change = maximum(abs, s.work)
     if change == 0   # nothing left to move at this precision
-      return StepInfo(true, f, f, kkt, 0.0, α, violation_k, nev, μ)
+      return StepInfo(true, f, f, kkt, 0.0, α, violation_k, nev, μ, stat)
     end
     decrease = dot(s.dF, s.work)
     f_new = objective(oracle, s.z_trial)
@@ -320,7 +324,7 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
   end
 
   # the forward state of the oracle is now at a rejected trial; f, dF and g at z remain valid
-  accepted || (s.shift = shift0; return StepInfo(false, f, f_new, kkt, 0.0, α, violation_k, nev, μ))
+  accepted || (s.shift = shift0; return StepInfo(false, f, f_new, kkt, 0.0, α, violation_k, nev, μ, stat))
 
   s.f_back, s.α_prev_back = f, s.α_prev
   s.ψ_prev, s.ψ, s.ψ_trial = s.ψ, s.ψ_trial, s.ψ_prev
@@ -335,7 +339,7 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
   s.retry = false
 
   copyto!(z, s.z)
-  StepInfo(true, f, f_new, kkt, change, α, nonlinear ? max(0.0, G) : _violation(c, s.z), nev, μ)
+  StepInfo(true, f, f_new, kkt, change, α, nonlinear ? max(0.0, G) : _violation(c, s.z), nev, μ, stat)
 end
 
 # Multiplier of the linearised constraint aᵀz ≤ Vlin - s for the step α, with the shift s corrected until the true

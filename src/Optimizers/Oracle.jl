@@ -157,3 +157,35 @@ riesz!(g, o::FunctionOracle{F,G,L,U,C,Nothing}, dF) where {F,G,L,U,C} = copyto!(
 riesz!(g, o::FunctionOracle, dF) = (g .= dF ./ o.metric)
 
 evaluations(o::FunctionOracle) = (o.nvalue, o.nderivative)
+
+"""
+    stationarity!(w, oracle, z, g, ga, a, V) -> S
+
+Stationarity measure of the paper of SiMPL (Kim, Lazarov, Surowiec, Keith, 2024): `S = ‖z − P(z − g)‖_M`, with
+`g = M⁻¹ ∂F/∂z` (see [`riesz!`](@ref)), `M` the metric of the oracle and `P` the projection, in that metric, onto the
+bounds and the constraint `aᵀz ≤ V` (`a = nothing`: bounds only; a nonlinear constraint is linearised at `z`). For a
+diagonal metric `P(y) = clamp(y − c M⁻¹a, lb, ub)` with the smallest `c ≥ 0` that meets the constraint, found by
+bisection; `ga = M⁻¹a`. `w` is a work vector. It is absolute: it depends on the scale of the objective and on the metric
+(with the Euclidean metric it depends on the mesh). Only broadcasting and reductions: no allocations.
+"""
+function stationarity!(w, oracle, z, g, ga, a, V)
+  lb, ub = bounds(oracle)
+  @. w = clamp(z - g, lb, ub)
+  if a !== nothing && isfinite(V) && dot(a, w) > V
+    φ(c) = (@. w = clamp(z - g - c * ga, lb, ub); dot(a, w) - V)
+    lo, hi = 0.0, 1.0
+    n = 0
+    while φ(hi) > 0 && n < 200
+      lo, hi = hi, 2hi
+      n += 1
+    end
+    for _ in 1:200
+      mid = (lo + hi) / 2
+      φ(mid) > 0 ? (lo = mid) : (hi = mid)
+      hi - lo <= 1e-15 * max(hi, 1e-300) && break
+    end
+    φ(hi)
+  end
+  @. w = w - z
+  sqrt(max(inner(oracle, w, w), 0.0))
+end

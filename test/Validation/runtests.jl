@@ -53,6 +53,17 @@ include(joinpath(@__DIR__, "..", "..", "validation", "cases.jl"))
     @test mbb(; case = :simpl, nx = 48, ny = 16, vf = 0.3, rmin = 0.1, Emin = 1e-6, check = true).passed
   end
 
+  @testset "SiMPL with the authors' sensitivity: first iterate of their code (192×64)" begin
+    # log SiMPL-B-MBB2-6-0.csv of dohyun-cse/mfem (rmin 0.05): S₀ 6.96277500e-2, step 1.25394956, F₁ 1.24728893e-2
+    r = mbb(; case = :simpl, nx = 192, ny = 64, vf = 0.3, rmin = 0.05, Emin = 1e-6, opt = SiMPL(), sensitivity = :authors,
+            maxiter = 1, stop = nothing)
+    h = r.result.history
+    @test h.stationarity[1] ≈ 6.962775e-2 rtol = 1e-6
+    @test h.step[1] ≈ 1.2539496 rtol = 1e-6
+    @test h.objective[1] ≈ 1.2472889e-2 rtol = 1e-6
+    @test_throws ArgumentError mbb(; case = :simpl, nx = 12, ny = 4, vf = 0.3, rmin = 0.1, Emin = 1e-6, sensitivity = :half)
+  end
+
   @testset "3D cantilever 8×4×4" begin
     r = cantilever3d(; n = (8, 4, 4), opt = SiMPL(), maxiter = 10, stop = nothing)
     h = r.result.history

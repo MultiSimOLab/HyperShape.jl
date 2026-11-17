@@ -45,6 +45,7 @@ end
 @publish Variables Identity
 @publish Variables HelmholtzFilter
 @publish Variables Heaviside
+@publish Variables CellMean
 @publish Variables single_field_design
 
 # @publish LinearSolvers solve

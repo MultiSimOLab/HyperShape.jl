@@ -11,7 +11,7 @@ Design variables at three linked levels:
 
 Each level is built from the previous one, and only HyperShape writes them (in place). The maps x → θ
 ([`HelmholtzFilter`](@ref), [`Heaviside`](@ref), [`Identity`](@ref)) are composed with `∘` in the mathematical
-order: `Heaviside(β = 1.0, η = 0.5) ∘ HelmholtzFilter(Sf; measure = dΩ)` filters first and projects after.
+order: `Heaviside(β = 1.0, η = 0.5) ∘ HelmholtzFilter(dΩ; rmin, ls)` filters first and projects after.
 
 Sensitivities travel backwards with [`design_gradient!`](@ref): a linear form in δθ for each physical field gives the
 derivative with respect to z.
@@ -28,13 +28,13 @@ using LinearAlgebra
 using Gridap
 using Gridap.FESpaces
 using Gridap.Algebra: residual!
-using HyperFEM: get_spaces
+using HyperFEM: get_spaces, StaticLinearModel, NothingBC
 using HyperFEMKernels: KernelOperator, update
 using ..Operators: LinearOperator, solve_linear!, OptContext
 import ..Operators: version, refresh!, invalidate!
 
 export FieldVariable, OptVariables, DesignFields, PhysicalFields
-export Identity, HelmholtzFilter, Heaviside
+export Identity, HelmholtzFilter, Heaviside, CellMean
 export single_field_design
 
 include("OptVariables.jl")
@@ -53,7 +53,7 @@ Shortcut for one design field and its physical fields with the same name:
 
 ```julia
 z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = 0.5,
-                              physical = Heaviside(β = 1.0, η = 0.5) ∘ HelmholtzFilter(Sf; measure = dΩ))
+                              physical = Heaviside(β = 1.0, η = 0.5) ∘ HelmholtzFilter(Sf, dΩ))
 ```
 
 is `OptVariables(ρ = FieldVariable(Vρ; bounds, init))`, `DesignFields(z; ρ = Identity())` and

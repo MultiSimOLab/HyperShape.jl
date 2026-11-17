@@ -22,6 +22,8 @@ What [`step!`](@ref) reports about one design step.
 - `multiplier`: multiplier of the constraint (linearised at the current design if it is nonlinear) used in the
   step: in OC the `λ` of the last bisection (never `0`), in SiMPL the shift `μ` of the volume projection (`0` if the
   constraint is inactive); `NaN` without a constraint or when the step fails.
+- `stationarity`: stationarity measure at the design before the step, `S = ‖z − P(z − g)‖_M` (see
+  [`stationarity!`](@ref)); `NaN` if the optimiser does not compute it.
 """
 struct StepInfo
   accepted::Bool
@@ -33,7 +35,11 @@ struct StepInfo
   violation::Float64
   evaluations::Int
   multiplier::Float64
+  stationarity::Float64
 end
+
+StepInfo(accepted, f, f_new, kkt, change, step, violation, evaluations, multiplier) =
+  StepInfo(accepted, f, f_new, kkt, change, step, violation, evaluations, multiplier, NaN)
 
 """
     constraint_tol(opt::Optimizer) -> Float64

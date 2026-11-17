@@ -44,16 +44,23 @@ parameter_version(s) = 0
 is_linear_stage(s) = false
 
 """
-    HelmholtzFilter(op::LinearOperator; measure, backend = :compiled)
+    HelmholtzFilter(dΩ; rmin, order = 1, backend = :compiled, solve = <default>, kwargs...)
+    HelmholtzFilter(op::LinearOperator, dΩ; backend = :compiled)
 
-PDE filter (Lazarov and Sigmund, 2011): the filtered field ρ̃ solves `a(ρ̃, v) = ∫(x v) dΩ` for all `v`, where
-`a` is the bilinear form of the model of `op` (for example `a(ρ̃, v) = ∫(r^2 ∇(ρ̃)⋅∇(v) + ρ̃ v)dΩ`, solver chosen by
-the user) and `dΩ = measure`. The output is a field of the trial space of that model (usually P1), also for a P0
-design field. The bilinear form must be symmetric (the same solve gives the transpose for the sensitivities; this is
-not checked) and the trial space may only have homogeneous Dirichlet values (checked).
+PDE filter (Lazarov and Sigmund, 2011): the filtered field ρ̃ solves `a(ρ̃, v) = ∫(x v) dΩ` for all `v`.
 
-`backend` selects who assembles the load vectors of the filter: `:compiled` (default, HyperFEMKernels) or `:lazy`
-(Gridap). It is independent of the backend of the filter model, which assembles the matrix.
+- **Short form** (the usual filter): `a(ρ̃, v) = ∫(r² ∇ρ̃⋅∇v + ρ̃ v)dΩ` with `r = rmin / (2√3)`, homogeneous Neumann
+  conditions, on a Lagrangian space of degree `order` (continuous) over the triangulation of `dΩ`. `kwargs` go to
+  HyperFEM's `StaticLinearModel` (for example `ls = LUSolver()`, `ls = CGSolver(…)` or a PETSc solver; without `ls`
+  HyperFEM's default solver is used) and `solve` to the `LinearOperator` (default: assemble when the matrix changes).
+- **General form**: `op` is a [`LinearOperator`](@ref) whose model carries the bilinear form and the solver written
+  by the user (Robin terms, Dirichlet conditions, anisotropy…). The bilinear form must be symmetric (the same solve
+  gives the transpose for the sensitivities; checked by `check_consistency`) and the trial space may only have
+  homogeneous Dirichlet values (checked).
+
+The output is a field of the trial space of the filter (usually P1), also for a P0 design field. `backend` selects who
+assembles the load vectors of the filter: `:compiled` (default, HyperFEMKernels) or `:lazy` (Gridap); it is
+independent of the backend of the filter model, which assembles the matrix.
 
 Cost: one assembly of a load vector and one solve each time the design changes, and the same for each sensitivity
 pulled back.
@@ -63,7 +70,21 @@ struct HelmholtzFilter{O<:LinearOperator,M} <: FieldMap
   measure::M
   backend::Symbol
 end
-HelmholtzFilter(op::LinearOperator; measure, backend::Symbol = :compiled) = HelmholtzFilter(op, measure, _check_backend(backend))
+HelmholtzFilter(op::LinearOperator, dΩ; backend::Symbol = :compiled) = HelmholtzFilter(op, dΩ, _check_backend(backend))
+
+function HelmholtzFilter(dΩ::Gridap.CellData.Measure; rmin::Real, order::Integer = 1, backend::Symbol = :compiled,
+                         solve = nothing, kwargs...)
+  rmin > 0 || throw(ArgumentError("HelmholtzFilter: rmin must be positive"))
+  order >= 1 || throw(ArgumentError("HelmholtzFilter: order must be at least 1 (a continuous space)"))
+  Ω = get_triangulation(dΩ.quad)
+  V = TestFESpace(Ω, ReferenceFE(lagrangian, Float64, order); conformity = :H1)
+  U = TrialFESpace(V)
+  r2 = (rmin / (2sqrt(3)))^2
+  a(u, v) = ∫(r2 * ∇(u) ⋅ ∇(v) + u * v)dΩ
+  model = StaticLinearModel(a, U, V, NothingBC(); kwargs...)
+  op = solve === nothing ? LinearOperator(model) : LinearOperator(model; solve)
+  HelmholtzFilter(op, dΩ, _check_backend(backend))
+end
 
 struct FilterStage{O,I,M,F,W,V,A}
   op::O
@@ -181,3 +202,62 @@ end
 
 is_linear_stage(::IdentityStage) = true
 is_linear_stage(::FilterStage) = true
+
+"""
+    CellMean(dΩ; backend = :compiled)
+
+Mean of the input field over each cell of the triangulation of `dΩ`: a P0 field, `x̄_K = ∫_K x dΩ / |K|` (with the
+quadrature of `dΩ`). After a filter it gives the density of codes such as top88 (`xPhys = TF'·K⁻¹·TF·x`): one value
+per element instead of the filtered field at the quadrature points. Linear in its input (a volume after it stays a
+linear constraint); no solve. `backend` assembles its vectors (`:compiled`, HyperFEMKernels, or `:lazy`, Gridap).
+
+```julia
+θ = PhysicalFields(x; ρ = CellMean(dΩ) ∘ HelmholtzFilter(dΩ; rmin, ls = LUSolver()))
+```
+"""
+struct CellMean{M} <: FieldMap
+  measure::M
+  backend::Symbol
+end
+CellMean(dΩ; backend::Symbol = :compiled) = CellMean(dΩ, _check_backend(backend))
+
+struct CellMeanStage{I,M,F,W,V,A}
+  input::I
+  measure::M
+  out::F          # P0 field of the cell means
+  w::W            # adjoint field (pullback)
+  b::Vector{Float64}
+  vol::Vector{Float64}
+  V0::V
+  assem::A
+end
+
+function _stage(c::CellMean, input)
+  dΩ = c.measure
+  Ω = get_triangulation(dΩ.quad)
+  V0 = FESpace(Ω, ReferenceFE(lagrangian, Float64, 0); conformity = :L2)
+  n = num_free_dofs(V0)
+  vol = collect(assemble_vector(v -> ∫(v)dΩ, V0))
+  all(>(0), vol) || throw(ArgumentError("CellMean: a cell has zero measure"))
+  CellMeanStage(input, dΩ, FEFunction(V0, zeros(n)), FEFunction(V0, zeros(n)), zeros(n), vol, V0,
+                form_assembler(c.backend, V0, V0))
+end
+
+output(s::CellMeanStage) = s.out
+
+function update_stage!(s::CellMeanStage, ctx)
+  dΩ, xin = s.measure, s.input
+  assemble_form!(s.b, s.assem, v -> ∫(xin * v)dΩ, :forward)
+  get_free_dof_values(s.out) .= s.b ./ s.vol
+  s
+end
+
+function pullback(s::CellMeanStage, L, ctx, key)
+  assemble_form!(s.b, s.assem, L, key)          # L applied to the P0 basis: the derivative per cell
+  get_free_dof_values(s.w) .= s.b ./ s.vol
+  w, dΩ = s.w, s.measure
+  δ -> ∫(w * δ)dΩ
+end
+
+is_lazy(::CellMeanStage) = false
+is_linear_stage(::CellMeanStage) = true
