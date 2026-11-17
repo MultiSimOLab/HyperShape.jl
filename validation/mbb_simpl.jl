@@ -1,5 +1,5 @@
 # MBB beam against SiMPL (Kim, Lazarov, Surowiec, Keith, arXiv:2411.19421v3; table 1: SiMPL 1.2078e-3 in 50 iterations,
-# OC 1.2234e-3 after 300; table 2, h = 1/256, 30 iterations: 1.0566e-3): 768×256 on (0, 3)×(0, 1), plane strain,
+# OC 1.2234e-3 after 300; table 2, h = 1/256, 30 iterations counting the initial design, 29 steps: 1.0566e-3): 768×256 on (0, 3)×(0, 1), plane strain,
 # volume 0.3, p = 3, Emin = 1e-6, P0 control, stop at the stationarity measure Sₖ ≤ 1e-5 (L2 metric). Table 1 used
 # rmin = 0.05 (dohyun-cse/mfem 28e17f2, the commit with its command) and the sensitivity of the authors' code, which
 # halves the shear term; table 2 used rmin = 0.02. See the Validation page of the docs.

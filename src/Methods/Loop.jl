@@ -41,7 +41,10 @@ met in an earlier stage ends that stage).
   ([`stationarity!`](@ref HyperShape.Optimizers.stationarity!), computed by OC and SiMPL at the design before the step,
   so the run stops one iteration after it is met), below this value (absolute: it depends on `scale` and on the
   metric; with `Euclidean()` it depends on the mesh, use `LumpedMass(dΩ)`). `stationarity_rel`: relative to the first
-  iteration. With a nonlinear constraint the projection uses the constraint linearised at `z`.
+  iteration of the run (the first finite value in the history: after resuming from a checkpoint written before this
+  column existed, the first iteration after the resume). With a nonlinear constraint the projection uses the
+  constraint linearised at `z`. OC computes it with the metric of [`SIMP`](@ref) (its step does not use it): give
+  `LumpedMass(dΩ)` for a value independent of the mesh, comparable with SiMPL.
 - `change`: `maximum(abs, Δz)` of the step below this value. With a Heaviside projection it is rarely reached.
 
 `kkt`, `kkt_rel`, `stationarity`, `stationarity_rel` and `change` are not checked at the first iteration of a stage (after a continuation jump the first
@@ -404,7 +407,7 @@ function _stop_reason(stop::StopCriteria, info::StepInfo, hist::OptHistory, stag
   stop.kkt !== nothing && info.kkt < stop.kkt && return :kkt
   stop.stationarity !== nothing && info.stationarity < stop.stationarity && return :stationarity
   if stop.stationarity_rel !== nothing
-    s1 = hist.stationarity[1]
+    s1 = _first_finite(hist.stationarity, hist.n)
     isfinite(s1) && s1 > 0 && info.stationarity < stop.stationarity_rel * s1 && return :stationarity_rel
   end
   if stop.kkt_rel !== nothing
@@ -737,7 +740,8 @@ function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_
       throw(ArgumentError("StopCriteria: kkt needs an optimiser that computes an optimality measure ($(nameof(typeof(opt))) does not)"))
     end
     if stop !== nothing && (stop.stationarity !== nothing || stop.stationarity_rel !== nothing) && isnan(info.stationarity)
-      throw(ArgumentError("StopCriteria: stationarity needs an optimiser that computes it ($(nameof(typeof(opt))) does not)"))
+      throw(ArgumentError("StopCriteria: stationarity needs an optimiser that computes it ($(nameof(typeof(opt))) " *
+                          "returned NaN: it does not compute it, or its gradient is not finite)"))
     end
     run.k = k
     run.stage_iters += 1
@@ -772,4 +776,12 @@ function _undo_jump!(schedule, run, ctx, cont_buf, opt, state, oracle)
   _invalidate_snapshot!(oracle)
   reset!(opt, state)
   nothing
+end
+
+# first finite entry of v[1:n] (NaN if none): the reference of the relative criteria
+function _first_finite(v, n)
+  for i in 1:n
+    isfinite(v[i]) && return v[i]
+  end
+  NaN
 end

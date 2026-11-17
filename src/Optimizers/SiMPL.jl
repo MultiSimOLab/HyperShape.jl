@@ -43,6 +43,9 @@ feasible; `s` is kept between steps (`reset!` clears it) and divided by 4 each t
 search, because the slack of the constraint then moves the objective more than the expected decrease. At an
 infeasible design (`g > constraint_tol`: a start or a continuation jump) the step restores feasibility: the first
 trial with a finite objective is accepted, without the Armijo test.
+
+It also reports the stationarity measure of the design before the step ([`stationarity!`](@ref)), the criterion of the
+paper.
 """
 struct SiMPL <: Optimizer
   linesearch::Symbol

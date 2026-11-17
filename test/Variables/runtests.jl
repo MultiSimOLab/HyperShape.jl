@@ -474,6 +474,17 @@ end
     zh, xh, θh = single_field_design(:ρ, Vh; bounds = (0.0, 1.0), init = 0.5,
                                      physical = HelmholtzFilter(dΩh; rmin = 0.2, ls = LUSolver()))
     @test maximum(abs, get_free_dof_values(θh.ρ) .- 0.5) < 1e-12      # constant field is kept
+    # the backend of the filter model is set with model_backend (backend is the one of the vectors)
+    zc, xc, θc = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0,
+                                     physical = HelmholtzFilter(p.dΩ; rmin = 0.2, ls = LUSolver(), model_backend = :compiled))
+    zl, xl, θl = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0,
+                                     physical = HelmholtzFilter(p.dΩ; rmin = 0.2, ls = LUSolver(), backend = :lazy))
+    @test maximum(abs, get_free_dof_values(θc.ρ) .- get_free_dof_values(θl.ρ)) < 1e-12
+    # checks of the positional constructors and a hint for the old keyword
+    @test_throws ArgumentError HelmholtzFilter(p.Sf, p.dΩ, :gpu)
+    @test_throws ArgumentError HelmholtzFilter(p.Sf; measure = p.dΩ)
+    @test_throws ArgumentError CellMean(p.dΩ, :gpu)
+    @test_throws MethodError CellMean(p.Ω)
   end
 
   @testset "CellMean" begin

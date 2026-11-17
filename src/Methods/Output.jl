@@ -35,8 +35,8 @@ _pad(s, w) = " "^max(0, w - textwidth(s)) * s
 
 function _header(p::_Printer, names)
   cont = join(("  " * _pad(string(n), w) for (n, w) in zip(names, p.widths)))
-  @sprintf("  %5s  %13s  %9s  %10s  %9s  %9s  %9s  %9s", "it", "objective", "Δobj", "constraint", "kkt", "change",
-           "step", "μ") * cont * (p.grey ? @sprintf("  %7s", "grey") : "") * @sprintf("  %11s  %8s", "f/a/F", "t[s]")
+  @sprintf("  %5s  %13s  %9s  %10s  %9s  %9s  %9s  %9s  %9s", "it", "objective", "Δobj", "constraint", "kkt", "S",
+           "change", "step", "μ") * cont * (p.grey ? @sprintf("  %7s", "grey") : "") * @sprintf("  %11s  %8s", "f/a/F", "t[s]")
 end
 
 _rule(p::_Printer) = _styled(p, "  " * "─"^(textwidth(_header(p, ntuple(_ -> "", length(p.widths)))) - 2) * "\n", :light_black)
@@ -62,8 +62,8 @@ _metric_name(m::Euclidean) = "Euclidean"
 _constraint_label(problem, opt) = only(problem.constraints).linear ? "linear" :
                                   "nonlinear (tol $(_g_or_e(constraint_tol(opt))))"
 _g_or_e(x) = isfinite(x) ? @sprintf("%.0e", x) : "—"
-_metric_label(method) = method.optimizer isa OC ? "not used by OC" :
-                        _metric_name(method.metric) * (method.default_metric ? " (default)" : "")
+_metric_label(method) = _metric_name(method.metric) * (method.default_metric ? " (default)" : "") *
+                        (method.optimizer isa OC ? " (OC: only for the stationarity measure)" : "")
 _metric_name(m::LumpedMass) = "lumped mass"
 _metric_name(m::NamedTuple) = join(("$k: $(_metric_name(v))" for (k, v) in pairs(m)), ", ")
 
@@ -121,7 +121,8 @@ function _print_row(p::_Printer, hist::OptHistory)
   else
     print(p.io, "         —")
   end
-  @printf(p.io, "  %9s  %9s  %9s  %9s", _e(hist.kkt[k]), _e(hist.change[k]), _e(hist.step[k]), _e(hist.multiplier[k]))
+  @printf(p.io, "  %9s  %9s  %9s  %9s  %9s", _e(hist.kkt[k]), _e(hist.stationarity[k]), _e(hist.change[k]),
+          _e(hist.step[k]), _e(hist.multiplier[k]))
   for j in axes(hist.continuation, 1)
     print(p.io, "  ", _pad(_g(hist.continuation[j, k]), p.widths[j]))
   end

@@ -523,6 +523,30 @@ end
     om = FunctionOracle(z -> 0.0, (dF, z) -> dF; metric = m)
     g = 0.1 .* ones(n)
     @test stationarity!(w, om, z, g, nothing, nothing, NaN) ≈ sqrt(sum(m .* (z .- clamp.(z .- g, 0, 1)) .^ 2)) rtol = 1e-12
+    # non-uniform metric, vector bounds and an active constraint: aᵀP = V and the variational inequality
+    #   (y − P)ᵀM(v − P) ≤ 0 for feasible v, y = z − g
+    lbv, ubv = [0.05 + 0.002i for i in 1:n], [0.9 - 0.001i for i in 1:n]
+    av = [0.5 + 0.03i for i in 1:n]
+    Vv = 0.35 * dot(av, ubv)
+    ov = FunctionOracle(z -> 0.0, (dF, z) -> dF; lb = lbv, ub = ubv, constraint = (av, Vv), metric = m)
+    zv = clamp.(fill(0.4, n), lbv, ubv)
+    gv = [0.8 * cos(0.3i) - 0.6 for i in 1:n]
+    Sv = stationarity!(w, ov, zv, gv, av ./ m, av, Vv)
+    P = zv .+ w
+    @test dot(av, P) ≈ Vv rtol = 1e-10
+    @test all(lbv .- 1e-14 .<= P .<= ubv .+ 1e-14)              # P = z + (P − z): rounding
+    y = zv .- gv
+    for k in 1:20
+      v = clamp.(P .+ 0.05 .* [sin(1.3 * i * k) for i in 1:n], lbv, ubv)
+      dot(av, v) <= Vv || continue
+      @test sum(m .* (y .- P) .* (v .- P)) <= 1e-8
+    end
+    @test Sv ≈ sqrt(sum(m .* w .^ 2)) rtol = 1e-12
+    ga = av ./ m
+    @test (@allocated stationarity!(w, ov, zv, gv, ga, av, Vv)) == 0
+    # V below the minimum of aᵀz over the bounds, or not finite: NaN
+    @test isnan(stationarity!(w, ov, zv, gv, ga, av, 0.5 * dot(av, lbv)))
+    @test isnan(stationarity!(w, ov, zv, gv, ga, av, NaN))
     # computed by SiMPL and OC; it goes to zero at convergence
     for opt in (SiMPL(), OC(bisection_tol = 1e-12))
       oz = FunctionOracle(z -> sum(c ./ z), (dF, z) -> (dF .= .-c ./ z .^ 2); lb = 1e-3, constraint = (a, 0.4n))

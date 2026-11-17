@@ -81,7 +81,8 @@ const Metric = Union{Euclidean,LumpedMass}
 
 Density method: the step is `optimizer` (any `Optimizer`: `OC(…)`, `SiMPL(…)`). `metric`:
 [`LumpedMass`](@ref)`(dΩ)` or [`Euclidean`](@ref)`()`, or a named tuple with one of them per block of z. SiMPL uses
-it in its step and its optimality measure, and needs it (no default). OC ignores it; its default is `Euclidean()`.
+it in its step and its optimality measure, and needs it (no default). OC uses it only for the stationarity measure
+(see [`StopCriteria`](@ref)); its default is `Euclidean()`, which makes that measure depend on the mesh.
 """
 struct SIMP{O<:Optimizer,M}
   optimizer::O
@@ -99,7 +100,7 @@ end
 """
     default_metric(optimizer)
 
-Metric of [`SIMP`](@ref) when none is given: `Euclidean()` for OC (which does not use it); an error for any other
+Metric of [`SIMP`](@ref) when none is given: `Euclidean()` for OC (which only uses it for the stationarity measure); an error for any other
 optimiser, which must be given one.
 """
 default_metric(::OC) = Euclidean()

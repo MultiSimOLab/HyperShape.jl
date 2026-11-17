@@ -9,6 +9,18 @@ using HyperShape.Methods: FunctionalOracle, _setup_constraint!, OptHistory, _rec
 using LinearAlgebra
 using Test
 
+# an optimiser that does not compute the stationarity measure: SiMPL with the 9-argument StepInfo
+struct NoStatOpt <: HyperShape.Optimizers.Optimizer end
+const _NS = HyperShape.Optimizers
+_NS.init(::NoStatOpt, z, oracle) = _NS.init(SiMPL(), z, oracle)
+function _NS.step!(::NoStatOpt, state, z, oracle, ctx)
+  i = _NS.step!(SiMPL(), state, z, oracle, ctx)
+  _NS.StepInfo(i.accepted, i.f, i.f_new, i.kkt, i.change, i.step, i.violation, i.evaluations, i.multiplier)
+end
+_NS.shrink!(::NoStatOpt, state, f) = _NS.shrink!(SiMPL(), state, f)
+_NS.reset!(::NoStatOpt, state) = _NS.reset!(SiMPL(), state)
+_NS.constraint_tol(::NoStatOpt) = _NS.constraint_tol(SiMPL())
+
 # heat compliance (self-adjoint) and the volume of the unprojected design density
 function compliance_problem(; design = :P0, n = 8, dim = 2, init = 0.4, fraction = 0.4, solve_flag = nothing,
                             phases = nothing, sign = Ref(1.0))
@@ -238,6 +250,18 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     end
     @test_throws ArgumentError StopCriteria(stationarity = -1.0)
     @test_throws ArgumentError StopCriteria(stationarity_rel = -1.0)
+    # OC and SiMPL give the same S at the same design and metric
+    q1, q2 = compliance_problem(), compliance_problem()
+    r1 = solve!(q1.problem, SIMP(OC(); metric = LumpedMass(q1.dΩ)); maxiter = 1, stop = nothing, verbose = 0)
+    r2 = solve!(q2.problem, SIMP(SiMPL(); metric = LumpedMass(q2.dΩ)); maxiter = 1, stop = nothing, verbose = 0)
+    @test r1.history.stationarity[1] ≈ r2.history.stationarity[1] rtol = 1e-10
+    # an optimiser that does not compute it (9-argument StepInfo): error when a criterion asks for it
+    q = compliance_problem()
+    @test_throws ArgumentError solve!(q.problem, SIMP(NoStatOpt(); metric = LumpedMass(q.dΩ)); maxiter = 3, verbose = 0,
+                                      stop = StopCriteria(stationarity = 1e-3))
+    q = compliance_problem()
+    rn = solve!(q.problem, SIMP(NoStatOpt(); metric = LumpedMass(q.dΩ)); maxiter = 2, verbose = 0, stop = nothing)
+    @test all(isnan, rn.history.stationarity)
   end
 
   @testset "Checkpoint and resume" begin
@@ -598,6 +622,20 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test _stop_reason(StopCriteria(objective = 1e-3, window = 4), info(), hn, 0) === nothing
     # kkt relative to the first iteration
     hk = OptHistory(10, ())
+    # stationarity_rel: reference = first finite value (NaN rows from an old checkpoint are skipped)
+    hs = OptHistory(10, ())
+    for (k, sv) in enumerate((NaN, NaN, 1.0, 0.5, 0.05))
+      _record!(hs, (k, 1.0, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN, sv), ())
+    end
+    sinfo(S) = HyperShape.Optimizers.StepInfo(true, 1.0, 1.0, NaN, 0.1, 0.1, 0.0, 1, NaN, S)
+    @test _stop_reason(StopCriteria(stationarity_rel = 0.1), sinfo(0.05), hs, 0) === :stationarity_rel
+    @test _stop_reason(StopCriteria(stationarity_rel = 0.01), sinfo(0.05), hs, 0) === nothing
+    @test _stop_reason(StopCriteria(stationarity = 0.1), sinfo(0.05), hs, 0) === :stationarity
+    @test _stop_reason(StopCriteria(stationarity = 0.1), sinfo(0.05), hs, hs.n - 1) === nothing   # first of a stage
+    hn2 = OptHistory(10, ())
+    _record!(hn2, (1, 1.0, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN, NaN), ())
+    _record!(hn2, (2, 1.0, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN, NaN), ())
+    @test _stop_reason(StopCriteria(stationarity_rel = 0.1), sinfo(NaN), hn2, 0) === nothing
     _record!(hk, (1, 1.0, NaN, 10.0, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN, NaN), ())
     _record!(hk, (2, 1.0, NaN, 0.05, 0.1, 0.1, 1, 1, 0, 1, NaN, NaN, NaN), ())
     @test _stop_reason(StopCriteria(kkt_rel = 1e-2), info(0.05), hk, 0) === :kkt_rel
@@ -668,7 +706,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     io = IOBuffer()
     solve!(compliance_problem().problem, SIMP(OC()); maxiter = 2, io, verbose = 1, stop = nothing)
     out = String(take!(io))
-    @test occursin("metric: not used by OC", out) && occursin("stop: maxiter only · maxiter 2", out)
+    @test occursin("metric: Euclidean (default) (OC: only for the stationarity measure)", out) && occursin("stop: maxiter only · maxiter 2", out)
   end
 
   @testset "Screen output" begin

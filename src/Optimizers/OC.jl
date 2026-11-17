@@ -32,6 +32,9 @@ of the limits over all entries (those at a bound included).
 The objective is evaluated once per step and the new design is not evaluated (`f_new = NaN`, `kkt = NaN`). If the
 move limit does not allow meeting the constraint (infeasible start), the step is still taken and `violation > 0` in
 the [`StepInfo`](@ref).
+
+It also reports the stationarity measure of the design before the step ([`stationarity!`](@ref), with the metric of
+the oracle, which the step does not use).
 """
 mutable struct OC <: Optimizer
   move::Float64
