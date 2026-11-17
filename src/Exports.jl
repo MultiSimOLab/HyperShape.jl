@@ -26,8 +26,6 @@ end
 @_export PostProcess write_step
 @_export PostProcess extend_field
 @_export PostProcess get_pvd
-@_export PostProcess FieldWriter
-@_export PostProcess write_fields
 @_export Optimizers OC
 @_export Optimizers SiMPL
 @_export Methods Optimization
@@ -72,3 +70,5 @@ end
 @_public Methods monitor_value
 @_public Methods metric_weights
 @_public Optimizers StepInfo
+@_public PostProcess FieldWriter
+@_public PostProcess write_fields

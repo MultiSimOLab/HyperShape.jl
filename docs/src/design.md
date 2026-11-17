@@ -1,7 +1,8 @@
 # Design
 
 !!! note
-    This page describes the planned interface. Names and signatures may still change.
+    Phase 0 (linear density methods) is implemented; the sections marked *planned* describe later phases. Names may
+    still change until the package is registered.
 
 ```
 OptVariables z ─► DesignFields x ─► PhysicalFields θ ─► weak forms ─► StateOperator (u, p)
@@ -83,8 +84,8 @@ Two kinds of operator wrap a HyperFEM computational model built by the user.
   when one of them has changed.
 - HyperShape never chooses a solver: a default `solve` calls the solver of the user's model. Nonlinear, staggered and
   transient models need the user's `solve` (the load stepping and the restart are modelling decisions).
-- `ctx` is a read-only context updated by HyperShape: design iteration, attempt, continuation values and phase. Until
-  the common optimisation loop exists, whoever updates the fields passes it (`nothing` when the fields are built).
+- `ctx` is a read-only context updated by HyperShape: design iteration, attempt, continuation values and phase.
+  `solve!` passes it to every solve function of the user; outside the loop (checks, scripts) `nothing` is accepted.
 - The adjoint is another state operator; its forms are written by the user, typically the tangent of the forward
   problem with trial and test functions swapped.
 
@@ -276,7 +277,7 @@ post = OptPostProcessor(every = 10, filepath = "results/mbb") do post, ctx
 end
 ```
 
-- `write_step` writes with a `FieldWriter` (one per name, built at the first call, closed when `solve!` returns,
+- `write_step` writes with a `HyperShape.FieldWriter` (public, not exported: it is meant to move to HyperFEM) (one per name, built at the first call, closed when `solve!` returns,
   fails or is interrupted). The mesh is built once and is continuous (one point per vertex of the grid, not one per
   cell and vertex as `createvtk`); the values come straight from the degrees of freedom: P0 as cell data, P1/Q1 as
   point data, pointwise operations on them and on constants (`θ.ρ`, `E ∘ θ.ρ`, `1 - ρ`) and `extend_field`. Other

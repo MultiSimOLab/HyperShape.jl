@@ -2,7 +2,7 @@ using Documenter
 using HyperShape
 
 makedocs(;
-    modules = [HyperShape, HyperShape.Optimizers, HyperShape.Operators, HyperShape.Variables, HyperShape.Functionals, HyperShape.Checks, HyperShape.Methods],
+    modules = [HyperShape, HyperShape.Optimizers, HyperShape.Operators, HyperShape.Variables, HyperShape.Functionals, HyperShape.Checks, HyperShape.PostProcess, HyperShape.Methods],
     authors = "MultiSimOLab",
     sitename = "HyperShape.jl",
     format = Documenter.HTML(;
@@ -13,12 +13,13 @@ makedocs(;
     ),
     pages = [
         "Home" => "index.md",
+        "Getting started" => "getting_started.md",
         "Design" => "design.md",
         "Validation" => "validation.md",
         "Roadmap" => "roadmap.md",
         "API reference" => "api.md",
     ],
-    checkdocs = :none,
+    checkdocs = :exports,
 )
 
 deploydocs(;

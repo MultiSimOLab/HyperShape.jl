@@ -4,27 +4,32 @@ CurrentModule = HyperShape
 
 # HyperShape.jl
 
-!!! warning "Work in progress"
-    The package is at the design stage. These pages describe the planned architecture; only a small legacy
-    prototype is implemented today.
-
 [HyperShape](https://github.com/MultiSimOLab/HyperShape.jl) is a library for shape and topology optimisation of
 nonlinear multiphysics problems: finite-strain hyperelasticity, electro-, magneto- and thermo-mechanics. It is built
 on [HyperFEM](https://github.com/MultiSimOLab/HyperFEM.jl), within the [Gridap](https://github.com/gridap/Gridap.jl)
 ecosystem.
+
+!!! note "Status"
+    Phase 0 is implemented and validated: density methods for linear problems (Helmholtz filter, tanh projection,
+    optimality criteria and SiMPL, consistency checks, continuation, checkpoints, fast output), reproducing top88 and
+    the SiMPL paper (see [Validation](@ref)). Nonlinear and multiphysics problems, reaction–diffusion and level-set
+    methods come in the next phases ([Roadmap](@ref)). The package is not registered yet.
 
 ## Principles
 
 - **HyperFEM is used as a black box.** The forward and adjoint problems are HyperFEM computational models that the
   user builds with their own weak forms.
 - **The user configures every solver.** HyperShape chooses none: not for the state, the adjoint, the filter or the
-  internal solves of the methods.
-- **Analytical derivatives.** No automatic differentiation; every sensitivity is verified with a Taylor test.
-- **One abstraction for several methods.** Density (SIMP), reaction–diffusion and level set share variables, states,
+  internal solves of the methods. Every default of the loop can be replaced from the script.
+- **Analytical derivatives.** No automatic differentiation; every sensitivity is verified with a Taylor test
+  (`check_consistency`).
+- **One abstraction for several methods.** Density, reaction–diffusion and level set share variables, states,
   functionals and the optimisation loop.
 
 ## Contents
 
-- [Design](@ref): the planned architecture.
+- [Getting started](@ref): a complete script, explained.
+- [Design](@ref): the architecture and the defaults.
+- [Validation](@ref): benchmarks against published results.
 - [Roadmap](@ref): development phases.
-- [API reference](@ref): docstrings of what is implemented.
+- [API reference](@ref): docstrings.

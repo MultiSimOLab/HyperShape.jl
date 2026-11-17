@@ -1,6 +1,5 @@
 module HyperShape
 
-using TimerOutputs
 using HyperFEM, Gridap
 
 include("Optimizers/Optimizers.jl")
