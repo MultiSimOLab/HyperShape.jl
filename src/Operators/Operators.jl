@@ -7,7 +7,7 @@ Operators over HyperFEM computational models.
   carries the bilinear form only and HyperShape supplies the right-hand side.
 - [`StateOperator`](@ref): forward and adjoint states. The model carries the user's full weak forms.
 
-Both declare their dependencies (objects with a [`version`](@ref) counter), positionally or with `depends = ...`.
+Both declare their dependencies (objects with a [`state_version`](@ref) counter), positionally or with `depends = ...`.
 For a `StaticLinearModel` both have a default `solve` ([`default_solve`](@ref)); any other model needs the user's.
 [`AdjointOperator`](@ref) builds the adjoint state of a forward one.
 """
@@ -106,7 +106,7 @@ default_solve(::Type{<:AbstractOperator}, model) =
 
 function _check_depends(depends)
   for d in depends
-    applicable(version, d) || throw(ArgumentError("depends: $(typeof(d)) does not implement HyperShape.Operators.version"))
+    applicable(state_version, d) || throw(ArgumentError("depends: $(typeof(d)) does not implement HyperShape.state_version"))
   end
   depends
 end
@@ -115,16 +115,16 @@ end
 _refresh_all!(::Tuple{}, ctx) = nothing
 _refresh_all!(t::Tuple, ctx) = (refresh!(first(t), ctx); _refresh_all!(Base.tail(t), ctx))
 _any_changed(::Tuple{}, seen, i) = false
-_any_changed(t::Tuple, seen, i) = version(first(t)) != seen[i] || _any_changed(Base.tail(t), seen, i + 1)
+_any_changed(t::Tuple, seen, i) = state_version(first(t)) != seen[i] || _any_changed(Base.tail(t), seen, i + 1)
 _mark_seen!(::Tuple{}, seen, i) = nothing
-_mark_seen!(t::Tuple, seen, i) = (seen[i] = version(first(t)); _mark_seen!(Base.tail(t), seen, i + 1))
+_mark_seen!(t::Tuple, seen, i) = (seen[i] = state_version(first(t)); _mark_seen!(Base.tail(t), seen, i + 1))
 
 """
-    version(obj) -> Int
+    state_version(obj) -> Int
 
 Counter that grows every time `obj` changes. Objects listed in the `depends` of an operator implement it.
 """
-function version end
+function state_version end
 
 """
     refresh!(obj, ctx)
@@ -142,7 +142,7 @@ and a right-hand side supplied by HyperShape.
 
 - `model`: the computational model; its matrix and solver are the user's.
 - `deps` or `depends`: the objects the matrix depends on (one object or a tuple; each implements
-  [`version`](@ref)), given once. Default `()`: the matrix never changes. A dependency captured by the bilinear form
+  [`state_version`](@ref)), given once. Default `()`: the matrix never changes. A dependency captured by the bilinear form
   and not declared gives stale results; [`check_consistency`](@ref HyperShape.Checks.check_consistency) detects it.
 - `solve`: function `(model, b, ctx, stale) -> x` that solves with the right-hand side `b` and returns the solution
   vector. `stale` is `true` when something in the dependencies changed since the last solve, so it can re-assemble.
@@ -165,7 +165,7 @@ end
 function LinearOperator(model, deps = _Unset(); depends = _Unset(), solve = default_solve(LinearOperator, model))
   d = _dependencies("LinearOperator", deps, depends)
   deps = _check_depends(_as_depends(d isa _Unset ? () : d))
-  LinearOperator(model, solve, deps, Int[version(d) for d in deps], false, 0)
+  LinearOperator(model, solve, deps, Int[state_version(d) for d in deps], false, 0)
 end
 
 get_model(op::LinearOperator) = op.model

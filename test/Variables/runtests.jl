@@ -4,7 +4,7 @@ using HyperFEM
 using HyperFEMKernels
 using HyperShape
 using HyperShape.Variables: update_fields!, design_gradient!, set_values!, get_values, get_bounds, changed!,
-                            set_beta!, block_range, TanhValue, version
+                            set_beta!, block_range, TanhValue, state_version
 using LinearAlgebra
 using Test
 
@@ -55,11 +55,11 @@ end
     @test get_values(z)[1:n0] == ρ0 && all(==(0.5), get_values(z)[n0+1:end])
     lb, ub = get_bounds(z)
     @test all(==(0.0), lb[1:n0]) && all(==(-1.0), lb[n0+1:end]) && all(==(2.0), ub[n0+1:end])
-    v = version(z)
+    v = state_version(z)
     set_values!(z, zeros(length(z)))
-    @test version(z) == v + 1
+    @test state_version(z) == v + 1
     changed!(z)
-    @test version(z) == v + 2
+    @test state_version(z) == v + 2
     @test_throws DimensionMismatch set_values!(z, zeros(3))
     @test_throws ArgumentError OptVariables()
     @test_throws ArgumentError OptVariables(a = p.V0)
@@ -77,13 +77,13 @@ end
     @test get_free_dof_values(x.a) == ρ0 && get_free_dof_values(x.b) == ρ1
     @test propertynames(x) == (:a, :b)
     fa = x.a
-    vx = version(x)
+    vx = state_version(x)
     update_fields!(x, nothing)
-    @test version(x) == vx                         # nothing changed
+    @test state_version(x) == vx                         # nothing changed
     w = copy(get_values(z)); w[1] = 0.9
     set_values!(z, w)
     update_fields!(x, nothing)
-    @test version(x) == vx + 1
+    @test state_version(x) == vx + 1
     @test x.a === fa && get_free_dof_values(x.a)[1] == 0.9    # same object, updated in place
     @test_throws ArgumentError DesignFields(z; a = Identity())
     @test_throws ArgumentError DesignFields(z; a = Identity(), b = Identity(), c = Identity())
@@ -168,18 +168,18 @@ end
     z, x, θ = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0,
                                   map = H ∘ HelmholtzFilter(p.Sf, p.dΩ))
     n = p.nsolves[]
-    vθ = version(θ)
+    vθ = state_version(θ)
     update_fields!(θ, nothing)
-    @test p.nsolves[] == n && version(θ) == vθ          # nothing changed: no solve
+    @test p.nsolves[] == n && state_version(θ) == vθ          # nothing changed: no solve
     changed!(z)
     update_fields!(θ, nothing)
-    @test p.nsolves[] == n + 1 && version(θ) == vθ + 1  # one filter solve
+    @test p.nsolves[] == n + 1 && state_version(θ) == vθ + 1  # one filter solve
     set_beta!(H, 4.0)
     update_fields!(θ, nothing)
-    @test p.nsolves[] == n + 1 && version(θ) == vθ + 2  # β counts as a change; the projection is lazy: no solve
+    @test p.nsolves[] == n + 1 && state_version(θ) == vθ + 2  # β counts as a change; the projection is lazy: no solve
     set_beta!(H, 4.0)
     update_fields!(θ, nothing)
-    @test version(θ) == vθ + 2                           # same β: no change
+    @test state_version(θ) == vθ + 2                           # same β: no change
     dΩ = p.dΩ
     g1 = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(δ)dΩ,), nothing)
     @test p.nsolves[] == n + 2                           # one transposed solve
@@ -205,14 +205,14 @@ end
 
   @testset "Values of z are checked" begin
     z, x, θ = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0, map = Identity())
-    v = version(z)
+    v = state_version(z)
     w = copy(get_values(z)); w[3] = NaN
     @test_throws ArgumentError set_values!(z, w)
     w[3] = 1.5
     @test_throws ArgumentError set_values!(z, w)
     get_values(z)[2] = -0.1
     @test_throws ArgumentError changed!(z)
-    @test version(z) == v
+    @test state_version(z) == v
   end
 
   @testset "Filter with homogeneous Dirichlet values" begin

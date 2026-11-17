@@ -2,7 +2,7 @@ using Gridap
 using Gridap.FESpaces
 using HyperFEM
 using HyperShape
-using HyperShape.Variables: get_values, set_values!, version, set_beta!
+using HyperShape.Variables: get_values, set_values!, state_version, set_beta!
 using HyperShape.Operators: apply!
 using HyperShape.Checks: ConsistencyReport
 using LinearAlgebra

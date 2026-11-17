@@ -7,7 +7,7 @@ that is solved again only when one of its dependencies changed. For the adjoint 
 [`AdjointOperator`](@ref).
 
 - `deps` or `depends` (given once, mandatory): the objects the state depends on (one object or a tuple), typically
-  `θ` for a forward state. Each implements [`version`](@ref); physical fields and other state operators are brought
+  `θ` for a forward state. Each implements [`state_version`](@ref); physical fields and other state operators are brought
   up to date first.
 - `solve`: function `(model, ctx) -> result` that solves the model. The result is either the solution vector (taken
   as converged) or a tuple whose last element is the convergence flag: a `Bool`, or `1`/`0` as the `flagconv` of
@@ -46,7 +46,7 @@ function StateOperator(model, deps = _Unset(); depends = _Unset(), solve = defau
   StateOperator(model, solve, deps, fill(-1, length(deps)), HyperFEM.get_state(model), 0, false, false)
 end
 
-version(S::StateOperator) = S.version
+state_version(S::StateOperator) = S.version
 HyperFEM.get_state(S::StateOperator) = S.state
 get_model(S::StateOperator) = S.model
 

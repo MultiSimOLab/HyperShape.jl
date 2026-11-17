@@ -3,7 +3,7 @@ using Gridap.FESpaces
 using HyperFEM
 using HyperFEMKernels
 using HyperShape
-using HyperShape.Variables: update_fields!, set_values!, get_values, changed!, set_beta!, version
+using HyperShape.Variables: update_fields!, set_values!, get_values, changed!, set_beta!, state_version
 using HyperShape.Operators: apply!, get_model
 using Base.CoreLogging: with_logger, SimpleLogger, Error as LogError
 using LinearAlgebra
@@ -90,9 +90,9 @@ struct _NoSpaces <: HyperFEM.ComputationalModels.ComputationalModel end   # a mo
     functional_value(C, nothing); functional_value(B, nothing)
     functional_gradient!(g, C, nothing); functional_gradient!(g, B, nothing)
     @test (nforward[], nadjoint[]) == (1, 1)              # one forward solve shared, one adjoint
-    vS = version(S)
+    vS = state_version(S)
     functional_gradient!(g, B, nothing)
-    @test (nforward[], nadjoint[]) == (1, 1) && version(S) == vS
+    @test (nforward[], nadjoint[]) == (1, 1) && state_version(S) == vS
     changed!(z)
     functional_value(C, nothing); functional_gradient!(g, B, nothing)
     @test (nforward[], nadjoint[]) == (2, 2)

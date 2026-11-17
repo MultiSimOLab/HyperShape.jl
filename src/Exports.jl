@@ -62,7 +62,7 @@ end
 @_public Variables design_gradient!
 @_public Variables update_fields!
 @_public Variables is_linear_field
-@_public Operators version
+@_public Operators state_version
 @_public Operators invalidate!
 @_public Operators refresh!
 @_public Methods default_stop

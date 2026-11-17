@@ -62,7 +62,7 @@ function OptVariables(; kwargs...)
   OptVariables(names, blocks, Tuple(ranges), vals, lb, ub, 0)
 end
 
-version(z::OptVariables) = z.version
+state_version(z::OptVariables) = z.version
 Base.length(z::OptVariables) = length(z.values)
 """
     get_values(z::OptVariables) -> Vector{Float64}

@@ -230,7 +230,7 @@ compute it), `change` (`maximum(abs, Δz)`), `step` (step size or move limit, th
 limits), `attempts`, `forward`, `adjoint`, `filter` (solves in the iteration); `constraints` and `multipliers` (named
 tuples of vectors, one per constraint of the [`Optimization`](@ref): scaled value at the accepted design and
 multiplier reported by the optimiser), `monitors` (named tuple of vectors, one per monitor of `solve!`) and
-`continuation` (one column per iteration, one row per continued parameter, names in `names`).
+`continuation` (named tuple of vectors, one per continued parameter: its value at each iteration).
 """
 mutable struct OptHistory
   n::Int
@@ -249,8 +249,8 @@ mutable struct OptHistory
   multiplier_values::Matrix{Float64}
   monitor_names::Vector{Symbol}
   monitor_values::Matrix{Float64}       # one row per monitor
-  names::Vector{Symbol}                 # continued parameters
-  continuation::Matrix{Float64}
+  continuation_names::Vector{Symbol}    # continued parameters
+  continuation_values::Matrix{Float64}  # one row per continued parameter
 end
 
 function OptHistory(cap::Integer, names = (); constraints = (), monitors = ())
@@ -269,9 +269,10 @@ function Base.getproperty(h::OptHistory, s::Symbol)
   s === :constraints && return _rows(getfield(h, :constraint_names), getfield(h, :constraint_values), getfield(h, :n))
   s === :multipliers && return _rows(getfield(h, :constraint_names), getfield(h, :multiplier_values), getfield(h, :n))
   s === :monitors && return _rows(getfield(h, :monitor_names), getfield(h, :monitor_values), getfield(h, :n))
+  s === :continuation && return _rows(getfield(h, :continuation_names), getfield(h, :continuation_values), getfield(h, :n))
   getfield(h, s)
 end
-Base.propertynames(h::OptHistory) = (fieldnames(OptHistory)..., :constraints, :multipliers, :monitors)
+Base.propertynames(h::OptHistory) = (HISTORY_COLUMNS..., :constraints, :multipliers, :monitors, :continuation)
 
 Base.show(io::IO, h::OptHistory) =
   print(io, "OptHistory(", h.n, " iterations; constraints: ", join(h.constraint_names, ", "), "; monitors: ",
@@ -293,7 +294,7 @@ function _record!(h::OptHistory, row, cons, mults, mons, cont)
     h.monitor_values[j, k] = v
   end
   for (j, v) in enumerate(cont)
-    h.continuation[j, k] = v
+    h.continuation_values[j, k] = v
   end
   h
 end
@@ -306,7 +307,7 @@ function _trim!(h::OptHistory)
   h.constraint_values = h.constraint_values[:, 1:n]
   h.multiplier_values = h.multiplier_values[:, 1:n]
   h.monitor_values = h.monitor_values[:, 1:n]
-  h.continuation = h.continuation[:, 1:n]
+  h.continuation_values = h.continuation_values[:, 1:n]
   h
 end
 
@@ -368,14 +369,14 @@ end
 function _write_history(io, hist::OptHistory)
   head = vcat(String[String(c) for c in HISTORY_COLUMNS], ["constraint:$c" for c in hist.constraint_names],
               ["multiplier:$c" for c in hist.constraint_names], ["monitor:$m" for m in hist.monitor_names],
-              String[String(c) for c in hist.names])
+              String[String(c) for c in hist.continuation_names])
   println(io, join(head, ","))
   for j in 1:hist.n
     row = Any[getfield(hist, f)[j] for f in HISTORY_COLUMNS]
     append!(row, view(hist.constraint_values, :, j))
     append!(row, view(hist.multiplier_values, :, j))
     append!(row, view(hist.monitor_values, :, j))
-    append!(row, view(hist.continuation, :, j))
+    append!(row, view(hist.continuation_values, :, j))
     println(io, join(string.(row), ","))
   end
 end
@@ -484,7 +485,7 @@ function _prefill!(hist::OptHistory, old::OptHistory)
     row = (old.iteration[k], old.objective[k], old.kkt[k], old.stationarity[k], old.change[k], old.step[k],
            old.attempts[k], old.forward[k], old.adjoint[k], old.filter[k])
     _record!(hist, row, view(old.constraint_values, :, k), view(old.multiplier_values, :, k),
-             (j === nothing ? NaN : old.monitor_values[j, k] for j in mon), view(old.continuation, :, k))
+             (j === nothing ? NaN : old.monitor_values[j, k] for j in mon), view(old.continuation_values, :, k))
   end
   hist
 end
@@ -556,6 +557,10 @@ jumps, rejected steps, stalls, a scaled start), a closing
 constraint (red above 1e-3), optimality measure `kkt`, stationarity measure `S`, change of z, step, multiplier,
 continued parameters, monitors, forward, adjoint and filter solves, and time. `true` is `2`, `false` is `0`. The summary counts every solve of the call
 (those of rejected or stalled trials, the setup and the final synchronisation included).
+
+With a `checkpoint`, an exception that is not an [`OptimizationFailure`](@ref) (an error in a solve, post or monitor
+function of the user, an interruption) writes a checkpoint at the last accepted design (history included) and is then
+rethrown; an `OptimizationFailure` writes its own.
 
 If the starting design (not a resumed one) violates the constraint, it is scaled towards the lower bound,
 `z = lb + t (z − lb)` on the entries the constraint acts on (a linear constraint: so that it holds with equality; a
@@ -690,9 +695,24 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
     end
   end
   fwd, adj, filters = ops
-  run = _LoopState(k0, stage, stage_iters, hist.n - stage_iters, cstart, k0)   # what a failure needs
-  status, reason = _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_buf, cont_names, maxiter,
-                             on_failure, stop, schedule, checkpoint, post, monitors, fwd, adj, filters, pr)
+  run = _LoopState(k0, stage, stage_iters, hist.n - stage_iters, cstart, k0, copy(zk))   # what a failure needs
+  status, reason = try
+    _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_buf, cont_names, maxiter, on_failure, stop,
+              schedule, checkpoint, post, monitors, fwd, adj, filters, pr)
+  catch e
+    # OptimizationFailure has written its checkpoint; any other exception (an error in a solve or post function of
+    # the user, an interruption) gets one at the last accepted design before it is rethrown
+    if !(e isa OptimizationFailure) && checkpoint !== nothing
+      try
+        _write_checkpoint(checkpoint, problem, opt, nothing, run.zacc, hist, run.k, run.stage, run.stage_iters, cont_names)
+        _print_event(pr, "✗ $(nameof(typeof(e))) after $(run.k) accepted iterations: checkpoint written at iteration " *
+                         "$(run.k) in $(checkpoint.filepath)", :red)
+      catch e2
+        e2 isa InterruptException || _print_event(pr, "✗ the checkpoint could not be written after the exception", :red)
+      end
+    end
+    rethrow()
+  end
 
   f_final = _sync!(oracle)                     # fields and forward state at the final design
   _print_end(pr, status, reason, run.k, f_final, _last_monitors(hist, monitors))
@@ -778,6 +798,7 @@ mutable struct _LoopState
   stage_start::Int    # history length when the current stage started
   cstart::NTuple{3,Int}   # solve counters at the start of the call
   k0::Int                 # iterations done before the call (resume)
+  zacc::Vector{Float64}   # the last accepted design (for a checkpoint after an unexpected exception)
 end
 
 function _fail(msg, problem, opt, oracle, zk, hist, run, cont_names, checkpoint, pr, ops, post)
@@ -893,6 +914,7 @@ function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_
       fail("a monitor threw at iteration $k: " * first(sprint(showerror, e), 300))
     end
     _record!(hist, row, _constraint_values(oracle, zk), _multipliers(oracle, info), mvals, cont_buf)
+    copyto!(run.zacc, zk)
     _print_row(pr, hist)
     r = _stop_reason(stop, info, hist, run.stage_start)
     # with a nonlinear constraint, convergence also needs the constraint met to the tolerance of the optimiser

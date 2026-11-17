@@ -127,6 +127,15 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test e isa OptimizationFailure && occursin("monitor threw at iteration 3", e.msg) && e.iterations == 3
     @test e.history.monitors.b[1:2] == [1.0, 1.0] && isnan(e.history.monitors.b[3])
     @test load_checkpoint(dirb).iteration == 3
+    # any other exception (here, the post driver) writes a checkpoint at the last accepted design and is rethrown
+    qp = compliance_problem()
+    dirp = mktempdir()
+    postp = OptPostProcessor((p, ctx) -> ctx.iteration == 3 && error("driver"); every = 1, initial = false)
+    @test_throws ErrorException solve!(qp.problem, DensityMethod(OC()); maxiter = 6, verbose = 0, stop = nothing,
+                                       checkpoint = Checkpoint(filepath = dirp, every = 10), post = postp,
+                                       monitors = (grey = Grey(qp.θ, qp.dΩ),))
+    ckp = load_checkpoint(dirp)
+    @test ckp.iteration == 3 && ckp.history.n == 3 && length(ckp.history.monitors.grey) == 3
     # a monitor that returns something else than a number
     qn = compliance_problem()
     @test_throws OptimizationFailure solve!(qn.problem, DensityMethod(OC()); maxiter = 2, verbose = 0, stop = nothing,
@@ -136,7 +145,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test_throws ArgumentError StopCriteria(-1.0, 10, nothing, nothing, nothing, nothing, nothing)
     @test_throws ArgumentError RejectStep(2.0, 1)
     @test_throws ArgumentError Checkpoint("x", 0)
-    for n in (:get_bounds, :changed!, :set_beta!, :design_gradient!, :update_fields!, :is_linear_field, :version,
+    for n in (:get_bounds, :changed!, :set_beta!, :design_gradient!, :update_fields!, :is_linear_field, :state_version,
               :invalidate!, :refresh!, :default_stop, :default_metric, :monitor_value)
       @test Base.ispublic(HyperShape, n) && !Base.isexported(HyperShape, n) && isdefined(HyperShape, n)
     end
@@ -224,7 +233,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
       e
     end
     @test err isa OptimizationFailure && occursin("first iteration", sprint(showerror, err))
-    @test err.iterations == 0 && isempty(err.history.iteration) && size(err.history.continuation, 2) == 0
+    @test err.iterations == 0 && isempty(err.history.iteration) && all(isempty, err.history.continuation)
   end
 
   @testset "OC: move limit per continuation stage, banner" begin
@@ -277,20 +286,20 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     sched = Continuation(β = q.H => [1.0, 2.0, 4.0]; every = 3)
     r = solve!(q.problem, DensityMethod(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 12, continuation = sched,
                verbose = 0, on_failure = RejectStep(shrink = 0.5, max_attempts = 3), stop = nothing)
-    @test vec(r.history.continuation)[1:9] == [1, 1, 1, 2, 2, 2, 4, 4, 4]
-    @test q.H.β == 4.0 && r.history.names == [:β]
+    @test r.history.continuation.β[1:9] == [1, 1, 1, 2, 2, 2, 4, 4, 4]
+    @test q.H.β == 4.0 && keys(r.history.continuation) == (:β,)
     # a criterion always met: one iteration per stage, stop in the last one
     q = compliance_problem()
     r = solve!(q.problem, DensityMethod(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 12, stop = StopCriteria(change_tol = 1.0),
                continuation = Continuation(β = q.H => [1.0, 2.0, 4.0]; every = 3, close_early = true), verbose = 0,
                on_failure = RejectStep(shrink = 0.5, max_attempts = 3))
     @test r.status === :converged && r.reason === :change_tol && r.iterations == 6   # not at the first iteration of a stage
-    @test vec(r.history.continuation) == [1, 1, 2, 2, 4, 4]
+    @test r.history.continuation.β == [1, 1, 2, 2, 4, 4]
     # by default the criteria only act in the last stage: the earlier stages run their `every` iterations
     q = compliance_problem()
     r = solve!(q.problem, DensityMethod(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 12, stop = StopCriteria(change_tol = 1.0),
                continuation = Continuation(β = q.H => [1.0, 2.0, 4.0]; every = 3), verbose = 0)
-    @test r.status === :converged && r.iterations == 8 && vec(r.history.continuation) == [1, 1, 1, 2, 2, 2, 4, 4]
+    @test r.status === :converged && r.iterations == 8 && r.history.continuation.β == [1, 1, 1, 2, 2, 2, 4, 4]
     # kkt with an optimiser that does not compute it
     q = compliance_problem()
     @test_throws ArgumentError solve!(q.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 3, stop = StopCriteria(kkt_tol = 1e-3),
@@ -431,7 +440,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test ck.stage == 2 && ck.stage_iterations == 2
     qc = compliance_problem(); rc = run(qc, 9; resume = ck)
     @test get_values(qc.z) ≈ get_values(qa.z) rtol = 1e-12
-    @test vec(rc.history.continuation) == vec(ra.history.continuation)
+    @test rc.history.continuation == ra.history.continuation
     qd = compliance_problem()
     @test_throws ArgumentError solve!(qd.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 9, resume = ck,
                                       continuation = Continuation(β = qd.H => [1.0]; every = 3), verbose = 0, on_failure = RejectStep(shrink = 0.5, max_attempts = 3), stop = nothing)
@@ -442,7 +451,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     r = solve!(q.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 40, stop = StopCriteria(objective_range = 5e-2, window = 2),
                continuation = Continuation(β = q.H => [1.0, 2.0, 4.0, 8.0]; every = 20, close_early = true), verbose = 0,
                on_failure = RejectStep(shrink = 0.5, max_attempts = 3))
-    c = vec(r.history.continuation)
+    c = r.history.continuation.β
     lengths = [count(==(v), c) for v in unique(c)]
     @test all(>=(2), lengths[1:end-1])          # window iterations at least before a stage can end
     @test StopCriteria(objective_range = 1e-3).window == 10

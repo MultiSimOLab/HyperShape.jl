@@ -63,14 +63,14 @@ function PhysicalFields(x::DesignFields; backend = :compiled, kwargs...)
 end
 
 """
-    version(θ::PhysicalFields)
+    state_version(θ::PhysicalFields)
 
 Counter of changes of the physical fields. It grows in [`update_fields!`](@ref) when z or a parameter of a map
 (`set_beta!`) changed. Note that the fields themselves read β lazily: forms assembled after `set_beta!` already see
 the new value, but operators that depend on θ only notice the change after `update_fields!`. Two `PhysicalFields`
 built on the same `DesignFields` are independent: each one is brought up to date by its own `update_fields!`.
 """
-version(θ::PhysicalFields) = getfield(θ, :version)[]
+state_version(θ::PhysicalFields) = getfield(θ, :version)[]
 function Base.getproperty(θ::PhysicalFields, s::Symbol)
   f = getfield(θ, :fields)
   haskey(f, s) || throw(ArgumentError("no physical field named $s; available: $(join(keys(f), ", "))"))
@@ -90,7 +90,7 @@ function update_fields!(θ::PhysicalFields, ctx)
   update_fields!(x, ctx)
   seen, seen_params = getfield(θ, :seen), getfield(θ, :seen_params)
   chains = getfield(θ, :chains)
-  xchanged = seen[] != version(x)
+  xchanged = seen[] != state_version(x)
   changed = xchanged
   for (j, chain) in enumerate(chains)
     params = _parameter_version(chain)
@@ -103,7 +103,7 @@ function update_fields!(θ::PhysicalFields, ctx)
     seen_params[j] = params
     changed |= pchanged
   end
-  seen[] = version(x)
+  seen[] = state_version(x)
   changed && (getfield(θ, :version)[] += 1)
   θ
 end

@@ -110,7 +110,7 @@ end
 
 function _print_row(p::_Printer, hist::OptHistory)
   p.level >= 2 || return nothing
-  _flush_columns(p, hist.names)
+  _flush_columns(p, hist.continuation_names)
   k = hist.n
   t = time()
   dt = t - p.tlast
@@ -128,8 +128,8 @@ function _print_row(p::_Printer, hist::OptHistory)
   end
   @printf(p.io, "  %9s  %9s  %9s  %9s  %9s", _e(hist.kkt[k]), _e(hist.stationarity[k]), _e(hist.change[k]),
           _e(hist.step[k]), _e(μ))
-  for j in axes(hist.continuation, 1)
-    print(p.io, "  ", _pad(_g(hist.continuation[j, k]), p.widths[j]))
+  for j in axes(hist.continuation_values, 1)
+    print(p.io, "  ", _pad(_g(hist.continuation_values[j, k]), p.widths[j]))
   end
   for (j, n) in enumerate(p.monitors)
     v = hist.monitor_values[j, k]

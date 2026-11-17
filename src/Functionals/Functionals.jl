@@ -9,7 +9,7 @@ module Functionals
 using Gridap
 using Gridap.FESpaces
 using HyperFEM: HyperFEM, get_state, get_spaces
-using ..Operators: StateOperator, apply!, version, dirichlet_values
+using ..Operators: StateOperator, apply!, state_version, dirichlet_values
 import ..Operators: invalidate!
 using ..Operators: get_model as HyperShape_get_model
 using ..Variables: PhysicalFields, DesignFields, Identity, update_fields!, design_gradient!, get_designfields,
@@ -151,7 +151,7 @@ _total(v::Real) = Float64(v)
 _total(v) = Float64(sum(v))
 
 _state_version(F::Functional{FJ,FD,Nothing}) where {FJ,FD} = 0
-_state_version(F::Functional) = version(F.S)
+_state_version(F::Functional) = state_version(F.S)
 
 _compute_value(F::Functional{FJ,FD,Nothing}, ctx) where {FJ,FD} = _total(F.J(F.θ))
 function _compute_value(F::Functional, ctx)
@@ -164,7 +164,7 @@ function _raw_value(F::Functional, ctx)::Float64
   update_fields!(F.θ, ctx)
   F.S === nothing || apply!(F.S, ctx)
   c = F.cache
-  vθ, vS = Float64(version(F.θ)), Float64(_state_version(F))
+  vθ, vS = Float64(state_version(F.θ)), Float64(_state_version(F))
   (c[1] == vθ && c[2] == vS) && return c[3]
   v = _compute_value(F, ctx)
   c[1], c[2], c[3] = vθ, vS, v

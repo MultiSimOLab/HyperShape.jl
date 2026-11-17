@@ -31,7 +31,7 @@ using Gridap.Algebra: residual!
 using HyperFEM: get_spaces, StaticLinearModel, NothingBC
 using HyperFEMKernels: KernelOperator, update
 using ..Operators: LinearOperator, solve_linear!, OptContext
-import ..Operators: version, refresh!, invalidate!
+import ..Operators: state_version, refresh!, invalidate!
 
 export FieldVariable, OptVariables, DesignFields, PhysicalFields
 export Identity, HelmholtzFilter, TanhProjection, CellMean
