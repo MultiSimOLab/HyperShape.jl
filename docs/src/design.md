@@ -1,7 +1,8 @@
 # Design
 
 !!! note
-    This page describes the planned interface. Names and signatures may still change.
+    Phase 0 (linear density methods) is implemented; the sections marked *planned* describe later phases. Names may
+    still change until the package is registered.
 
 ```
 OptVariables z ─► DesignFields x ─► PhysicalFields θ ─► weak forms ─► StateOperator (u, p)
@@ -37,7 +38,7 @@ Sf = LinearOperator(StaticLinearModel(af, Uf, Vf, NothingBC(); ls = LUSolver()))
 θ = PhysicalFields(x; ρ = HelmholtzFilter(Sf, dΩ))
 ```
 
-- Maps are composed with `∘` in the mathematical order: `H ∘ F` filters first and projects after.
+- Maps are composed with `∘` in the mathematical order: `proj ∘ F` filters first and projects after.
 - The filter output lives in the trial space of the filter model (usually P1), also for a P0 design field. The
   projection is applied point by point at the quadrature points, so `θ.ρ` is a Gridap `CellField`.
 - `θ.ρ` is a fixed object updated in place: weak forms capture it once (checked with the lazy and the compiled
@@ -61,9 +62,9 @@ Sf = LinearOperator(StaticLinearModel(af, Uf, Vf, NothingBC(); ls = LUSolver()))
 Planned: global parameters as blocks (applied voltage, fibre angle), frozen regions and scaling in the map `z → x`,
 physical fields that depend on several design fields, material interpolation in the map `x → θ`.
 
-## Constitutive wrappers
+## Constitutive wrappers (planned, phase 1)
 
-The design enters the physics through constitutive models that wrap HyperFEM models by aggregation and return, besides
+The design will enter the physics through constitutive models that wrap HyperFEM models by aggregation and return, besides
 the energy and its derivatives, the analytical derivatives with respect to the physical fields (energy interpolation,
 SIMP/RAMP per phase, interpolation of the solid contribution only in electro- and magneto-mechanics).
 
@@ -83,8 +84,8 @@ Two kinds of operator wrap a HyperFEM computational model built by the user.
   when one of them has changed.
 - HyperShape never chooses a solver: a default `solve` calls the solver of the user's model. Nonlinear, staggered and
   transient models need the user's `solve` (the load stepping and the restart are modelling decisions).
-- `ctx` is a read-only context updated by HyperShape: design iteration, attempt, continuation values and phase. Until
-  the common optimisation loop exists, whoever updates the fields passes it (`nothing` when the fields are built).
+- `ctx` is a read-only context updated by HyperShape: design iteration, attempt, continuation values and phase.
+  `solve!` passes it to every solve function of the user; outside the loop (checks, scripts) `nothing` is accepted.
 - The adjoint is another state operator; its forms are written by the user, typically the tangent of the forward
   problem with trial and test functions swapped.
 
@@ -173,7 +174,7 @@ Vol = Volume(θ, dΩ; max_fraction = 0.5)   # physical (projected) density: nonl
 problem = Optimization(objective = J, constraints = (volume = Vol,))   # z is the one behind J
 result  = solve!(problem, DensityMethod(SiMPL(); metric = LumpedMass(dΩ));
                  maxiter = 300, stop = StopCriteria(stationarity_rtol = 1e-3),
-                 continuation = Continuation(β = H => [1, 2, 4, 8, 16, 32]; every = 40),
+                 continuation = Continuation(β = proj => [1, 2, 4, 8, 16, 32]; every = 40),
                  checkpoint = Checkpoint(filepath = "results/ckpt", every = 10),
                  monitors = (grey = Grey(θ, dΩ),),
                  post = OptPostProcessor((post, ctx) -> write_step(post, Ω, "rho" => θ.ρ); every = 10,
@@ -242,7 +243,8 @@ shrink!(opt, state, factor)                      # roll back the last step, redu
 ```
 
 The oracle is the only thing an optimiser may ask: value and derivative of the objective, value at a trial point
-(forward problem only), bounds, the linear (volume) constraint and the inner product of the design metric.
+(forward problem only), bounds, the constraint (its vector when it is linear; its value and derivative when it is
+nonlinear, which needs no forward solve) and the inner product of the design metric.
 Implemented: `OC` (optimality criteria of top88, with adaptive move limits per entry by default) and `SiMPL` (mirror descent with a latent variable, Armijo or
 Bregman line search). `FunctionOracle` builds an oracle from plain functions:
 
@@ -276,8 +278,9 @@ post = OptPostProcessor(every = 10, filepath = "results/mbb") do post, ctx
 end
 ```
 
-- `write_step` writes with a `FieldWriter` (one per name, built at the first call, closed when `solve!` returns,
-  fails or is interrupted). The mesh is built once and is continuous (one point per vertex of the grid, not one per
+- `write_step` writes with a `HyperShape.FieldWriter` (public, not exported, as it is meant to move to HyperFEM), one
+  per name, built at the first call and closed when `solve!` returns,
+  fails or is interrupted. The mesh is built once and is continuous (one point per vertex of the grid, not one per
   cell and vertex as `createvtk`); the values come straight from the degrees of freedom: P0 as cell data, P1/Q1 as
   point data, pointwise operations on them and on constants (`θ.ρ`, `E ∘ θ.ρ`, `1 - ρ`) and `extend_field`. Other
   fields (gradients, discontinuous spaces) are evaluated by Gridap at the vertices, with a warning.
@@ -322,7 +325,7 @@ A default never removes generality: everything it sets can be replaced from the 
 | continued objects `TanhProjection` (β), `OC` (move) | `Continuation` | any `Parameter` read by the user's forms or maps |
 | monitor `Grey` | `solve!(…; monitors)` | any object with `monitor_value(m)` |
 | `initial = true`, `history = true`, `name = "optimization"` | `OptPostProcessor` | the keyword of the same name |
-| `format = :vtu`, `precision = Float64`, `compress = false`, `async = Threads.nthreads() > 1` | `OptPostProcessor` (writers of `write_step`) | the keyword of the same name; `write_step(post, w::FieldWriter, …)` with a writer of your own; or `createvtk` in the driver |
+| `format = :vtu`, `precision = Float64`, `compress = false`, `async = Threads.nthreads() > 1` | `OptPostProcessor` (writers of `write_step`) | the keyword of the same name; `write_step(post, w::HyperShape.FieldWriter, …)` with a writer of your own; or `createvtk` in the driver |
 
 The solver is always the one of the user's model. For example, with PETSc (GridapPETSc) build the model with
 `ls = PETScLinearSolver()`; the default `solve` then calls it. Any other solve (a preconditioner rebuilt only every few

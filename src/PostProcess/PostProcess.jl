@@ -172,7 +172,7 @@ appears when the writers are closed at the end is logged with `@error` and `solv
 After a stall in a continuation stage whose last iteration was already written, the result of `solve!` is at the new
 stage but that iteration is not written again.
 
-The driver can write with [`write_step`](@ref) (`createvtk`), add any file it writes itself (`get_pvd(post)[ctx.iteration]
+The driver can write with [`write_step`](@ref) (HyperShape's fast writer), add any file it writes itself (`get_pvd(post)[ctx.iteration]
 = "file.vtu"`) or write nothing to the collection. Fields: `post.filepath`, `post.every`, `post.iteration` (of the
 current call) and `post.problem` (the `Optimization` being solved, set by `solve!`; it can be built before or after
 the post-processor).

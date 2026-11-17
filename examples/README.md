@@ -1,4 +1,14 @@
 # Examples
 
-Complete optimisation scripts will live here. None yet: the package is at the design stage
-(see the *Design* page of the documentation).
+Complete optimisation scripts. Each one defines a function with the size and the output folder as keywords and runs
+it when the file is executed:
+
+```
+julia --project=examples -e 'using Pkg; Pkg.instantiate()'     # once
+julia --project=examples -t auto examples/mbb.jl
+```
+
+- `mbb.jl`: half MBB beam, compliance minimisation with a density method, Helmholtz filter, tanh projection with
+  continuation, volume constraint, SiMPL, checkpoints and VTU output (the script of the README).
+
+The test suite runs every example at a small size.

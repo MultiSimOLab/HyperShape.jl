@@ -4,15 +4,11 @@ using Test
 @testset "HyperShape.jl" begin
 
     @testset "Package loads and exports its public names" begin
-        legacy = (:FEFunctional, :OptimFEVariable, :update!, :pushforward!, :pullback!,
-                  :adimensionalize!, :evaluate_derivative!, :evaluate_objective, :evaluate!,
-                  :get_space, :get_derivative)
-        @test !isdefined(HyperShape, :TopOpt)   # earlier prototype, removed
-        for name in legacy
-            @test !(name in names(HyperShape))
-        end
-        for name in (:OC, :SiMPL, :Optimization, :DensityMethod, :StateOperator, :Functional)
+        for name in (:OC, :SiMPL, :Optimization, :DensityMethod, :StateOperator, :Functional, :solve!)
             @test name in names(HyperShape)
+        end
+        for name in (:FieldWriter, :write_fields)          # public, not exported (to move to HyperFEM)
+            @test Base.ispublic(HyperShape, name) && !Base.isexported(HyperShape, name)
         end
     end
 
@@ -24,5 +20,6 @@ using Test
     include("Methods/runtests.jl")
     include("PostProcess/runtests.jl")
     include("Validation/runtests.jl")
+    include("Examples/runtests.jl")
 
 end

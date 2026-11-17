@@ -4,6 +4,7 @@ using HyperFEM
 using HyperShape
 using HDF5
 using Test
+using HyperShape: FieldWriter, write_fields
 using HyperShape.PostProcess: _plan, _lazy_plan, _values!, _ExtNode, _LazyNode, npoints, ncells
 
 # fast values of a field against Gridap's evaluation at the vertices (averaged at the nodes: exact for continuous fields)

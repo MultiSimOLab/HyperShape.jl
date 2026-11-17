@@ -4,9 +4,9 @@
 /Manifest.toml
 /docs/Manifest.toml
 /validation/Manifest.toml
+/examples/Manifest.toml
 /docs/build/
 /.vscode
-data/sims/
 results/
 **/.DS_Store
 
