@@ -111,7 +111,9 @@ default_metric(::OC) = Euclidean()
 default_metric(opt::Optimizer) =
   throw(ArgumentError("DensityMethod: $(nameof(typeof(opt))) needs a metric: DensityMethod(opt; metric = LumpedMass(dΩ)) or Euclidean()"))
 
-_valid_metric(m) = m isa Metric || m isa AbstractVector{<:Real} || hasmethod(metric_weights, Tuple{typeof(m),Any})
+# an object of the user is checked when the weights are asked for (its metric_weights may restrict the type of z)
+_valid_metric(m) = !(m isa Union{Nothing,Symbol,AbstractString,Number,Tuple,AbstractVector}) ||
+                   m isa AbstractVector{<:Real}
 
 """
     metric_weights(m, z) -> AbstractVector
@@ -123,7 +125,13 @@ function metric_weights end
 
 _block_metric(::Euclidean, V) = ones(num_free_dofs(V))
 _block_metric(m::AbstractVector{<:Real}, V) = _checked_weights(m, num_free_dofs(V))
-_block_metric(m, V) = _checked_weights(metric_weights(m, V), num_free_dofs(V))
+_block_metric(m, V) = _checked_weights(_weights(m, V), num_free_dofs(V))
+
+function _weights(m, z)
+  applicable(metric_weights, m, z) ||
+    throw(ArgumentError("DensityMethod: no method metric_weights(::$(typeof(m)), ::$(typeof(z))) for the metric"))
+  metric_weights(m, z)
+end
 
 function _checked_weights(w, n)
   length(w) == n || throw(ArgumentError("DensityMethod: the metric has $(length(w)) weights; $n are needed"))
@@ -135,7 +143,7 @@ _block_metric(m::LumpedMass, V) = collect(assemble_vector(v -> ∫(v)m.measure, 
 _metric_vector(::Euclidean, z::OptVariables) = nothing
 _metric_vector(m::LumpedMass, z::OptVariables) = reduce(vcat, [_block_metric(m, b.space) for b in z.blocks])
 _metric_vector(m::AbstractVector{<:Real}, z::OptVariables) = _checked_weights(m, length(z))
-_metric_vector(m, z::OptVariables) = _checked_weights(metric_weights(m, z), length(z))
+_metric_vector(m, z::OptVariables) = _checked_weights(_weights(m, z), length(z))
 function _metric_vector(m::NamedTuple, z::OptVariables)
   Set(keys(m)) == Set(z.names) ||
     throw(ArgumentError("DensityMethod: the metric has blocks $(join(keys(m), ", ")); z has $(join(z.names, ", "))"))

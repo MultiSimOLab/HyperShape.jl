@@ -6,7 +6,8 @@
 #   update_stage!(s, ctx)     recompute the output from the input (in place)
 #   pullback(s, L, ctx, key)  L: δ_out ↦ DomainContribution, linear form on the output; returns the linear form on the input
 #                             (key: identifies the form for the compiled assemblers, see Assembly.jl)
-#   parameter_version(s)      counter of the parameters of the map (β of a TanhProjection); 0 if it has none
+#   parameter_version(s)      counter of the parameters of the map (β of a TanhProjection, the Parameters of a
+#                             PointwiseMap, the dependencies of a filter's operator); 0 if it has none
 #   is_lazy(s)                true if the output is evaluated lazily (nothing to recompute when an earlier parameter changes)
 
 """
@@ -198,6 +199,9 @@ has_parameters(s) = false
 has_parameters(s::TanhStage) = true
 is_lazy(s) = true
 is_lazy(s::FilterStage) = false
+# the dependencies of the filter's operator (a Parameter read by its form): a change re-solves the filter
+parameter_version(s::FilterStage) = sum(state_version, s.op.depends; init = 0)
+has_parameters(s::FilterStage) = !isempty(s.op.depends)
 update_stage!(s::TanhStage, ctx) = s
 function pullback(s::TanhStage, L, ctx, key)
   slope = s.slope
@@ -214,7 +218,7 @@ user's own. `f` and `df` are functions of one number. If they read [`Parameter`]
 Lazy, like [`TanhProjection`](@ref): nothing is recomputed, the forms evaluate `f` and `df` when they are assembled.
 
 ```julia
-p = Parameter(8.0)
+const p = Parameter(8.0)       # const: closures that read it do not allocate
 smooth_step = PointwiseMap(ρ -> 1 / (1 + exp(-p[] * (ρ - 0.5))),
                            ρ -> (s = 1 / (1 + exp(-p[] * (ρ - 0.5))); p[] * s * (1 - s)); parameters = (p,))
 θ = PhysicalFields(x; ρ = smooth_step ∘ HelmholtzFilter(dΩ; rmin, ls))
@@ -232,7 +236,8 @@ struct PointwiseMap{F,D,P<:Tuple} <: FieldMap
     new{F,D,P}(f, df, parameters)
   end
 end
-PointwiseMap(f, df; parameters = ()) = PointwiseMap(f, df, Tuple(parameters))
+PointwiseMap(f, df; parameters = ()) =
+  PointwiseMap(f, df, parameters isa Union{Tuple,AbstractVector} ? Tuple(parameters) : (parameters,))
 
 struct PointwiseStage{M,I,F,D}
   map::M

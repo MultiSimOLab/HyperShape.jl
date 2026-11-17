@@ -142,7 +142,9 @@ factor, a weight. `p[]` reads it and `p[] = v` changes it (its [`state_version`]
 changes). Read it inside the weak forms (`E(ρ) = Emin + ρ^p[] * (1 - Emin)`) and give it as a dependency of the
 operators whose models read it (`StateOperator(model, (θ, p))`), so they solve again when it changes; inside a map,
 give it in the `parameters` of a `PointwiseMap`. Continue it in stages with `Continuation(p = p => [1, 2, 3]; every)`.
-A functional that reads it directly (not through a state) must depend on a state or fields that do.
+A functional that reads it directly (not through a state or θ) lists it in its `parameters`. A parameter read by a
+model but not declared as a dependency is not detected by `check_consistency`: after it changes, the operator would
+keep its old solution.
 """
 mutable struct Parameter
   value::Float64

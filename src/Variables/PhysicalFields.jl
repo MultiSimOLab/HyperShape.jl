@@ -36,7 +36,7 @@ function PhysicalFields(x::DesignFields; backend = :compiled, kwargs...)
   for (k, spec) in pairs(kwargs)
     src, map = spec isa Pair ? (spec.first, spec.second) : (k, spec)
     src isa Symbol || throw(ArgumentError("PhysicalFields: field $k: the source must be a Symbol, got $(typeof(src))"))
-    map isa FieldMap || throw(ArgumentError("PhysicalFields: field $k: expected a map (Identity(), HelmholtzFilter, TanhProjection, …), got $(typeof(map))"))
+    map isa FieldMap || throw(ArgumentError("PhysicalFields: field $k: expected a map (Identity(), HelmholtzFilter, TanhProjection, CellMean, PointwiseMap, …), got $(typeof(map))"))
     i = findfirst(==(src), xnames)
     i === nothing && throw(ArgumentError("PhysicalFields: field $k: no design field named $src; available: $(join(xnames, ", "))"))
     push!(sources, i)
@@ -66,7 +66,8 @@ end
     state_version(θ::PhysicalFields)
 
 Counter of changes of the physical fields. It grows in [`update_fields!`](@ref) when z or a parameter of a map
-(`set_beta!`) changed. Note that the fields themselves read β lazily: forms assembled after `set_beta!` already see
+changed (`set_beta!`, a `Parameter` of a `PointwiseMap` or of a filter's operator). Note that the fields themselves
+read β lazily: forms assembled after `set_beta!` already see
 the new value, but operators that depend on θ only notice the change after `update_fields!`. Two `PhysicalFields`
 built on the same `DesignFields` are independent: each one is brought up to date by its own `update_fields!`.
 """
@@ -111,8 +112,8 @@ end
 function _needs_update_after_parameters(chain::Tuple)
   seen_parameters = false
   for s in chain
+    seen_parameters |= has_parameters(s)      # a stage with parameters, or after one, that is not lazy
     seen_parameters && !is_lazy(s) && return true
-    seen_parameters |= has_parameters(s)
   end
   false
 end
@@ -187,7 +188,8 @@ end
     is_linear_field(θ::PhysicalFields, name) -> Bool
 
 Whether the physical field `name` depends linearly on its design field: every map of its chain is linear
-([`Identity`](@ref), [`HelmholtzFilter`](@ref), [`CellMean`](@ref)); a [`TanhProjection`](@ref) projection is not.
+([`Identity`](@ref), [`HelmholtzFilter`](@ref), [`CellMean`](@ref)); a [`TanhProjection`](@ref) or a
+[`PointwiseMap`](@ref) is not.
 """
 function is_linear_field(θ::PhysicalFields, name::Symbol)
   j = findfirst(==(name), getfield(θ, :names))

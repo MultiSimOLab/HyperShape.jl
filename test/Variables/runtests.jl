@@ -560,6 +560,22 @@ end
     @test !HyperShape.Variables.is_linear_field(PhysicalFields(DesignFields(OptVariables(ρ = FieldVariable(p.V0;
             bounds = (0.0, 1.0), init = 0.5)); ρ = Identity()); ρ = PointwiseMap(f, df)), :ρ)
     @test occursin("PointwiseMap", sprint(show, PointwiseMap(f, df)))
+    @test PointwiseMap(f, df; parameters = prm).parameters === (prm,)        # a single parameter
+    # a Parameter read by the form of a filter, declared as a dependency of its operator: a change re-solves it
+    r = Parameter(0.1)
+    dΩ = p.dΩ
+    afr(u, v) = ∫(r[]^2 * ∇(u) ⋅ ∇(v) + u * v)dΩ
+    Sr = LinearOperator(StaticLinearModel(afr, p.Uf, p.Vf, NothingBC(); ls = LUSolver()), (r,))
+    zr, xr, θr = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0, map = HelmholtzFilter(Sr, p.dΩ))
+    xh = FEFunction(p.V0, ρ0)
+    for rv in (0.1, 0.3)
+      r[] = rv
+      v0 = state_version(θr)
+      update_fields!(θr, nothing)
+      rv == 0.3 && @test state_version(θr) == v0 + 1
+      ref = solve(LUSolver(), AffineFEOperator((u, v) -> ∫(rv^2 * ∇(u) ⋅ ∇(v) + u * v)dΩ, v -> ∫(xh * v)dΩ, p.Uf, p.Vf))
+      @test maximum(abs, get_free_dof_values(θr.ρ) .- get_free_dof_values(ref)) < 1e-12
+    end
   end
 
   @testset "Exported names do not clash with Gridap and HyperFEM" begin

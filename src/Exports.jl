@@ -71,3 +71,4 @@ end
 @_public Methods default_metric
 @_public Methods monitor_value
 @_public Methods metric_weights
+@_public Optimizers StepInfo

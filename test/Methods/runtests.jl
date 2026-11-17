@@ -30,6 +30,14 @@ struct _UserMetric
   w::Vector{Float64}
 end
 HyperShape.metric_weights(m::_UserMetric, z) = m.w
+struct _StopAt
+  n::Int
+end
+(s::_StopAt)(info, h, ctx) = h.n >= s.n
+struct _TypedMetric
+  w::Vector{Float64}
+end
+HyperShape.metric_weights(m::_TypedMetric, z::OptVariables) = m.w
 struct _VecMonitor end
 HyperShape.monitor_value(::_VecMonitor) = [1.0, 2.0]
 struct _BadMonitor
@@ -824,6 +832,34 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test r.status === :converged && r.reason === :custom && r.iterations == 3
     @test occursin("stop: function of the user", out) && occursin("criterion of the user met", out)
     @test_throws ArgumentError solve!(compliance_problem().problem, DensityMethod(OC()); maxiter = 2, verbose = 0, stop = 1e-3)
+    # the history the function receives is trimmed to the iterations done; a non-Bool result is an error
+    seen = Int[]
+    r = solve!(compliance_problem().problem, DensityMethod(OC()); maxiter = 6, verbose = 0,
+               stop = (info, h, ctx) -> (push!(seen, length(h.objective) - h.n); all(isfinite, h.objective) && h.n >= 2))
+    @test r.reason === :custom && r.iterations == 2 && all(==(0), seen)
+    @test_throws ArgumentError solve!(compliance_problem().problem, DensityMethod(OC()); maxiter = 3, verbose = 0,
+                                      stop = (info, h, ctx) -> 1)
+    # a callable object
+    r = solve!(compliance_problem().problem, DensityMethod(OC()); maxiter = 6, verbose = 0, stop = _StopAt(3))
+    @test r.reason === :custom && r.iterations == 3
+    # metric_weights with a typed z
+    qt = compliance_problem()
+    rt = solve!(qt.problem, DensityMethod(SiMPL(); metric = _TypedMetric(copy(m))); maxiter = 2, verbose = 0, stop = nothing)
+    @test rt.iterations == 2
+    @test_throws ArgumentError solve!(compliance_problem().problem, DensityMethod(SiMPL(); metric = _StopAt(1)); maxiter = 2, verbose = 0)
+    # the same object continued under two names
+    @test_throws ArgumentError Continuation(a = prm => [1.0, 2.0], b = prm => [3.0, 4.0]; every = 2)
+    # a Parameter read by the functional only: declared in its parameters, the value follows it
+    qw = compliance_problem()
+    w = Parameter(1.0)
+    dΩw = qw.dΩ
+    Fw = Functional(θ -> w[] * sum(∫(θ.ρ)dΩw), qw.θ; derivative = θ -> (δ -> ∫(w[] * δ)dΩw), scale = 1.0, parameters = (w,))
+    Fn = Functional(θ -> w[] * sum(∫(θ.ρ)dΩw), qw.θ; derivative = θ -> (δ -> ∫(w[] * δ)dΩw), scale = 1.0)
+    ctxw = OptContext(:optimization)
+    v1, n1 = functional_value(Fw, ctxw), functional_value(Fn, ctxw)
+    w[] = 2.0
+    @test functional_value(Fw, ctxw) ≈ 2 * v1 && functional_value(Fn, ctxw) == n1   # without parameters: stale
+    @test_throws ArgumentError Functional(θ -> 0.0, qw.θ; derivative = θ -> (δ -> ∫(δ)dΩw), scale = 1.0, parameters = (1.0,))
   end
 
   @testset "Screen output" begin
