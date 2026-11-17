@@ -38,8 +38,6 @@ struct StepInfo
   stationarity::Float64
 end
 
-StepInfo(accepted, f, f_new, kkt, change, step, violation, evaluations, multiplier) =
-  StepInfo(accepted, f, f_new, kkt, change, step, violation, evaluations, multiplier, NaN)
 
 """
     constraint_tol(opt::Optimizer) -> Float64
@@ -48,6 +46,13 @@ Tolerance to which the optimiser meets a nonlinear constraint; the loop only dec
 holds to it. Default `Inf` (no requirement); `OC` and `SiMPL` return their `constraint_tol`.
 """
 constraint_tol(::Optimizer) = Inf
+
+"""
+    computes_kkt(optimizer) -> Bool
+
+Whether the optimiser reports an optimality measure (`kkt` in [`StepInfo`](@ref)); `StopCriteria(kkt_tol)` needs one.
+"""
+computes_kkt(::Optimizer) = true
 
 """
     memory(opt::Optimizer, state, z) -> Vector{Float64} or nothing

@@ -27,7 +27,7 @@ compliance the code prints; the tables below give the compliance of the final de
 | 150×50 P0, Gauss points, `SiMPL()` | 235.542 | +0.08 % | 45 | 1.9 s |
 | 150×50 P1, Gauss points, `SiMPL()` | 235.934 | +0.24 % | 48 | 2.0 s |
 
-*OC as top88* is `OC(adapt = nothing)` with `StopCriteria(change = 0.01)`; `OC()` and `SiMPL()` use the defaults of
+*OC as top88* is `OC(adapt = nothing)` with `StopCriteria(change_tol = 0.01)`; `OC()` and `SiMPL()` use the defaults of
 HyperShape (adaptive move limits, stop when the objective settles).
 
 - **Cell mean or Gauss points.** top88 gives each element one physical density, the cell mean of the filtered nodal
@@ -46,7 +46,7 @@ arXiv:2411.19421v3. Table 1 (768×256): SiMPL 1.2078e-3 in 50 iterations, OC 1.2
 30 iterations): 1.0566e-3. Setup of the authors' code (problem MBB2 of `miniapps/simpl` in dohyun-cse/mfem):
 (0, 3)×(0, 1), 768×256, plane strain, ν = 0.3, Emin = 1e-6, volume 0.3, P0 control, body force (0, −1) in the disc of
 radius 0.05 at (0, 1), roller on the bottom edge for x > 3 − 1/32, stop at the stationarity measure
-Sₖ = ‖z − P(z − g)‖ ≤ 1e-5 (L2 metric, `StopCriteria(stationarity = 1e-5)` with `LumpedMass(dΩ)`).
+Sₖ = ‖z − P(z − g)‖ ≤ 1e-5 (L2 metric, `StopCriteria(stationarity_tol = 1e-5)` with `LumpedMass(dΩ)`).
 
 | Case | C | vs reference | iterations | time |
 |---|---|---|---|---|

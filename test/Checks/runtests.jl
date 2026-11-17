@@ -2,7 +2,7 @@ using Gridap
 using Gridap.FESpaces
 using HyperFEM
 using HyperShape
-using HyperShape.Variables: get_values, set_values!, version, set_beta!
+using HyperShape.Variables: get_values, set_values!, state_version, set_beta!
 using HyperShape.Operators: apply!
 using HyperShape.Checks: ConsistencyReport
 using LinearAlgebra
@@ -24,7 +24,7 @@ function filter_problem(af_of; n = 6, depends_of = x -> ())
   af = af_of(x, dΩ)
   Sf = LinearOperator(StaticLinearModel(af, TrialFESpace(Vf), Vf, NothingBC(); ls = LUSolver()); depends = depends_of(x),
                       solve = (m, b, ctx, stale) -> solve!(m, b; Assembly = stale))
-  θ = PhysicalFields(x; ρ = Heaviside(β = 2.0, η = 0.5) ∘ HelmholtzFilter(Sf, dΩ))
+  θ = PhysicalFields(x; ρ = TanhProjection(β = 2.0, η = 0.5) ∘ HelmholtzFilter(Sf, dΩ))
   F = Functional(θ -> ∫(θ.ρ * θ.ρ)dΩ, θ; derivative = θ -> (δ -> ∫(2 * θ.ρ * δ)dΩ), scale = 1.0)
   (; z, x, θ, F, dΩ)
 end
@@ -189,7 +189,7 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     V0 = TestFESpace(model, ReferenceFE(lagrangian, Float64, 0); conformity = :L2)
     z = OptVariables(ρ = FieldVariable(V0; bounds = (0.0, Inf), init = [0.5 + 0.3 * sin(i) for i in 1:num_free_dofs(V0)]))
     x = DesignFields(z; ρ = Identity())
-    θ = PhysicalFields(x; ρ = Heaviside(β = 2.0, η = 0.5), E = :ρ => Identity())
+    θ = PhysicalFields(x; ρ = TanhProjection(β = 2.0, η = 0.5), E = :ρ => Identity())
     F = Functional(θ -> ∫(θ.ρ * θ.E)dΩ, θ; derivative = θ -> (ρ = δ -> ∫(θ.E * δ)dΩ, E = δ -> ∫(θ.ρ * δ)dΩ), scale = 1.0)
     r = check_consistency((energy = F,))
     @test r.passed
@@ -242,7 +242,7 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     q = filter_problem(symmetric_filter)
     Sf = HyperShape.Variables.filter_operators(q.θ)[1]
     dΩ = q.dΩ
-    θ2 = PhysicalFields(q.x; ρ = Heaviside(β = 3.0, η = 0.4) ∘ HelmholtzFilter(Sf, dΩ), E = :ρ => HelmholtzFilter(Sf, dΩ))
+    θ2 = PhysicalFields(q.x; ρ = TanhProjection(β = 3.0, η = 0.4) ∘ HelmholtzFilter(Sf, dΩ), E = :ρ => HelmholtzFilter(Sf, dΩ))
     F = Functional(θ -> ∫(θ.ρ * θ.E)dΩ, θ2; derivative = θ -> (ρ = δ -> ∫(θ.E * δ)dΩ, E = δ -> ∫(θ.ρ * δ)dΩ), scale = 1.0)
     r = check_consistency(F)
     @test r.passed

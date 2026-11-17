@@ -4,7 +4,7 @@
 include(joinpath(@__DIR__, "cases.jl"))
 println("Julia $(VERSION), threads $(Threads.nthreads()), $(Sys.cpu_info()[1].model)\n")
 mbb(; case = :top88, nx = 12, ny = 4, vf = 0.5, rmin = 1.5, Emin = 1e-9, maxiter = 2)        # compile
-t88 = (; opt = OC(adapt = nothing), stop = StopCriteria(change = 0.01))
+t88 = (; opt = OC(adapt = nothing), stop = StopCriteria(change_tol = 0.01))
 println("| Case | C | vs reference | iterations | status | time |\n|---|---|---|---|---|---|")
 for (nx, ny, ref) in ((60, 20, 237.60), (150, 50, 235.36))
   base = (; case = :top88, nx, ny, vf = 0.5, rmin = 0.04nx, Emin = 1e-9)

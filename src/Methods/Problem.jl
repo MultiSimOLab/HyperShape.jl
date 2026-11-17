@@ -1,33 +1,20 @@
 # Problem, metric and the oracle that connects the functionals with the optimisers.
 
-"""
-    OptimizationFailure(msg)
-
-Thrown by [`solve!`](@ref) when the optimisation cannot continue: the forward problem does not converge at the
-current design (first iteration or right after a continuation jump), every attempt of a step was rejected, or a
-gradient is not finite (failed adjoint). `z`, the fields and the states are left at the last accepted design, and
-the checkpoint (if any) is written first. `history` holds the [`OptHistory`](@ref) up to the last accepted
-iteration and `iterations` its number (`nothing` and `0` when thrown outside the loop).
-"""
-struct OptimizationFailure <: Exception
-  msg::String
-  history::Any
-  iterations::Int
-end
-OptimizationFailure(msg::AbstractString) = OptimizationFailure(String(msg), nothing, 0)
-Base.showerror(io::IO, e::OptimizationFailure) = print(io, "OptimizationFailure: ", e.msg)
-
 _optvariables(F::Functional) = get_optvariables(get_designfields(F.θ))
 
 struct _Validated end   # only the keyword constructors build problems
 
 """
-    Optimization(z; objective, constraints = ())
+    Optimization(; objective, constraints = (;))
+    Optimization(z; objective, constraints = (;))
 
-Optimisation problem over the variables `z`: minimise the [`Functional`](@ref) `objective` subject to the bounds of
-`z` and, in phase 0, at most one constraint `g(z) ≤ 0`, a design-only functional: typically
-[`Volume`](@ref HyperShape.Functionals.Volume)`(θ, dΩ; max_fraction)` (volume of the physical density, nonlinear in z with a Heaviside
-projection) or `Volume(x, dΩ; max_fraction)` (volume of the design density, linear).
+Optimisation problem: minimise the [`Functional`](@ref) `objective` over the variables `z` behind it (given or not;
+when given they are checked) subject to the bounds of `z` and the named `constraints` `g(z) ≤ 0`, for example
+`constraints = (volume = Vol,)`. The names go to the history (`history.constraints.volume`), the banner and the
+checkpoint. In phase 0, at most one
+constraint, a design-only functional: typically [`Volume`](@ref HyperShape.Functionals.Volume)`(θ, dΩ; max_fraction)`
+(volume of the physical density, nonlinear in z with a tanh projection) or `Volume(x, dΩ; max_fraction)` (volume of
+the design density, linear).
 
 A constraint built as linear (`Volume` over identity or filter maps, or a `Functional(…; linear = true)`) is checked
 to be linear when the optimisation starts, and costs nothing in the loop (its vector is computed once). A nonlinear
@@ -36,7 +23,7 @@ one is linearised at every step by the optimiser, which then corrects it with ev
 
 The problem owns the context `ctx` ([`OptContext`](@ref)) that reaches the solve functions of the user.
 """
-struct Optimization{Z<:OptVariables,J<:Functional,C<:Tuple}
+struct Optimization{Z<:OptVariables,J<:Functional,C<:NamedTuple}
   z::Z
   objective::J
   constraints::C
@@ -44,18 +31,31 @@ struct Optimization{Z<:OptVariables,J<:Functional,C<:Tuple}
   Optimization(::_Validated, z, J, cs) = new{typeof(z),typeof(J),typeof(cs)}(z, J, cs, OptContext(:optimization))
 end
 
-function Optimization(z::OptVariables; objective, constraints = ())
+Optimization(z::OptVariables; objective, constraints = (;)) = _optimization(z, objective, constraints)
+Optimization(; objective, constraints = (;)) = _optimization(nothing, objective, constraints)
+
+function _optimization(z, objective, constraints)
   objective isa Functional || throw(ArgumentError("Optimization: the objective must be a Functional"))
-  cs = constraints isa Functional ? (constraints,) : Tuple(constraints)
-  length(cs) <= 1 || throw(ArgumentError("Optimization: at most one constraint in phase 0"))
-  _optvariables(objective) === z || throw(ArgumentError("Optimization: the objective is not built on these variables z"))
-  for c in cs
-    c isa Functional || throw(ArgumentError("Optimization: a constraint must be a Functional"))
-    c.S === nothing || throw(ArgumentError("Optimization: a constraint must be a design-only Functional (no states) in phase 0"))
-    _optvariables(c) === z || throw(ArgumentError("Optimization: a constraint is not built on these variables z"))
+  zJ = _optvariables(objective)
+  z === nothing && (z = zJ)
+  zJ === z || throw(ArgumentError("Optimization: the objective is not built on these variables z"))
+  constraints isa Functional &&
+    throw(ArgumentError("Optimization: name the constraints, for example constraints = (volume = Vol,)"))
+  constraints isa NamedTuple ||
+    throw(ArgumentError("Optimization: constraints must be a named tuple, for example (volume = Vol,)"))
+  length(constraints) <= 1 || throw(ArgumentError("Optimization: at most one constraint in phase 0"))
+  for (n, c) in pairs(constraints)
+    n === :objective && throw(ArgumentError("Optimization: objective is not a valid name for a constraint"))
+    c isa Functional || throw(ArgumentError("Optimization: the constraint $n must be a Functional"))
+    c.S === nothing || throw(ArgumentError("Optimization: the constraint $n must be a design-only Functional (no states) in phase 0"))
+    _optvariables(c) === z || throw(ArgumentError("Optimization: the constraint $n is not built on these variables z"))
   end
-  Optimization(_Validated(), z, objective, cs)
+  Optimization(_Validated(), z, objective, constraints)
 end
+
+Base.show(io::IO, p::Optimization) =
+  print(io, "Optimization(", length(p.z), " variables; constraints: ",
+        isempty(p.constraints) ? "none" : join(keys(p.constraints), ", "), ")")
 
 """
     Euclidean()
@@ -77,22 +77,23 @@ end
 const Metric = Union{Euclidean,LumpedMass}
 
 """
-    SIMP(optimizer; metric = default_metric(optimizer))
+    DensityMethod(optimizer; metric = default_metric(optimizer))
 
-Density method: the step is `optimizer` (any `Optimizer`: `OC(…)`, `SiMPL(…)`). `metric`:
+Density method (SIMP, RAMP or any interpolation written by the user in the weak forms): the step is `optimizer` (any
+`Optimizer`: `OC(…)`, `SiMPL(…)`). `metric`:
 [`LumpedMass`](@ref)`(dΩ)` or [`Euclidean`](@ref)`()`, or a named tuple with one of them per block of z. SiMPL uses
 it in its step and its optimality measure, and needs it (no default). OC uses it only for the stationarity measure
 (see [`StopCriteria`](@ref)); its default is `Euclidean()`, which makes that measure depend on the mesh.
 """
-struct SIMP{O<:Optimizer,M}
+struct DensityMethod{O<:Optimizer,M}
   optimizer::O
   metric::M
   default_metric::Bool   # the metric was not given (shown in the banner)
-  function SIMP(optimizer::Optimizer; metric = nothing)
+  function DensityMethod(optimizer::Optimizer; metric = nothing)
     given = metric !== nothing
     given || (metric = default_metric(optimizer))
     ok = metric isa Metric || (metric isa NamedTuple && all(m -> m isa Metric, values(metric)))
-    ok || throw(ArgumentError("SIMP: metric must be LumpedMass(dΩ), Euclidean() or a named tuple of them per block"))
+    ok || throw(ArgumentError("DensityMethod: metric must be LumpedMass(dΩ), Euclidean() or a named tuple of them per block"))
     new{typeof(optimizer),typeof(metric)}(optimizer, metric, !given)
   end
 end
@@ -100,12 +101,12 @@ end
 """
     default_metric(optimizer)
 
-Metric of [`SIMP`](@ref) when none is given: `Euclidean()` for OC (which only uses it for the stationarity measure); an error for any other
+Metric of [`DensityMethod`](@ref) when none is given: `Euclidean()` for OC (which only uses it for the stationarity measure); an error for any other
 optimiser, which must be given one.
 """
 default_metric(::OC) = Euclidean()
 default_metric(opt::Optimizer) =
-  throw(ArgumentError("SIMP: $(nameof(typeof(opt))) needs a metric: SIMP(opt; metric = LumpedMass(dΩ)) or Euclidean()"))
+  throw(ArgumentError("DensityMethod: $(nameof(typeof(opt))) needs a metric: DensityMethod(opt; metric = LumpedMass(dΩ)) or Euclidean()"))
 
 _block_metric(::Euclidean, V) = ones(num_free_dofs(V))
 _block_metric(m::LumpedMass, V) = collect(assemble_vector(v -> ∫(v)m.measure, V))
@@ -114,7 +115,7 @@ _metric_vector(::Euclidean, z::OptVariables) = nothing
 _metric_vector(m::LumpedMass, z::OptVariables) = reduce(vcat, [_block_metric(m, b.space) for b in z.blocks])
 function _metric_vector(m::NamedTuple, z::OptVariables)
   Set(keys(m)) == Set(z.names) ||
-    throw(ArgumentError("SIMP: the metric has blocks $(join(keys(m), ", ")); z has $(join(z.names, ", "))"))
+    throw(ArgumentError("DensityMethod: the metric has blocks $(join(keys(m), ", ")); z has $(join(z.names, ", "))"))
   all(x -> x isa Euclidean, values(m)) && return nothing
   reduce(vcat, [_block_metric(getproperty(m, n), b.space) for (n, b) in zip(z.names, z.blocks)])
 end
@@ -155,7 +156,7 @@ function FunctionalOracle(problem::Optimization, metric)
   n = length(z)
   lb, ub = get_bounds(z)
   m = _metric_vector(metric, z)
-  m === nothing || all(>(0), m) || throw(ArgumentError("SIMP: the metric has non-positive entries"))
+  m === nothing || all(>(0), m) || throw(ArgumentError("DensityMethod: the metric has non-positive entries"))
   C = isempty(problem.constraints) ? nothing : only(problem.constraints)
   FunctionalOracle(problem.objective, C, z, problem.ctx, copy(get_values(z)), copy(lb), copy(ub), nothing, 0.0, m,
                    zeros(n), zeros(n), NaN, false)
@@ -280,4 +281,7 @@ function _setup_constraint!(o::FunctionalOracle, c::Functional, ctx)
   o
 end
 
-_constraint_value(o::FunctionalOracle, zk) = o.C === nothing ? NaN : constraint(o, zk)
+_constraint_values(o::FunctionalOracle, zk) = o.C === nothing ? () : (constraint(o, zk),)
+_multipliers(o::FunctionalOracle, info) = o.C === nothing ? () : (info.multiplier,)
+
+Base.show(io::IO, m::DensityMethod) = print(io, "DensityMethod(", nameof(typeof(m.optimizer)), ")")

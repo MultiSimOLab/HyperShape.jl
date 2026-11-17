@@ -68,7 +68,7 @@ function mbb(; case, nx, ny, order = 0, opt = OC(), vf, rmin, Emin, maxiter = 20
   dΓ = Measure(Γ, 2)
   Vρ = design_space(model, order)
   init = check ? [0.2 + 0.3 * abs(sin(2.3i)) for i in 1:num_free_dofs(Vρ)] : vf
-  z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init, physical = density_chain(dΩ, rmin; cellmean))
+  z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init, map = density_chain(dΩ, rmin; cellmean))
   ν = 0.3
   λ = case === :top88 ? ν / (1 - ν^2) : ν / ((1 + ν) * (1 - 2ν))
   μ = 1 / (2(1 + ν))
@@ -92,10 +92,10 @@ function mbb(; case, nx, ny, order = 0, opt = OC(), vf, rmin, Emin, maxiter = 20
                  derivative = (u, w, θ) -> (δ -> ∫(-(dE ∘ θ.ρ) * (ε(w) ⊙ (σd ∘ ε(u))) * δ)dΩ))
   Vol = Volume(θ, dΩ; max_fraction = vf)
   check && return check_consistency(C, Vol)
-  problem = Optimization(z; objective = C, constraints = Vol)
-  method = SIMP(opt; metric = LumpedMass(dΩ))     # OC uses it only for the stationarity measure
+  problem = Optimization(z; objective = C, constraints = (volume = Vol,))
+  method = DensityMethod(opt; metric = LumpedMass(dΩ))     # OC uses it only for the stationarity measure
   kw = stop === :default ? (;) : (; stop)
-  t = @elapsed r = solve!(problem, method; maxiter, verbose, grey = Grey(θ, dΩ), kw...)
+  t = @elapsed r = solve!(problem, method; maxiter, verbose, monitors = (grey = Grey(θ, dΩ),), kw...)
   (; result = r, time = t, ρ = cell_means(θ, dΩ, h * Ly / ny), nx, ny)
 end
 
@@ -119,7 +119,7 @@ function cantilever3d(; n = (24, 12, 12), order = 0, opt = OC(), vf = 0.3, maxit
   dΓ = Measure(Γ, 2)
   Vρ = design_space(model, order)
   init = check ? [0.2 + 0.3 * abs(sin(2.3i)) for i in 1:num_free_dofs(Vρ)] : vf
-  z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init, physical = density_chain(dΩ, 2.5h))
+  z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init, map = density_chain(dΩ, 2.5h))
   Emin, ν = 1e-9, 0.3
   λ, μ = ν / ((1 + ν) * (1 - 2ν)), 1 / (2(1 + ν))
   E(ρ) = Emin + ρ^3 * (1 - Emin)
@@ -136,10 +136,10 @@ function cantilever3d(; n = (24, 12, 12), order = 0, opt = OC(), vf = 0.3, maxit
                  derivative = (u, w, θ) -> (δ -> ∫(-(dE ∘ θ.ρ) * (ε(w) ⊙ (σ ∘ ε(u))) * δ)dΩ))
   Vol = Volume(θ, dΩ; max_fraction = vf)
   check && return check_consistency(C, Vol)
-  problem = Optimization(z; objective = C, constraints = Vol)
-  method = SIMP(opt; metric = LumpedMass(dΩ))     # OC uses it only for the stationarity measure
+  problem = Optimization(z; objective = C, constraints = (volume = Vol,))
+  method = DensityMethod(opt; metric = LumpedMass(dΩ))     # OC uses it only for the stationarity measure
   kw = stop === :default ? (;) : (; stop)
-  tt = @elapsed r = solve!(problem, method; maxiter, verbose, grey = Grey(θ, dΩ), kw...)
+  tt = @elapsed r = solve!(problem, method; maxiter, verbose, monitors = (grey = Grey(θ, dΩ),), kw...)
   ρ = reshape(cell_means(θ, dΩ, h^3), n)
   (; result = r, time = tt, ρ, asymmetry = maximum(abs, ρ .- reverse(ρ, dims = 2)), dofs = num_free_dofs(U))
 end

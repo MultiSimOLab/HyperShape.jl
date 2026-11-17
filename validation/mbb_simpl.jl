@@ -8,7 +8,7 @@ include(joinpath(@__DIR__, "cases.jl"))
 println("Julia $(VERSION), threads $(Threads.nthreads()), $(Sys.cpu_info()[1].model)\n")
 mbb(; case = :simpl, nx = 48, ny = 16, vf = 0.3, rmin = 0.1, Emin = 1e-6, maxiter = 2, opt = SiMPL())     # compile
 base = (; case = :simpl, nx = 768, ny = 256, vf = 0.3, Emin = 1e-6, maxiter = 300)
-S5 = StopCriteria(stationarity = 1e-5)
+S5 = StopCriteria(stationarity_tol = 1e-5)
 println("| Case | C | vs reference | iterations | status | time |\n|---|---|---|---|---|---|")
 println(row("rmin 0.05, P0, SiMPL, authors' sensitivity, S ≤ 1e-5 (table 1)", mbb(; base..., rmin = 0.05, opt = SiMPL(), sensitivity = :authors, stop = S5), 1.2078e-3))
 println(row("rmin 0.05, P0, SiMPL, exact sensitivity, S ≤ 1e-5", mbb(; base..., rmin = 0.05, opt = SiMPL(), stop = S5), 1.2078e-3))

@@ -11,18 +11,20 @@ mutable struct _Printer{IO_}
   header::Bool          # the column header is pending: printed before the next row
   widths::Vector{Int}   # widths of the continuation columns
   red::Float64          # a constraint value above this is shown in red
-  grey::Bool            # a column with the measure of grey
+  monitors::Vector{Symbol}   # one column per monitor
 end
 
 _verbose_level(v::Bool) = v ? 2 : 0
 _verbose_level(v::Integer) = (0 <= v <= 2 || throw(ArgumentError("solve!: verbose must be 0, 1, 2 or a Bool")); Int(v))
 _verbose_level(v) = throw(ArgumentError("solve!: verbose must be 0, 1, 2 or a Bool"))
 
-function _Printer(io, verbose, schedule, grey::Bool = false)
+function _Printer(io, verbose, schedule, monitors = ())
   widths = schedule === nothing ? Int[] :
            [max(6, textwidth(string(n)), maximum(x -> textwidth(_g(x)), v)) for (n, v) in zip(schedule.names, schedule.values)]
-  _Printer(io, _verbose_level(verbose), time(), time(), false, widths, _RED_CONSTRAINT, grey)
+  _Printer(io, _verbose_level(verbose), time(), time(), false, widths, _RED_CONSTRAINT, collect(Symbol, monitors))
 end
+
+_mwidth(n) = max(7, textwidth(string(n)))
 
 # a constraint value above this (scaled) is shown in red; OC meets the constraint only to its bisection tolerance
 const _RED_CONSTRAINT = 1e-3
@@ -36,7 +38,8 @@ _pad(s, w) = " "^max(0, w - textwidth(s)) * s
 function _header(p::_Printer, names)
   cont = join(("  " * _pad(string(n), w) for (n, w) in zip(names, p.widths)))
   @sprintf("  %5s  %13s  %9s  %10s  %9s  %9s  %9s  %9s  %9s", "it", "objective", "Δobj", "constraint", "kkt", "S",
-           "change", "step", "μ") * cont * (p.grey ? @sprintf("  %7s", "grey") : "") * @sprintf("  %11s  %8s", "f/a/F", "t[s]")
+           "change", "step", "μ") * cont * join(("  " * _pad(string(n), _mwidth(n)) for n in p.monitors)) *
+    @sprintf("  %11s  %8s", "f/a/F", "t[s]")
 end
 
 _rule(p::_Printer) = _styled(p, "  " * "─"^(textwidth(_header(p, ntuple(_ -> "", length(p.widths)))) - 2) * "\n", :light_black)
@@ -44,34 +47,35 @@ _rule(p::_Printer) = _styled(p, "  " * "─"^(textwidth(_header(p, ntuple(_ -> "
 function _describe_stop(stop)
   stop === nothing && return "maxiter only"
   parts = String[]
-  stop.objective !== nothing && push!(parts, "relative objective range < $(stop.objective) over $(stop.window) iterations")
-  stop.kkt !== nothing && push!(parts, "kkt < $(stop.kkt)")
-  stop.kkt_rel !== nothing && push!(parts, "kkt/kkt₁ < $(stop.kkt_rel)")
-  stop.stationarity !== nothing && push!(parts, "S < $(stop.stationarity)")
-  stop.stationarity_rel !== nothing && push!(parts, "S/S₁ < $(stop.stationarity_rel)")
-  stop.change !== nothing && push!(parts, "change < $(stop.change)")
+  stop.objective_range !== nothing &&
+    push!(parts, "relative objective range < $(stop.objective_range) over $(stop.window) iterations")
+  stop.kkt_tol !== nothing && push!(parts, "kkt < $(stop.kkt_tol)")
+  stop.kkt_rtol !== nothing && push!(parts, "kkt/kkt₁ < $(stop.kkt_rtol)")
+  stop.stationarity_tol !== nothing && push!(parts, "S < $(stop.stationarity_tol)")
+  stop.stationarity_rtol !== nothing && push!(parts, "S/S₁ < $(stop.stationarity_rtol)")
+  stop.change_tol !== nothing && push!(parts, "change < $(stop.change_tol)")
   isempty(parts) ? "maxiter only" : join(parts, " or ")
 end
 
-_active(stop) = any(x -> x !== nothing, (stop.objective, stop.kkt, stop.kkt_rel, stop.stationarity, stop.stationarity_rel,
-                                         stop.change))
+_active(stop) = any(x -> x !== nothing, (stop.objective_range, stop.kkt_tol, stop.kkt_rtol, stop.stationarity_tol,
+                                         stop.stationarity_rtol, stop.change_tol))
 _stage_rule(stop, schedule) = (stop === nothing || schedule === nothing || !_active(stop)) ? "" :
                               schedule.close_early ? " · every stage (close_early)" : " · last stage only"
 
 _metric_name(m::Euclidean) = "Euclidean"
-_constraint_label(problem, opt) = only(problem.constraints).linear ? "linear" :
-                                  "nonlinear (tol $(_g_or_e(constraint_tol(opt))))"
+_constraint_label(problem, opt) = string(only(keys(problem.constraints))) * ", " *
+                                  (only(problem.constraints).linear ? "linear" : "nonlinear (tol $(_g_or_e(constraint_tol(opt))))")
 _g_or_e(x) = isfinite(x) ? @sprintf("%.0e", x) : "—"
 _metric_label(method) = _metric_name(method.metric) * (method.default_metric ? " (default)" : "") *
                         (method.optimizer isa OC ? " (OC: only for the stationarity measure)" : "")
 _metric_name(m::LumpedMass) = "lumped mass"
 _metric_name(m::NamedTuple) = join(("$k: $(_metric_name(v))" for (k, v) in pairs(m)), ", ")
 
-function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, defaults, schedule, resume, grey = nothing)
+function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, defaults, schedule, resume)
   p.level >= 1 || return
   opt = method.optimizer
   z = problem.z
-  title = " HyperShape · SIMP($(nameof(typeof(opt)))) "
+  title = " HyperShape · DensityMethod($(nameof(typeof(opt)))) "
   W = textwidth(_header(p, ntuple(_ -> "", length(p.widths))))   # as wide as the table
   _styled(p, "━━" * title * "━"^max(3, W - 2 - textwidth(title)) * "\n", :cyan; bold = true)
   blocks = join(("$n ($(length(r)))" for (n, r) in zip(z.names, z.ranges)), ", ")
@@ -85,7 +89,7 @@ function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, 
   end
   println(p.io, "  stop: ", _describe_stop(stop), defaults.stop ? " (default)" : "", _stage_rule(stop, schedule),
           " · maxiter $maxiter", resume === nothing ? "" : " · resumed at iteration $(resume.iteration)")
-  println(p.io, "  on failure: reject step, shrink $(_g(on_failure.shrink)), at most $(on_failure.max) attempts",
+  println(p.io, "  on failure: reject step, shrink $(_g(on_failure.shrink)), at most $(on_failure.max_attempts) attempts",
           defaults.on_failure ? " (default)" : "")
   opt isa OC && println(p.io, "  OC: move $(_g(opt.move)) · ", opt.adapt === nothing ? "fixed (top88)" :
                         "adaptive per entry ×$(_g(opt.adapt[1]))/×$(_g(opt.adapt[2])), floor $(_g(opt.move_min))")
@@ -106,7 +110,7 @@ end
 
 function _print_row(p::_Printer, hist::OptHistory)
   p.level >= 2 || return nothing
-  _flush_columns(p, hist.names)
+  _flush_columns(p, hist.continuation_names)
   k = hist.n
   t = time()
   dt = t - p.tlast
@@ -114,7 +118,8 @@ function _print_row(p::_Printer, hist::OptHistory)
   f = hist.objective[k]
   fp = k > 1 ? hist.objective[k-1] : NaN
   df = fp != 0 ? (f - fp) / abs(fp) : NaN
-  g = hist.constraint[k]
+  g = size(hist.constraint_values, 1) == 0 ? NaN : hist.constraint_values[1, k]
+  μ = size(hist.multiplier_values, 1) == 0 ? NaN : hist.multiplier_values[1, k]
   @printf(p.io, "  %5d  %13.6e  %9s  ", hist.iteration[k], f, isfinite(df) ? @sprintf("%+9.1e", df) : "        —")
   if isfinite(g)
     _styled(p, @sprintf("%10.2e", g), g > p.red ? :red : :normal)
@@ -122,11 +127,14 @@ function _print_row(p::_Printer, hist::OptHistory)
     print(p.io, "         —")
   end
   @printf(p.io, "  %9s  %9s  %9s  %9s  %9s", _e(hist.kkt[k]), _e(hist.stationarity[k]), _e(hist.change[k]),
-          _e(hist.step[k]), _e(hist.multiplier[k]))
-  for j in axes(hist.continuation, 1)
-    print(p.io, "  ", _pad(_g(hist.continuation[j, k]), p.widths[j]))
+          _e(hist.step[k]), _e(μ))
+  for j in axes(hist.continuation_values, 1)
+    print(p.io, "  ", _pad(_g(hist.continuation_values[j, k]), p.widths[j]))
   end
-  p.grey && print(p.io, "  ", isfinite(hist.grey[k]) ? @sprintf("%7.4f", hist.grey[k]) : "      —")
+  for (j, n) in enumerate(p.monitors)
+    v = hist.monitor_values[j, k]
+    print(p.io, "  ", _pad(isfinite(v) ? @sprintf("%.4g", v) : "—", _mwidth(n)))
+  end
   @printf(p.io, "  %11s  %8.3f", "$(hist.forward[k])/$(hist.adjoint[k])/$(hist.filter[k])", dt)
   hist.attempts[k] > 1 && _styled(p, "  ($(hist.attempts[k]) attempts)", :yellow)
   println(p.io)
@@ -145,13 +153,14 @@ function _print_jump(p::_Printer, schedule, stage)
   _print_columns(p, schedule)
 end
 
-const _STOP_TEXT = Dict(:change => "change of z below the tolerance", :kkt => "optimality measure below the tolerance",
-                        :kkt_rel => "optimality measure below the tolerance relative to the first iteration",
-                        :stationarity => "stationarity measure below the tolerance",
-                        :stationarity_rel => "stationarity measure below the tolerance relative to the first iteration",
-                        :objective => "relative range of the objective below the tolerance over the window")
+const _STOP_TEXT = Dict(:change_tol => "change of z below the tolerance", :kkt_tol => "optimality measure below the tolerance",
+                        :kkt_rtol => "optimality measure below the tolerance relative to the first iteration",
+                        :stationarity_tol => "stationarity measure below the tolerance",
+                        :stationarity_rtol => "stationarity measure below the tolerance relative to the first iteration",
+                        :objective_range => "relative range of the objective below the tolerance over the window",
+                        :custom => "criterion of the user met")
 
-function _print_end(p::_Printer, status, reason, k, f, grey = NaN)
+function _print_end(p::_Printer, status, reason, k, f, monitors = NamedTuple())
   p.level >= 1 || return
   p.level >= 2 && (p.header = false; _rule(p))
   if status === :converged
@@ -165,7 +174,9 @@ function _print_end(p::_Printer, status, reason, k, f, grey = NaN)
     _styled(p, "  ⚠ ", :yellow; bold = true)
     print(p.io, "stalled: no acceptable step after $k iterations, objective ", @sprintf("%.6e", f))
   end
-  isfinite(grey) && print(p.io, @sprintf(", grey %.4f", grey))
+  for (n, v) in pairs(monitors)
+    isfinite(v) && print(p.io, ", $n ", @sprintf("%.4g", v))
+  end
   println(p.io)
 end
 

@@ -35,7 +35,7 @@ OptVariables z ─► DesignFields x ─► PhysicalFields θ ─► weak forms 
 | `StateOperator`, `AdjointOperator` | Forward and adjoint states over HyperFEM computational models (default `solve` for linear models) |
 | `LinearOperator` | Auxiliary linear solves (filter, reaction–diffusion step, velocity extension) |
 | `Functional`, `Volume` | Objective and constraints, with their derivative with respect to the physical fields; `Volume(θ, dΩ; max_fraction)` for the volume of the physical density |
-| Methods | `SIMP`, `ReactionDiffusion`, `LevelSet`: a common loop where only the step differs |
+| Methods | `DensityMethod`, `ReactionDiffusion`, `LevelSet`: a common loop where only the step differs |
 | `Optimizers` | Optimisers independent of finite elements (optimality criteria, SiMPL, …) |
 | `OptPostProcessor`, `write_step`, `extend_field`, `FieldWriter` | User-written output at each design iteration: VTU or VTKHDF (mesh written once), values from the degrees of freedom, without blocking the loop |
 

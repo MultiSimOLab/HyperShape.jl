@@ -65,7 +65,7 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
     @test_throws ArgumentError OptPostProcessor(recorder([]); every = 0)
     @test_throws ArgumentError OptPostProcessor(recorder([]); every = 1, name = "")
     q = compliance_problem()
-    @test_throws ArgumentError solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 2, verbose = 0,
+    @test_throws ArgumentError solve!(q.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 2, verbose = 0,
                                       post = ctx -> nothing)
     @test_throws ArgumentError get_pvd(OptPostProcessor(recorder([]); every = 1))
   end
@@ -75,7 +75,7 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
       q = compliance_problem(; design)
       metric = opt isa OC ? Euclidean() : LumpedMass(q.dΩ)
       calls = Tuple[]
-      r = solve!(q.problem, SIMP(opt; metric); maxiter, verbose = 0, stop = nothing,
+      r = solve!(q.problem, DensityMethod(opt; metric); maxiter, verbose = 0, stop = nothing,
                  post = OptPostProcessor(recorder(calls); every = 5, initial))
       @test first.(calls) == expected
       @test all(c -> c[2] === :optimization && c[3] == c[1], calls)
@@ -85,14 +85,14 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
 
   @testset "No extra solves; values at the accepted design" begin
     q1, q2 = compliance_problem(), compliance_problem()
-    r1 = solve!(q1.problem, SIMP(OC(); metric = Euclidean()); maxiter = 6, verbose = 0, stop = nothing)
+    r1 = solve!(q1.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 6, verbose = 0, stop = nothing)
     designs = Vector{Float64}[]
     states = Vector{Float64}[]
     post = OptPostProcessor(every = 2) do post, ctx
       push!(designs, copy(get_free_dof_values(q2.x.ρ)))
       push!(states, copy(get_free_dof_values(q2.uh)))
     end
-    r2 = solve!(q2.problem, SIMP(OC(); metric = Euclidean()); maxiter = 6, verbose = 0, stop = nothing, post)
+    r2 = solve!(q2.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 6, verbose = 0, stop = nothing, post)
     @test num_solves(q2.S) == num_solves(q1.S)
     @test sum(r2.history.forward) == sum(r1.history.forward) - 1     # the first forward solve is done before iteration 1
     @test r2.history.objective == r1.history.objective
@@ -110,7 +110,7 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
       @test post.problem === q.problem
       write_step(post, Ω, "rho" => q.θ.ρ, "x" => q.x.ρ, "u" => q.uh)
     end
-    r = solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 12, verbose = 0, stop = nothing, post)
+    r = solve!(q.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 12, verbose = 0, stop = nothing, post)
     ts, fs = pvd_entries(joinpath(dir, "optimization.pvd"))
     @test ts == [0, 5, 10, 12] && seen == [1, 2, 3]
     @test all(f -> isfile(joinpath(dir, f)), fs) && fs[1] == "optimization_0000.vtu"
@@ -118,7 +118,7 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
     @test length(lines) == 13
     @test parse.(Float64, [split(l, ",")[2] for l in lines[2:end]]) == r.history.objective
     # the same post-processor in a new run starts a new collection
-    solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 3, verbose = 0, stop = nothing, post)
+    solve!(q.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 3, verbose = 0, stop = nothing, post)
     @test first(pvd_entries(joinpath(dir, "optimization.pvd"))) == [0, 3]
     # other files and options: compress, a file written by the driver, several parts at one time
     dir2 = mktempdir()
@@ -129,7 +129,7 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
       write(f, "")
       get_pvd(post)[ctx.iteration] = f
     end
-    solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 2, verbose = 0, stop = nothing, post = post2)
+    solve!(q.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 2, verbose = 0, stop = nothing, post = post2)
     ts, fs = pvd_entries(joinpath(dir2, "run.pvd"))
     @test ts == [0, 0, 0, 2, 2, 2] && fs[1:3] == ["run_0000.vtu", "state_0000.vtu", "mine_0.vtu"]
     @test occursin("part=\"2\"", read(joinpath(dir2, "run.pvd"), String))
@@ -140,7 +140,7 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
     calls = Tuple[]
     post = OptPostProcessor(recorder(calls); every = 3)
     q = compliance_problem()
-    solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 3, verbose = 0, stop = nothing, post)
+    solve!(q.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 3, verbose = 0, stop = nothing, post)
     @test post.problem === q.problem && first.(calls) == [0, 3]
     @test_throws ArgumentError get_pvd(post)
     @test_throws ArgumentError write_step(post, get_triangulation(q.uh), "rho" => q.θ.ρ)
@@ -154,8 +154,8 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
       push!(calls, (ctx.iteration,))
       write_step(post, get_triangulation(q.uh), "rho" => q.θ.ρ)
     end
-    solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 10, verbose = 0, stop = nothing, post,
-           checkpoint = Checkpoint(ck; every = 5))
+    solve!(q.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 10, verbose = 0, stop = nothing, post,
+           checkpoint = Checkpoint(filepath = ck, every = 5))
     @test first.(calls) == [0, 3, 6, 9, 10]
     c = _load(joinpath(dir, "optimization.pvd"); upto = Inf)    # a later entry, as left by a longer run
     c[15] = joinpath(dir, "optimization_0010.vtu")
@@ -165,7 +165,7 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
       push!(calls, (ctx.iteration,))
       write_step(p, get_triangulation(q2.uh), "rho" => q2.θ.ρ)
     end
-    solve!(q2.problem, SIMP(OC(); metric = Euclidean()); maxiter = 13, verbose = 0, stop = nothing, post,
+    solve!(q2.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 13, verbose = 0, stop = nothing, post,
            resume = load_checkpoint(ck))
     @test first.(calls) == [12, 13]
     @test first(pvd_entries(joinpath(dir, "optimization.pvd"))) == [0, 3, 6, 9, 10, 12, 13]
@@ -179,7 +179,7 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
       push!(calls, (ctx.iteration,))
       ctx.iteration == 2 && (sign[] = -1.0)
     end
-    r = solve!(q.problem, SIMP(SiMPL(max_backtracks = 1); metric = LumpedMass(q.dΩ)); maxiter = 10, verbose = 0,
+    r = solve!(q.problem, DensityMethod(SiMPL(max_backtracks = 1); metric = LumpedMass(q.dΩ)); maxiter = 10, verbose = 0,
                stop = nothing, post = flip)
     @test r.status === :stalled && r.iterations == 2 && first.(calls) == [1, 2]
     # failure: the forward problem fails at both attempts of iteration 2, and solves again at the last accepted design
@@ -190,8 +190,8 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
       push!(calls, (ctx.iteration,))
     end
     err = try
-      solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 6, verbose = 0, stop = nothing,
-             on_failure = RejectStep(shrink = 0.5, max = 2), post)
+      solve!(q.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 6, verbose = 0, stop = nothing,
+             on_failure = RejectStep(shrink = 0.5, max_attempts = 2), post)
       nothing
     catch e
       e
@@ -205,11 +205,11 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
       ctx.iteration > 0 && error("driver")
     end
     io = IOBuffer()
-    @test_throws OptimizationFailure solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 6, io, stop = nothing,
-                                            on_failure = RejectStep(shrink = 0.5, max = 2), post = bad)
+    @test_throws OptimizationFailure solve!(q.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 6, io, stop = nothing,
+                                            on_failure = RejectStep(shrink = 0.5, max_attempts = 2), post = bad)
     @test occursin("post-processing of the last accepted design threw", String(take!(io)))
     # elsewhere, an error of the driver stops the optimisation
-    @test_throws ErrorException solve!(compliance_problem().problem, SIMP(OC(); metric = Euclidean()); maxiter = 6,
+    @test_throws ErrorException solve!(compliance_problem().problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 6,
                                        verbose = 0, stop = nothing, post = bad)
   end
   @testset "Review fixes" begin
@@ -260,7 +260,7 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
     end
     old = pwd()
     try
-      solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 4, verbose = 0, stop = nothing, post)
+      solve!(q.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 4, verbose = 0, stop = nothing, post)
     finally
       cd(old)
     end
@@ -268,8 +268,8 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
     # a driver that throws does not lose the checkpoint of that iteration
     ck = mktempdir()
     bad = OptPostProcessor((p, ctx) -> (ctx.iteration == 4 && error("disk full")); every = 2)
-    @test_throws ErrorException solve!(compliance_problem().problem, SIMP(OC(); metric = Euclidean()); maxiter = 4,
-                                       verbose = 0, stop = nothing, post = bad, checkpoint = Checkpoint(ck; every = 2))
+    @test_throws ErrorException solve!(compliance_problem().problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 4,
+                                       verbose = 0, stop = nothing, post = bad, checkpoint = Checkpoint(filepath = ck, every = 2))
     @test load_checkpoint(ck).iteration == 4
     # a resumed run that starts with a continuation jump: no initial call, no extra forward solve
     nsolves = Ref(0)
@@ -277,12 +277,12 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
       q = compliance_problem()
       ck = mktempdir()
       sched = Continuation(β = q.H => [1.0, 2.0, 4.0]; every = 4)
-      solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 4, verbose = 0, stop = nothing, schedule = sched,
-             checkpoint = Checkpoint(ck; every = 4))
+      solve!(q.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 4, verbose = 0, stop = nothing, continuation = sched,
+             checkpoint = Checkpoint(filepath = ck, every = 4))
       n0 = num_solves(q.S)
       calls = Int[]
       p = withpost ? OptPostProcessor((p, ctx) -> push!(calls, ctx.iteration); every = 3) : nothing
-      solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 9, verbose = 0, stop = nothing, schedule = sched,
+      solve!(q.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 9, verbose = 0, stop = nothing, continuation = sched,
              resume = load_checkpoint(ck), post = p)
       withpost && @test calls == [6, 9]
       if withpost
@@ -298,7 +298,7 @@ recorder(calls) = (post, ctx) -> push!(calls, (ctx.iteration, ctx.phase, post.it
     post = OptPostProcessor(every = 1) do p, ctx
       push!(ok, get_free_dof_values(q.x.ρ) == get_values(q.z) == get_values(p.problem.z))
     end
-    solve!(Optimization(q.z; objective = q.C, constraints = Volθ), SIMP(SiMPL(); metric = LumpedMass(q.dΩ));
+    solve!(Optimization(q.z; objective = q.C, constraints = (volume = Volθ,)), DensityMethod(SiMPL(); metric = LumpedMass(q.dΩ));
            maxiter = 6, verbose = 0, stop = nothing, post)
     @test length(ok) == 7 && all(ok)
   end

@@ -10,8 +10,8 @@ Design variables at three linked levels:
 | θ | [`PhysicalFields`](@ref) | physical fields read by the weak forms at the quadrature points |
 
 Each level is built from the previous one, and only HyperShape writes them (in place). The maps x → θ
-([`HelmholtzFilter`](@ref), [`Heaviside`](@ref), [`Identity`](@ref)) are composed with `∘` in the mathematical
-order: `Heaviside(β = 1.0, η = 0.5) ∘ HelmholtzFilter(dΩ; rmin, ls)` filters first and projects after.
+([`HelmholtzFilter`](@ref), [`TanhProjection`](@ref), [`Identity`](@ref)) are composed with `∘` in the mathematical
+order: `TanhProjection(β = 1.0, η = 0.5) ∘ HelmholtzFilter(dΩ; rmin, ls)` filters first and projects after.
 
 Sensitivities travel backwards with [`design_gradient!`](@ref): a linear form in δθ for each physical field gives the
 derivative with respect to z.
@@ -31,10 +31,10 @@ using Gridap.Algebra: residual!
 using HyperFEM: get_spaces, StaticLinearModel, NothingBC
 using HyperFEMKernels: KernelOperator, update
 using ..Operators: LinearOperator, solve_linear!, OptContext
-import ..Operators: version, refresh!, invalidate!
+import ..Operators: state_version, refresh!, invalidate!
 
 export FieldVariable, OptVariables, DesignFields, PhysicalFields
-export Identity, HelmholtzFilter, Heaviside, CellMean
+export Identity, HelmholtzFilter, TanhProjection, CellMean
 export single_field_design
 
 include("OptVariables.jl")
@@ -47,22 +47,22 @@ refresh!(x::DesignFields, ctx) = update_fields!(x, ctx)
 refresh!(θ::PhysicalFields, ctx) = update_fields!(θ, ctx)
 
 """
-    single_field_design(name, V; bounds, init, physical, backend = :compiled) -> (z, x, θ)
+    single_field_design(name, V; bounds, init, map, backend = :compiled) -> (z, x, θ)
 
 Shortcut for one design field and its physical fields with the same name:
 
 ```julia
 z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = 0.5,
-                              physical = Heaviside(β = 1.0, η = 0.5) ∘ HelmholtzFilter(Sf, dΩ))
+                              map = TanhProjection(β = 1.0, η = 0.5) ∘ HelmholtzFilter(dΩ; rmin, ls))
 ```
 
 is `OptVariables(ρ = FieldVariable(Vρ; bounds, init))`, `DesignFields(z; ρ = Identity())` and
-`PhysicalFields(x; ρ = physical, backend)`.
+`PhysicalFields(x; ρ = map, backend)`: `map` is the chain from the design field to the physical one.
 """
-function single_field_design(name::Symbol, V; bounds, init, physical, backend::Symbol = :compiled)
+function single_field_design(name::Symbol, V; bounds, init, map, backend::Symbol = :compiled)
   z = OptVariables(; NamedTuple{(name,)}((FieldVariable(V; bounds, init),))...)
   x = DesignFields(z; NamedTuple{(name,)}((Identity(),))...)
-  θ = PhysicalFields(x; backend, NamedTuple{(name,)}((physical,))...)
+  θ = PhysicalFields(x; backend, NamedTuple{(name,)}((map,))...)
   z, x, θ
 end
 

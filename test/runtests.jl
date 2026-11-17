@@ -11,7 +11,7 @@ using Test
         for name in legacy
             @test !(name in names(HyperShape))
         end
-        for name in (:OC, :SiMPL, :Optimization, :SIMP, :StateOperator, :Functional)
+        for name in (:OC, :SiMPL, :Optimization, :DensityMethod, :StateOperator, :Functional)
             @test name in names(HyperShape)
         end
     end

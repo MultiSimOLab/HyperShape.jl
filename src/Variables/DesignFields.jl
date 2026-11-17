@@ -30,7 +30,7 @@ function DesignFields(z::OptVariables; kwargs...)
   x
 end
 
-version(x::DesignFields) = getfield(x, :version)[]
+state_version(x::DesignFields) = getfield(x, :version)[]
 function Base.getproperty(x::DesignFields, s::Symbol)
   f = getfield(x, :fields)
   haskey(f, s) || throw(ArgumentError("no design field named $s; available: $(join(keys(f), ", "))"))
@@ -47,15 +47,17 @@ Brings the design fields up to date with their [`OptVariables`](@ref); does noth
 function update_fields!(x::DesignFields, ctx)
   z = getfield(x, :z)
   seen = getfield(x, :seen)
-  seen[] == version(z) && return x
+  seen[] == state_version(z) && return x
   fields = getfield(x, :fields)
   for (i, f) in enumerate(fields)
     copyto!(get_free_dof_values(f), view(z.values, z.ranges[i]))
   end
-  seen[] = version(z)
+  seen[] = state_version(z)
   getfield(x, :version)[] += 1
   x
 end
 
 # g_z of block i from g_x of field i (identity map)
 _pullback_block!(gz_block, x::DesignFields, i, gx) = (gz_block .+= gx; gz_block)
+
+Base.show(io::IO, x::DesignFields) = print(io, "DesignFields(", join(getfield(x, :names), ", "), ")")
