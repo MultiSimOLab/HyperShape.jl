@@ -92,7 +92,7 @@ const HISTORY_COLUMNS = (:iteration, :objective, :kkt, :stationarity, :change, :
 """
     Continuation(; every, close_early = false, name = object => values, …)
 
-Continuation of parameters in stages: `Continuation(β = H => [1, 2, 4, 8, 16, 32]; every = 40)` uses `β = 1` in the
+Continuation of parameters in stages: `Continuation(β = proj => [1, 2, 4, 8, 16, 32]; every = 40)` (with `proj` a `TanhProjection`) uses `β = 1` in the
 first stage, `2` in the second, and so on. A stage ends after `every` iterations, or when the optimiser finds no
 acceptable step; with `close_early = true`, also when the [`StopCriteria`](@ref) are met (by default they only act in
 the last stage: early stages can look converged on a grey plateau before the topology forms). The optimisation can
@@ -100,7 +100,7 @@ only stop in the last stage. At each jump the memory of the
 optimiser is forgotten (`reset!`), which costs one more forward solve. All value lists have the same length (the
 number of stages). Supported objects: [`Parameter`](@ref) (any number of the user: the penalty of the interpolation,
 a load factor), [`TanhProjection`](@ref) (β, through `set_beta!`) and `OC` (its move limit, through
-`set_move!`: `Continuation(β = H => [1, 2, 4, 8, 16], move = oc => [0.2, 0.2, 0.1, 0.05, 0.025]; every = 50)`, the
+`set_move!`: `Continuation(β = proj => [1, 2, 4, 8, 16], move = oc => [0.2, 0.2, 0.1, 0.05, 0.025]; every = 50)`, the
 same `oc` given to `DensityMethod`).
 """
 struct Continuation{N,O<:Tuple,V<:Tuple}
@@ -113,7 +113,7 @@ struct Continuation{N,O<:Tuple,V<:Tuple}
 end
 
 function Continuation(; every::Integer, close_early::Bool = false, kwargs...)
-  isempty(kwargs) && throw(ArgumentError("Continuation: give at least one parameter, for example β = H => [1, 2, 4]"))
+  isempty(kwargs) && throw(ArgumentError("Continuation: give at least one parameter, for example β = proj => [1, 2, 4]"))
   every >= 1 || throw(ArgumentError("Continuation: every must be at least 1"))
   names = Tuple(keys(kwargs))
   pairs_ = Tuple(values(kwargs))

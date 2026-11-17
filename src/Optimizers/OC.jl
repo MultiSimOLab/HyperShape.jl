@@ -25,7 +25,7 @@ when its last step changed sign with respect to the one before, by `inc` when it
 tanh projection is sharp (a step of `move` is wider than the projection band, about `1/β`). `reset!` (a
 continuation jump) restores every `mᵢ` to `move`; `shrink!` scales them all, and the retry after a rejected step does
 not update them. `adapt = nothing` gives the scalar move
-limit of top88. `move` can follow a continuation, `Continuation(β = H => […], move = oc => […])` (see
+limit of top88. `move` can follow a continuation, `Continuation(β = proj => […], move = oc => […])` (see
 [`set_move!`](@ref)); with `adapt` it is the ceiling of the limits. The `step` of the [`StepInfo`](@ref) is the mean
 of the limits over all entries (those at a bound included).
 

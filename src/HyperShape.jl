@@ -1,3 +1,9 @@
+"""
+    HyperShape
+
+Shape and topology optimisation of nonlinear multiphysics problems on HyperFEM and Gridap. See the documentation
+(Getting started) and `examples/`.
+"""
 module HyperShape
 
 using HyperFEM, Gridap

@@ -4,6 +4,7 @@ Complete optimisation scripts. Each one defines a function with the size and the
 it when the file is executed:
 
 ```
+julia --project=examples -e 'using Pkg; Pkg.instantiate()'     # once
 julia --project=examples -t auto examples/mbb.jl
 ```
 

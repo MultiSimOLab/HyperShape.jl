@@ -11,12 +11,12 @@
 ecosystem, and uses HyperFEM's computational models as black boxes for the forward and adjoint problems.
 
 - **Weak forms, computational models and solvers are written and configured by the user**; HyperShape adds the
-  design variables, the functionals, the sensitivities and the optimisation loop. Every default (the solve of a
-  linear model, stopping criteria, step rejection, metric, maps) can be replaced from the script.
+  design variables, the functionals, the sensitivities and the optimisation loop. The defaults (the solve of a
+  linear model, stopping criteria, metric, maps, continued parameters, monitors) can be replaced from the script.
 - **Analytical derivatives** throughout, verified with Taylor tests (`check_consistency`).
-- **One abstraction** for density, reaction–diffusion and level-set methods.
+- **One abstraction** meant for density, reaction–diffusion and level-set methods (density methods today).
 - Designed for large problems: in-place operations, user-supplied solvers, compiled threaded assembly, fast output
-  that does not block the loop.
+  written in another thread.
 
 Phase 0 (density methods for linear problems) is implemented and reproduces top88 and the SiMPL paper; see the
 [documentation](https://multisimolab.github.io/HyperShape.jl/dev/) and the [roadmap](https://multisimolab.github.io/HyperShape.jl/dev/roadmap/).
@@ -30,14 +30,14 @@ constraint and SiMPL (`examples/mbb.jl`; explained in
 ```julia
 using Gridap, HyperFEM, HyperShape
 
-function mbb(; nx = 60, ny = 20, maxiter = 300, out = "results/mbb", verbose = 2)
+function run_mbb(; nx = 60, ny = 20, maxiter = 300, out = "results/mbb", verbose = 2)
   # Mesh, measures and spaces (Gridap and HyperFEM)
   model  = CartesianDiscreteModel((0, nx, 0, ny), (nx, ny))
   labels = get_face_labeling(model)
-  add_tag_from_tags!(labels, "sym", [1, 3, 7])           # x = 0: u₁ = 0
-  add_tag_from_tags!(labels, "roller", [2])              # bottom-right corner: u₂ = 0
-  add_tag_from_tags!(labels, "top", [3, 6])
-  Ω, Γ   = Triangulation(model), BoundaryTriangulation(model; tags = "top")
+  add_tag_from_vertex_filter!(labels, "sym", model, x -> x[1] ≈ 0)                    # x = 0: u₁ = 0
+  add_tag_from_vertex_filter!(labels, "roller", model, x -> x[1] ≈ nx && x[2] ≈ 0)    # bottom-right corner: u₂ = 0
+  add_tag_from_vertex_filter!(labels, "load", model, x -> x[2] ≈ ny && x[1] <= 1)     # first edge of the top
+  Ω, Γ   = Triangulation(model), BoundaryTriangulation(model; tags = "load")
   dΩ, dΓ = Measure(Ω, 2), Measure(Γ, 2)
   bc = BoundaryConditions(BoundaryCondition("sym", VectorValue(0.0, 0.0); mask = (true, false)),
                           BoundaryCondition("roller", VectorValue(0.0, 0.0); mask = (false, true)))
@@ -50,20 +50,21 @@ function mbb(; nx = 60, ny = 20, maxiter = 300, out = "results/mbb", verbose = 2
   z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = 0.5,
                                 map = proj ∘ HelmholtzFilter(dΩ; rmin = 0.04nx, ls = LUSolver()))
 
-  # Physics: the weak forms of the user
-  Emin, ν = 1e-9, 0.3
-  λ, μ    = ν / (1 - ν^2), 1 / (2(1 + ν))                # plane stress
-  E(ρ)    = Emin + ρ^3 * (1 - Emin)
-  dE(ρ)   = 3ρ^2 * (1 - Emin)
-  σ(ε)    = λ * tr(ε) * one(ε) + 2μ * ε
-  t(x)    = VectorValue(0.0, x[1] < 1 ? -(4 - 6x[1]) : 0.0)   # unit point load at the top-left node
-  a(u, v) = ∫((E ∘ θ.ρ) * (ε(v) ⊙ (σ ∘ ε(u))))dΩ
+  # Physics: energy interpolation of HyperFEM between the solid and a weak void (SIMP, p = 3), plane stress, ν = 0.3
+  ν, Emin = 0.3, 1e-9
+  λ, μ    = ν / (1 - ν^2), 1 / (2(1 + ν))
+  solid   = LinearElasticity2D(λ = λ, μ = μ)
+  void    = LinearElasticity2D(λ = Emin * λ, μ = Emin * μ)
+  _, _, ∂²Ψ, _, _, ∂²Ψ_∂ρ = EnergyInterpolationScheme(solid, void; p = 3.0)()   # ρ³ Ψs + (1 − ρ³) Ψv and ∂/∂ρ
+  F, _, _ = get_Kinematics(Kinematics(Mechano, Solid))                            # F(∇u) = I + ∇u
+  t(x)    = VectorValue(0.0, -(4 - 6x[1]))      # unit point load at the top-left node (dual to its shape function)
+  a(u, v) = ∫(∇(v)' ⊙ ((∂²Ψ ∘ (θ.ρ, F ∘ ∇(u)')) ⊙ ∇(u)'))dΩ
   l(v)    = ∫(t ⋅ v)dΓ
   S = StateOperator(StaticLinearModel(l, a, U, V, bc; ls = LUSolver(), backend = :compiled), θ)
 
   # Objective (compliance, self-adjoint) and constraint
   C   = Functional((u, θ) -> ∫(t ⋅ u)dΓ, S; adjoint = :self, scale = :initial,
-                   derivative = (u, p, θ) -> (δ -> ∫(-(dE ∘ θ.ρ) * (ε(p) ⊙ (σ ∘ ε(u))) * δ)dΩ))
+                   derivative = (u, p, θ) -> (δ -> ∫(-(∇(p)' ⊙ ((∂²Ψ_∂ρ ∘ (θ.ρ, F ∘ ∇(u)')) ⊙ ∇(u)')) * δ)dΩ))
   Vol = Volume(θ, dΩ; max_fraction = 0.5)
   verbose > 0 && display(check_consistency((compliance = C, volume = Vol)))   # Taylor tests of the derivatives
 
@@ -79,7 +80,7 @@ function mbb(; nx = 60, ny = 20, maxiter = 300, out = "results/mbb", verbose = 2
          monitors     = (grey = Grey(θ, dΩ),), post)
 end
 
-result = mbb()
+result = run_mbb()
 ```
 
 ## Installation
@@ -88,6 +89,7 @@ HyperShape is not registered yet. Add the `main` branches of HyperFEM and HyperF
 them during development) and then HyperShape:
 
 ```julia
+pkg> add Gridap@0.20.8
 pkg> add https://github.com/MultiSimOLab/HyperFEM.jl#main https://github.com/MultiSimOLab/HyperFEMKernels.jl#main
 pkg> add https://github.com/MultiSimOLab/HyperShape.jl
 ```

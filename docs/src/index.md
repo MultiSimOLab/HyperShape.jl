@@ -23,8 +23,8 @@ ecosystem.
   internal solves of the methods. Every default of the loop can be replaced from the script.
 - **Analytical derivatives.** No automatic differentiation; every sensitivity is verified with a Taylor test
   (`check_consistency`).
-- **One abstraction for several methods.** Density, reaction–diffusion and level set share variables, states,
-  functionals and the optimisation loop.
+- **One abstraction for several methods.** Density, reaction–diffusion and level set are meant to share variables,
+  states, functionals and the optimisation loop (density methods are implemented).
 
 ## Contents
 
