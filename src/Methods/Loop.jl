@@ -501,7 +501,8 @@ function solve!(problem::Optimization, method::SIMP; maxiter::Integer, on_failur
   t_start = nothing
   if resume === nothing                       # a resumed design is the one the run left
     t_start = _make_feasible!(oracle, zk)
-    t_start === nothing || _print_event(pr, "· the starting design violated the constraint; it was scaled " *
+    # a start feasible up to rounding (t within 1e-9 of 1) is not worth an event
+    (t_start === nothing || t_start > 1 - 1e-9) || _print_event(pr, "· the starting design violated the constraint; it was scaled " *
                                             "towards the lower bound by $(round(t_start, sigdigits = 4)) to meet it", :yellow)
   end
   zprev = similar(zk)
