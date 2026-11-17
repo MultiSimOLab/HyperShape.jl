@@ -98,7 +98,8 @@ acceptable step; with `close_early = true`, also when the [`StopCriteria`](@ref)
 the last stage: early stages can look converged on a grey plateau before the topology forms). The optimisation can
 only stop in the last stage. At each jump the memory of the
 optimiser is forgotten (`reset!`), which costs one more forward solve. All value lists have the same length (the
-number of stages). Supported objects: [`TanhProjection`](@ref) (β, through `set_beta!`) and `OC` (its move limit, through
+number of stages). Supported objects: [`Parameter`](@ref) (any number of the user: the penalty of the interpolation,
+a load factor), [`TanhProjection`](@ref) (β, through `set_beta!`) and `OC` (its move limit, through
 `set_move!`: `Continuation(β = H => [1, 2, 4, 8, 16], move = oc => [0.2, 0.2, 0.1, 0.05, 0.025]; every = 50)`, the
 same `oc` given to `DensityMethod`).
 """
@@ -137,6 +138,8 @@ end
 _set_parameter!(h::TanhProjection, v) = set_beta!(h, v)
 _valid_parameter(h::TanhProjection, v) = isfinite(v) && v > 0
 _set_parameter!(o::OC, v) = set_move!(o, v)
+_set_parameter!(p::Parameter, v) = (p[] = v; p)
+_valid_parameter(p::Parameter, v) = isfinite(v)
 _valid_parameter(o::OC, v) = _valid_move(o, v)
 
 Base.show(io::IO, c::Continuation) =
@@ -531,6 +534,10 @@ function _stop_reason(stop::StopCriteria, info::StepInfo, hist::OptHistory, stag
   nothing
 end
 _stop_reason(::Nothing, info, hist, stage_start) = nothing
+# a function of the user: (info, history, ctx) -> Bool, checked after every accepted iteration (also the first of a
+# stage; with a continuation, only in the last stage unless close_early); the reason is :custom
+_stop_reason(stop, info, hist, stage_start, ctx) = stop(info, hist, ctx) === true ? :custom : nothing
+_stop_reason(stop::Union{Nothing,StopCriteria}, info, hist, stage_start, ctx) = _stop_reason(stop, info, hist, stage_start)
 
 """
     solve!(problem::Optimization, method::DensityMethod; maxiter, on_failure = RejectStep(),
@@ -540,7 +547,9 @@ _stop_reason(::Nothing, info, hist, stage_start) = nothing
 Runs the optimisation from the current values of `z`. Mandatory: `maxiter` (total iterations, resumed ones included).
 Optional: `on_failure` ([`RejectStep`](@ref), default `RejectStep(shrink = 0.5, max_attempts = 5)`), `stop`
 ([`StopCriteria`](@ref); default [`default_stop`](@ref): range of the objective below 0.1 % over 10 iterations of
-the last stage; `stop = nothing` runs `maxiter` iterations), `continuation` ([`Continuation`](@ref)), `checkpoint`
+the last stage; `stop = nothing` runs `maxiter` iterations; or a function `(info, history, ctx) -> Bool` of the user,
+checked after every accepted iteration, with the `StepInfo` of the step, the [`OptHistory`](@ref) so far and the
+context: `true` stops, with reason `:custom`), `continuation` ([`Continuation`](@ref)), `checkpoint`
 ([`Checkpoint`](@ref)), `post` (an
 [`OptPostProcessor`](@ref HyperShape.PostProcess.OptPostProcessor): its driver is called at the starting design, at the
 accepted iterations that are multiples of `every`, at the end and after a failure, with the fields and the forward state at the accepted
@@ -594,7 +603,8 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
   defaults.stop && (stop = default_stop(opt))
   defaults.on_failure && (on_failure = RejectStep())
   on_failure isa RejectStep || throw(ArgumentError("solve!: on_failure must be a RejectStep"))
-  stop === nothing || stop isa StopCriteria || throw(ArgumentError("solve!: stop must be a StopCriteria"))
+  stop === nothing || stop isa StopCriteria || stop isa Function ||
+    throw(ArgumentError("solve!: stop must be a StopCriteria, nothing or a function (info, history, ctx) -> Bool"))
   schedule === nothing || schedule isa Continuation || throw(ArgumentError("solve!: continuation must be a Continuation"))
   schedule === nothing || all(o -> !(o isa OC) || o === opt, schedule.objects) ||
     throw(ArgumentError("solve!: a Continuation of move must act on the OC given to DensityMethod"))
@@ -916,7 +926,7 @@ function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_
     _record!(hist, row, _constraint_values(oracle, zk), _multipliers(oracle, info), mvals, cont_buf)
     copyto!(run.zacc, zk)
     _print_row(pr, hist)
-    r = _stop_reason(stop, info, hist, run.stage_start)
+    r = _stop_reason(stop, info, hist, run.stage_start, ctx)
     # with a nonlinear constraint, convergence also needs the constraint met to the tolerance of the optimiser
     (r !== nothing && !_is_linear(oracle) && has_constraint(oracle) && info.violation > constraint_tol(opt)) && (r = nothing)
     done = false

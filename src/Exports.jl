@@ -52,6 +52,8 @@ end
 @_export Variables HelmholtzFilter
 @_export Variables TanhProjection
 @_export Variables CellMean
+@_export Variables PointwiseMap
+@_export Operators Parameter
 @_export Variables single_field_design
 @_export Variables get_values
 @_export Variables set_values!
@@ -68,3 +70,4 @@ end
 @_public Methods default_stop
 @_public Methods default_metric
 @_public Methods monitor_value
+@_public Methods metric_weights

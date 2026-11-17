@@ -204,6 +204,53 @@ function pullback(s::TanhStage, L, ctx, key)
   δ -> L(slope * δ)
 end
 
+"""
+    PointwiseMap(f, df; parameters = ())
+
+Map applied point by point at the quadrature points, `θ = f(input)`, with its derivative `df` written by the user
+(no automatic differentiation; check it with `check_consistency`): for example a projection or a threshold of the
+user's own. `f` and `df` are functions of one number. If they read [`Parameter`](@ref HyperShape.Operators.Parameter)s (or other objects with a
+`state_version`), list them in `parameters`, so the physical fields count as changed when they change (continuation).
+Lazy, like [`TanhProjection`](@ref): nothing is recomputed, the forms evaluate `f` and `df` when they are assembled.
+
+```julia
+p = Parameter(8.0)
+smooth_step = PointwiseMap(ρ -> 1 / (1 + exp(-p[] * (ρ - 0.5))),
+                           ρ -> (s = 1 / (1 + exp(-p[] * (ρ - 0.5))); p[] * s * (1 - s)); parameters = (p,))
+θ = PhysicalFields(x; ρ = smooth_step ∘ HelmholtzFilter(dΩ; rmin, ls))
+```
+"""
+struct PointwiseMap{F,D,P<:Tuple} <: FieldMap
+  f::F
+  df::D
+  parameters::P
+  function PointwiseMap(f::F, df::D, parameters::P) where {F,D,P<:Tuple}
+    for q in parameters
+      applicable(state_version, q) ||
+        throw(ArgumentError("PointwiseMap: a parameter must implement state_version (a Parameter); got $(typeof(q))"))
+    end
+    new{F,D,P}(f, df, parameters)
+  end
+end
+PointwiseMap(f, df; parameters = ()) = PointwiseMap(f, df, Tuple(parameters))
+
+struct PointwiseStage{M,I,F,D}
+  map::M
+  input::I
+  out::F
+  slope::D
+end
+
+_stage(m::PointwiseMap, input) = PointwiseStage(m, input, Operation(m.f)(input), Operation(m.df)(input))
+output(s::PointwiseStage) = s.out
+parameter_version(s::PointwiseStage) = sum(state_version, s.map.parameters; init = 0)
+has_parameters(s::PointwiseStage) = !isempty(s.map.parameters)
+update_stage!(s::PointwiseStage, ctx) = s
+function pullback(s::PointwiseStage, L, ctx, key)
+  slope = s.slope
+  δ -> L(slope * δ)
+end
+
 is_linear_stage(::IdentityStage) = true
 is_linear_stage(::FilterStage) = true
 
@@ -273,3 +320,4 @@ Base.show(io::IO, f::HelmholtzFilter) = print(io, "HelmholtzFilter(", f.backend,
 Base.show(io::IO, h::TanhProjection) = print(io, "TanhProjection(β = ", h.β, ", η = ", h.η, ")")
 Base.show(io::IO, c::CellMean) = print(io, "CellMean(", c.backend, ")")
 Base.show(io::IO, c::ComposedMap) = join(io, reverse(c.maps), " ∘ ")
+Base.show(io::IO, m::PointwiseMap) = print(io, "PointwiseMap(", length(m.parameters), " parameters)")

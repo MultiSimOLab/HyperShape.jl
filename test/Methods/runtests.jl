@@ -26,6 +26,10 @@ struct _CountMonitor
   n::Base.RefValue{Int}
 end
 HyperShape.monitor_value(m::_CountMonitor) = (m.n[] += 1; Float64(m.n[]))
+struct _UserMetric
+  w::Vector{Float64}
+end
+HyperShape.metric_weights(m::_UserMetric, z) = m.w
 struct _VecMonitor end
 HyperShape.monitor_value(::_VecMonitor) = [1.0, 2.0]
 struct _BadMonitor
@@ -778,6 +782,48 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     solve!(compliance_problem().problem, DensityMethod(OC()); maxiter = 2, io, verbose = 1, stop = nothing)
     out = String(take!(io))
     @test occursin("metric: Euclidean (default) (OC: only for the stationarity measure)", out) && occursin("stop: maxiter only · maxiter 2", out)
+  end
+
+  @testset "Extension points: Parameter, metric of the user, stop function" begin
+    # a Parameter as a dependency of a state: solved again only when it changes
+    q = compliance_problem()
+    prm = Parameter(1.0)
+    S2 = StateOperator(StaticLinearModel(q.l, q.a, q.U, q.V, q.bc; ls = LUSolver()), (q.θ, prm))
+    HyperShape.Operators.apply!(S2, nothing)
+    n0 = HyperShape.Operators.num_solves(S2)
+    HyperShape.Operators.apply!(S2, nothing)
+    @test HyperShape.Operators.num_solves(S2) == n0
+    prm[] = 2.0
+    HyperShape.Operators.apply!(S2, nothing)
+    @test HyperShape.Operators.num_solves(S2) == n0 + 1
+    # continued by Continuation
+    prm[] = 1.0
+    r = solve!(q.problem, DensityMethod(OC()); maxiter = 6, verbose = 0, stop = nothing,
+               continuation = Continuation(p = prm => [1.0, 2.0, 3.0]; every = 2))
+    @test r.history.continuation.p == [1.0, 1.0, 2.0, 2.0, 3.0, 3.0] && prm[] == 3.0
+    @test_throws ArgumentError Continuation(p = prm => [1.0, NaN]; every = 2)
+    # metric: a vector of weights or an object with metric_weights gives the same run as LumpedMass
+    qm0 = compliance_problem()
+    m = HyperShape.Methods.FunctionalOracle(qm0.problem, LumpedMass(qm0.dΩ)).metric
+    runs = map((qq -> LumpedMass(qq.dΩ), qq -> copy(m), qq -> _UserMetric(m))) do mk
+      qq = compliance_problem()
+      solve!(qq.problem, DensityMethod(SiMPL(); metric = mk(qq)); maxiter = 4, verbose = 0, stop = nothing).history.objective
+    end
+    @test runs[1] == runs[2] == runs[3]
+    @test_throws ArgumentError DensityMethod(SiMPL(); metric = :lumped)
+    @test_throws ArgumentError solve!(compliance_problem().problem, DensityMethod(SiMPL(); metric = ones(3)); maxiter = 2, verbose = 0)
+    @test_throws ArgumentError solve!(compliance_problem().problem, DensityMethod(SiMPL(); metric = -copy(m)); maxiter = 2, verbose = 0)
+    io = IOBuffer()
+    solve!(compliance_problem().problem, DensityMethod(SiMPL(); metric = _UserMetric(m)); maxiter = 1, verbose = 1, io, stop = nothing)
+    @test occursin("metric: _UserMetric", String(take!(io)))
+    # stop as a function of the user
+    io = IOBuffer()
+    r = solve!(compliance_problem().problem, DensityMethod(OC()); maxiter = 10, io, verbose = 1,
+               stop = (info, h, ctx) -> h.n >= 3 && ctx.iteration == 3)
+    out = String(take!(io))
+    @test r.status === :converged && r.reason === :custom && r.iterations == 3
+    @test occursin("stop: function of the user", out) && occursin("criterion of the user met", out)
+    @test_throws ArgumentError solve!(compliance_problem().problem, DensityMethod(OC()); maxiter = 2, verbose = 0, stop = 1e-3)
   end
 
   @testset "Screen output" begin

@@ -34,7 +34,7 @@ using ..Operators: LinearOperator, solve_linear!, OptContext
 import ..Operators: state_version, refresh!, invalidate!
 
 export FieldVariable, OptVariables, DesignFields, PhysicalFields
-export Identity, HelmholtzFilter, TanhProjection, CellMean
+export Identity, HelmholtzFilter, TanhProjection, CellMean, PointwiseMap
 export single_field_design
 
 include("OptVariables.jl")

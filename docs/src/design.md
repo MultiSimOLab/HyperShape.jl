@@ -316,8 +316,11 @@ A default never removes generality: everything it sets can be replaced from the 
 | `solve!(m, b; Assembly = stale)` | `LinearOperator` of a `StaticLinearModel` | `solve = (m, b, ctx, stale) -> …` |
 | `()` (constant matrix) | dependencies of a `LinearOperator` | `LinearOperator(model, deps)` |
 | `RejectStep(shrink = 0.5, max_attempts = 5)` | `solve!(…; on_failure)` | `on_failure = RejectStep(…)` |
-| `default_stop(optimizer)` | `solve!(…; stop)` | `stop = StopCriteria(…)` or `stop = nothing` |
-| `Euclidean()` (only for the stationarity measure) | `DensityMethod(OC())` | `metric = …` |
+| `default_stop(optimizer)` | `solve!(…; stop)` | `stop = StopCriteria(…)`, `stop = nothing` or `stop = (info, history, ctx) -> Bool` |
+| `Euclidean()` (only for the stationarity measure) | `DensityMethod(OC())` | `metric = LumpedMass(dΩ)`, a vector of weights or an object with `metric_weights(m, z)` |
+| maps `Identity`, `HelmholtzFilter`, `TanhProjection`, `CellMean` | `PhysicalFields`, `single_field_design` | `PointwiseMap(f, df; parameters)` |
+| continued objects `TanhProjection` (β), `OC` (move) | `Continuation` | any `Parameter` read by the user's forms or maps |
+| monitor `Grey` | `solve!(…; monitors)` | any object with `monitor_value(m)` |
 | `initial = true`, `history = true`, `name = "optimization"` | `OptPostProcessor` | the keyword of the same name |
 | `format = :vtu`, `precision = Float64`, `compress = false`, `async = Threads.nthreads() > 1` | `OptPostProcessor` (writers of `write_step`) | the keyword of the same name; `write_step(post, w::FieldWriter, …)` with a writer of your own; or `createvtk` in the driver |
 
