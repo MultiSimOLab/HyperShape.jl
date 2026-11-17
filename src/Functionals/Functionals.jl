@@ -61,6 +61,11 @@ struct Functional{FJ,FD,S,A,T<:PhysicalFields}
   linear::Bool                  # design-only and affine in z (declared; checked when used as a constraint)
 end
 
+Base.show(io::IO, F::Functional) =
+  print(io, "Functional(", F.S === nothing ? "design only" : "with a state", F.linear ? ", linear" : "",
+        ", scale ", F.scale_mode === :initial ? (isnan(F.scale[]) ? ":initial (not set)" : "$(F.scale[]) (:initial)") :
+        F.scale[], ")")
+
 function _scale(scale)
   if scale === :initial
     return :initial, NaN
@@ -118,7 +123,7 @@ end
 
 Volume constraint `g = ∫ θ.field dΩ - Vmax ≤ 0` with `Vmax = max_fraction ⋅ |Ω|` (`0 < max_fraction ≤ 1`, `|Ω|` the
 measure of `dΩ`), a design-only [`Functional`](@ref) with its value and derivative written in. With physical fields θ, the volume of the physical density: nonlinear in z if its chain has a
-[`Heaviside`](@ref HyperShape.Variables.Heaviside) projection, linear otherwise. With design fields x, the volume of
+[`TanhProjection`](@ref HyperShape.Variables.TanhProjection) projection, linear otherwise. With design fields x, the volume of
 the design density (linear; the identity physical fields are built inside). `field` is mandatory when there are
 several fields. `scale` divides the value and the derivative; default `Vmax`.
 """

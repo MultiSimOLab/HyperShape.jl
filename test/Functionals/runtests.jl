@@ -121,7 +121,7 @@ struct _NoSpaces <: HyperFEM.ComputationalModels.ComputationalModel end   # a mo
   @testset "Several physical fields: DJform as a named tuple" begin
     p = state_problem()
     (; z, x, f, dk, dΩ) = p
-    θ2 = PhysicalFields(x; ρ = Identity(), r2 = :ρ => Heaviside(β = 2.0, η = 0.5))
+    θ2 = PhysicalFields(x; ρ = Identity(), r2 = :ρ => TanhProjection(β = 2.0, η = 0.5))
     J = Functional(θ -> ∫(θ.ρ * θ.r2)dΩ, θ2; derivative = θ -> (ρ = δ -> ∫(θ.r2 * δ)dΩ, r2 = δ -> ∫(θ.ρ * δ)dΩ), scale = 1.0)
     g = functional_gradient!(zeros(length(z)), J, nothing)
     rates = taylor_rates(() -> functional_value(J, nothing), g, z, direction(length(z)))
@@ -244,7 +244,7 @@ struct _NoSpaces <: HyperFEM.ComputationalModels.ComputationalModel end   # a mo
     dΓ = Measure(BoundaryTriangulation(model; tags = "right"), 2)
     Vρ = TestFESpace(model, ReferenceFE(lagrangian, Float64, 0); conformity = :L2)
     ρ0 = [0.3 + 0.5 * abs(sin(2.3i)) for i in 1:num_free_dofs(Vρ)]
-    z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = ρ0, physical = Identity())
+    z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = ρ0, map = Identity())
     k(ρ) = 1e-2 + ρ^3; dk(ρ) = 3ρ^2
     c = 5.0
     bc = BoundaryConditions(BoundaryCondition("left", 1.0, Λ -> Λ))
@@ -401,7 +401,7 @@ struct _NoSpaces <: HyperFEM.ComputationalModels.ComputationalModel end   # a mo
     M = Module()
     Core.eval(M, :(using Gridap, HyperFEM, HyperShape))
     for name in names(HyperShape)
-      name === :HyperShape && continue
+      (name === :HyperShape || !Base.isexported(HyperShape, name)) && continue
       @test Core.eval(M, name) === getfield(HyperShape, name)
     end
   end

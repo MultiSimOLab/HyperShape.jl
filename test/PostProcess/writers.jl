@@ -140,7 +140,7 @@ vtu_npoints(file) = parse(Int, match(r"NumberOfPoints=\"(\d+)\"", read(file, Str
     post = OptPostProcessor(every = 2, filepath = dir, format = format) do p, ctx
       write_step(p, Ω, "rho" => q.θ.ρ, "x" => q.x.ρ, "u" => q.uh)
     end
-    solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 5, verbose = 0, stop = nothing, post)
+    solve!(q.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 5, verbose = 0, stop = nothing, post)
     @test isempty(post.writers)                                        # closed by solve!
     if format === :vtu
       @test first(pvd_entries(joinpath(dir, "optimization.pvd"))) == [0, 2, 4, 5]
@@ -150,12 +150,12 @@ vtu_npoints(file) = parse(Int, match(r"NumberOfPoints=\"(\d+)\"", read(file, Str
       # resume from a checkpoint at 4: the steps after it are dropped
       ck = mktempdir()
       q = compliance_problem()
-      solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 4, verbose = 0, stop = nothing, checkpoint = Checkpoint(ck; every = 2))
+      solve!(q.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 4, verbose = 0, stop = nothing, checkpoint = Checkpoint(filepath = ck, every = 2))
       Ω2 = get_triangulation(q.uh)
       post2 = OptPostProcessor(every = 3, filepath = dir, format = :vtkhdf) do p, ctx
         write_step(p, Ω2, "rho" => q.θ.ρ, "x" => q.x.ρ, "u" => q.uh)
       end
-      solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 7, verbose = 0, stop = nothing, post = post2,
+      solve!(q.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 7, verbose = 0, stop = nothing, post = post2,
              resume = load_checkpoint(ck))
       @test h5open(h -> read(h["VTKHDF/Steps/Values"]), joinpath(dir, "optimization.vtkhdf")) == [0.0, 2.0, 4.0, 6.0, 7.0]
     end
@@ -220,9 +220,9 @@ vtu_npoints(file) = parse(Int, match(r"NumberOfPoints=\"(\d+)\"", read(file, Str
       write_step(p, Ωq, "rho" => q.θ.ρ)
       write_step(p, Ωh, "x" => q.x.ρ)
     end
-    @test_throws ArgumentError solve!(q.problem, SIMP(OC(); metric = Euclidean()); maxiter = 1, verbose = 0, stop = nothing, post = bad)
+    @test_throws ArgumentError solve!(q.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 1, verbose = 0, stop = nothing, post = bad)
     opts = OptPostProcessor((p, ctx) -> write_step(p, Ωq, "rho" => q.θ.ρ; compress = true); every = 1, filepath = mktempdir())
-    @test_throws ArgumentError solve!(compliance_problem().problem, SIMP(OC(); metric = Euclidean()); maxiter = 1, verbose = 0,
+    @test_throws ArgumentError solve!(compliance_problem().problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 1, verbose = 0,
                                       stop = nothing, post = opts)
     @test_throws ArgumentError OptPostProcessor((p, c) -> nothing; every = 1, maxpending = 0)
   end
@@ -235,7 +235,7 @@ vtu_npoints(file) = parse(Int, match(r"NumberOfPoints=\"(\d+)\"", read(file, Str
       ctx.iteration == 3 && rm(out; recursive = true)          # the folder disappears before the last write
       write_step(p, Ωq, "rho" => q.θ.ρ)
     end
-    r = @test_logs (:error, r"a write failed") match_mode = :any solve!(q.problem, SIMP(OC(); metric = Euclidean());
+    r = @test_logs (:error, r"a write failed") match_mode = :any solve!(q.problem, DensityMethod(OC(); metric = Euclidean());
                                                                        maxiter = 3, verbose = 0, stop = nothing, post)
     @test r isa OptResult && r.iterations == 3
   end

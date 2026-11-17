@@ -200,6 +200,9 @@ function invalidate! end
 
 invalidate!(op::LinearOperator) = (op.force_stale = true; op)
 
+Base.show(io::IO, op::LinearOperator) =
+  print(io, "LinearOperator(", nameof(typeof(op.model)), ", ", op.nsolves, " solves)")
+
 """
     num_solves(op) -> Int
 

@@ -59,3 +59,5 @@ end
 
 # g_z of block i from g_x of field i (identity map)
 _pullback_block!(gz_block, x::DesignFields, i, gx) = (gz_block .+= gx; gz_block)
+
+Base.show(io::IO, x::DesignFields) = print(io, "DesignFields(", join(getfield(x, :names), ", "), ")")

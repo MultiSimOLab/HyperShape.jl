@@ -6,7 +6,7 @@
 #   update_stage!(s, ctx)     recompute the output from the input (in place)
 #   pullback(s, L, ctx, key)  L: δ_out ↦ DomainContribution, linear form on the output; returns the linear form on the input
 #                             (key: identifies the form for the compiled assemblers, see Assembly.jl)
-#   parameter_version(s)      counter of the parameters of the map (β of a Heaviside); 0 if it has none
+#   parameter_version(s)      counter of the parameters of the map (β of a TanhProjection); 0 if it has none
 #   is_lazy(s)                true if the output is evaluated lazily (nothing to recompute when an earlier parameter changes)
 
 """
@@ -74,8 +74,6 @@ struct HelmholtzFilter{O<:LinearOperator,M} <: FieldMap
     new{O,M}(op, dΩ, _check_backend(backend))
 end
 HelmholtzFilter(op::LinearOperator, dΩ; backend::Symbol = :compiled) = HelmholtzFilter(op, dΩ, backend)
-HelmholtzFilter(op::LinearOperator; measure = nothing, kwargs...) =
-  throw(ArgumentError("HelmholtzFilter: the measure is now positional, HelmholtzFilter(op, dΩ; backend)"))
 
 function HelmholtzFilter(dΩ::Gridap.CellData.Measure; rmin::Real, order::Integer = 1, backend::Symbol = :compiled,
                          model_backend = nothing, solve = nothing, kwargs...)
@@ -131,9 +129,9 @@ function pullback(s::FilterStage, L, ctx, key)
 end
 
 """
-    Heaviside(; β, η)
+    TanhProjection(; β, η)
 
-Smooth Heaviside projection (Wang, Lazarov and Sigmund, 2011), applied point by point at the quadrature points:
+Smooth approximation of the Heaviside step (Wang, Lazarov and Sigmund, 2011), applied point by point at the quadrature points:
 
     H(ρ) = (tanh(βη) + tanh(β(ρ - η))) / (tanh(βη) + tanh(β(1 - η)))
 
@@ -141,67 +139,67 @@ Smooth Heaviside projection (Wang, Lazarov and Sigmund, 2011), applied point by 
 `set_beta!` (continuation); every field and form built from this object sees the new value, and the physical fields
 that use it count as changed.
 """
-mutable struct Heaviside <: FieldMap
+mutable struct TanhProjection <: FieldMap
   β::Float64
   η::Float64
   version::Int
-  function Heaviside(β::Real, η::Real)
-    β > 0 || throw(ArgumentError("Heaviside: β must be positive"))
-    0 < η < 1 || throw(ArgumentError("Heaviside: η must be in (0, 1)"))
+  function TanhProjection(β::Real, η::Real)
+    β > 0 || throw(ArgumentError("TanhProjection: β must be positive"))
+    0 < η < 1 || throw(ArgumentError("TanhProjection: η must be in (0, 1)"))
     new(β, η, 0)
   end
 end
-Heaviside(; β, η) = Heaviside(β, η)
+TanhProjection(; β, η) = TanhProjection(β, η)
 
 """
-    set_beta!(h::Heaviside, β)
+    set_beta!(h::TanhProjection, β)
 
 Changes the sharpness of the projection.
 """
-function set_beta!(h::Heaviside, β)
-  β > 0 || throw(ArgumentError("Heaviside: β must be positive"))
+function set_beta!(h::TanhProjection, β)
+  β > 0 || throw(ArgumentError("TanhProjection: β must be positive"))
   β == h.β && return h
   setfield!(h, :β, Float64(β))
   setfield!(h, :version, h.version + 1)
   h
 end
 
-Base.setproperty!(::Heaviside, s::Symbol, v) =
-  throw(ArgumentError("Heaviside: use set_beta! to change β; η and the other fields cannot be changed"))
+Base.setproperty!(::TanhProjection, s::Symbol, v) =
+  throw(ArgumentError("TanhProjection: use set_beta! to change β; η and the other fields cannot be changed"))
 
-struct HeavisideValue <: Function
-  h::Heaviside
+struct TanhValue <: Function
+  h::TanhProjection
 end
-struct HeavisideSlope <: Function
-  h::Heaviside
+struct TanhSlope <: Function
+  h::TanhProjection
 end
 
-function (f::HeavisideValue)(ρ)
+function (f::TanhValue)(ρ)
   β, η = f.h.β, f.h.η
   (tanh(β * η) + tanh(β * (ρ - η))) / (tanh(β * η) + tanh(β * (1 - η)))
 end
 
-function (f::HeavisideSlope)(ρ)
+function (f::TanhSlope)(ρ)
   β, η = f.h.β, f.h.η
   β * (1 - tanh(β * (ρ - η))^2) / (tanh(β * η) + tanh(β * (1 - η)))
 end
 
-struct HeavisideStage{I,F,D}
-  h::Heaviside
+struct TanhStage{I,F,D}
+  h::TanhProjection
   input::I
   out::F
   slope::D
 end
 
-_stage(h::Heaviside, input) = HeavisideStage(h, input, Operation(HeavisideValue(h))(input), Operation(HeavisideSlope(h))(input))
-output(s::HeavisideStage) = s.out
-parameter_version(s::HeavisideStage) = s.h.version
+_stage(h::TanhProjection, input) = TanhStage(h, input, Operation(TanhValue(h))(input), Operation(TanhSlope(h))(input))
+output(s::TanhStage) = s.out
+parameter_version(s::TanhStage) = s.h.version
 has_parameters(s) = false
-has_parameters(s::HeavisideStage) = true
+has_parameters(s::TanhStage) = true
 is_lazy(s) = true
 is_lazy(s::FilterStage) = false
-update_stage!(s::HeavisideStage, ctx) = s
-function pullback(s::HeavisideStage, L, ctx, key)
+update_stage!(s::TanhStage, ctx) = s
+function pullback(s::TanhStage, L, ctx, key)
   slope = s.slope
   δ -> L(slope * δ)
 end

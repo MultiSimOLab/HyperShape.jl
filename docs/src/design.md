@@ -19,17 +19,17 @@ Three linked levels, built in order; each one can only be created from the previ
 | `x` | `DesignFields` | Design fields on the design mesh: nodal (P1) or cell-wise (P0) |
 | `θ` | `PhysicalFields` | Physical fields read by the weak forms at the quadrature points |
 
-Implemented (filter by PDE, Heaviside projection, P0 and P1 design fields):
+Implemented (filter by PDE, tanh projection, P0 and P1 design fields):
 
 ```julia
 F = HelmholtzFilter(dΩ; rmin = 0.05, ls = LUSolver())   # r = rmin/(2√3), P1, Neumann; ls goes to StaticLinearModel
 
 z = OptVariables(ρ = FieldVariable(Vρ; bounds = (0.0, 1.0), init = 0.5))
 x = DesignFields(z; ρ = Identity())
-θ = PhysicalFields(x; ρ = Heaviside(β = 1.0, η = 0.5) ∘ F)
+θ = PhysicalFields(x; ρ = TanhProjection(β = 1.0, η = 0.5) ∘ F)
 
 # the same in one line
-z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = 0.5, physical = Heaviside(β = 1.0, η = 0.5) ∘ F)
+z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = 0.5, map = TanhProjection(β = 1.0, η = 0.5) ∘ F)
 
 # any other filter: a LinearOperator over a model written by the user (symmetric form)
 af(ρ̃, v) = ∫(r^2 * ∇(ρ̃) ⋅ ∇(v) + ρ̃ * v)dΩ + ∫(r * ρ̃ * v)dΓ                     # Robin term on Γ
@@ -162,27 +162,28 @@ accept or reject, continuation, stopping, checkpoint); only the step is specific
 
 | Method | Design field | Step |
 |---|---|---|
-| `SIMP(optimizer; metric)` | density in [0, 1] | any `Optimizer` (`OC`, `SiMPL`) |
+| `DensityMethod(optimizer; metric)` | density in [0, 1] | any `Optimizer` (`OC`, `SiMPL`) |
 | `ReactionDiffusion` (phase 2) | level set in [−1, 1] | one linear solve, then clipping |
 | `LevelSet` (phase 2) | signed distance | velocity extension, advection, reinitialisation |
 
-Implemented: `Optimization` and `SIMP` with the common loop.
+Implemented: `Optimization` and `DensityMethod` with the common loop.
 
 ```julia
 Vol = Volume(θ, dΩ; max_fraction = 0.5)   # physical (projected) density: nonlinear in z; Volume(x, dΩ; …) is linear
-problem = Optimization(z; objective = J, constraints = Vol)
-result  = solve!(problem, SIMP(SiMPL(); metric = LumpedMass(dΩ));
-                 maxiter = 300, stop = StopCriteria(kkt = 1e-5),
-                 schedule = Continuation(β = H => [1, 2, 4, 8, 16, 32]; every = 40),
-                 checkpoint = Checkpoint("results/ckpt"; every = 10),
+problem = Optimization(objective = J, constraints = (volume = Vol,))   # z is the one behind J
+result  = solve!(problem, DensityMethod(SiMPL(); metric = LumpedMass(dΩ));
+                 maxiter = 300, stop = StopCriteria(stationarity_rtol = 1e-3),
+                 continuation = Continuation(β = H => [1, 2, 4, 8, 16, 32]; every = 40),
+                 checkpoint = Checkpoint(filepath = "results/ckpt", every = 10),
+                 monitors = (grey = Grey(θ, dΩ),),
                  post = OptPostProcessor((post, ctx) -> write_step(post, Ω, "rho" => θ.ρ); every = 10,
                                          filepath = "results/opt"))
-result.status, result.history.objective
+result.status, result.history.objective, result.history.constraints.volume, get_values(result.z)
 ```
 
 `Volume(θ, dΩ; max_fraction)` bounds the fraction of the domain filled by the physical density, the one the weak
 forms read; `Volume(x, dΩ; max_fraction)` that of the design
-density. The Helmholtz filter preserves the volume, the Heaviside projection does not: on a 150×50 half MBB beam with
+density. The Helmholtz filter preserves the volume, the tanh projection does not: on a 150×50 half MBB beam with
 target 0.5, the design volume leaves the physical one at 0.64–0.68, the physical volume holds it at 0.5000.
 
 - **Constraint:** in phase 0, at most one, a design-only functional (`Volume`, or a `Functional(J, θ; derivative,
@@ -194,26 +195,26 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
   transposed filter for its derivative and one filter per correction (about 1.5–3), no forward solve.
 - **Metric:** `LumpedMass(dΩ)` (cell volumes for P0, lumped mass for P1) or `Euclidean()`; mandatory for SiMPL, OC
   uses it only for the stationarity measure (default `Euclidean()`; give `LumpedMass(dΩ)` to compare it with SiMPL).
-- **Rejection** (`on_failure`, default `RejectStep(shrink = 0.5, max = 5)`): if the forward problem does not converge at the new design, the loop restores the previous one,
+- **Rejection** (`on_failure`, default `RejectStep(shrink = 0.5, max_attempts = 5)`): if the forward problem does not converge at the new design, the loop restores the previous one,
   calls `shrink!` and tries again, at most `max` times; then it throws `OptimizationFailure` (checkpoint written).
   SiMPL handles failures inside its line search; if it finds no step, the current continuation stage ends (in the last stage, or without continuation, the result is `:stalled`).
 - **Continuation:** explicit list of values per stage, a jump every `every` iterations (or when the optimiser finds no
   step); with `close_early = true` also when the stopping criteria are met. The optimiser forgets its memory at each
   jump; the optimisation only stops in the last stage.
-- **Stopping:** `maxiter` is mandatory. `stop` defaults to `StopCriteria(objective = 1e-3)` for every optimiser
+- **Stopping:** `maxiter` is mandatory. `stop` defaults to `StopCriteria(objective_range = 1e-3)` for every optimiser
   (`default_stop`): the range of the objective over the last 10 iterations of the last stage, relative to the
-  objective, below 0.1 %. With a Heaviside projection `change` and `kkt` are rarely reached; the objective settles
+  objective, below 0.1 %. With a tanh projection `change` and `kkt` are rarely reached; the objective settles
   (half MBB beam 150×50: OC with adaptive move limits stops at iteration 214, 0.4 % above its value at 500 iterations; SiMPL at 210, within 0.3 % of 350 iterations). Other criteria:
   `kkt`, `kkt_rel` (relative to the first iteration), `stationarity`, `stationarity_rel` (the measure
   `‖z − P(z − g)‖_M` of the SiMPL paper, computed by OC and SiMPL at the design before each step and shown in the
   column `S` of the table and the history), `change`; `stop = nothing` runs `maxiter` iterations. A run that
   oscillates or whose physical volume keeps growing may still end at `maxiter`.
-- **Grey monitor:** `solve!(…; grey = Grey(θ, dΩ))` adds the measure of grey `4/|Ω| ∫ρ(1 − ρ)` to the history, the
+- **Grey monitor:** `solve!(…; monitors = (grey = Grey(θ, dΩ),))` adds the measure of grey `4/|Ω| ∫ρ(1 − ρ)` to the history, the
   table and the closing line. It is fixed mostly by β, so it is a measure of quality, not a stopping criterion.
 - **Context:** `OptContext` (iteration, attempt, trial, phase, continuation values) reaches every solve function of
   the user; phases `:setup`, `:check`, `:optimization` and `:linesearch`.
 - **Checkpoint:** `checkpoint.toml`, `z_<k>.bin` and `history_<k>.csv` in a folder; resume with
-  `solve!(…; resume = load_checkpoint(path))`. OC saves its memory (adaptive move limits, correction shift; `memory`/`restore_memory!`) and resumes exactly; SiMPL restarts its step size. An `OC` continued by `schedule` gets its `move` back at the end of `solve!`.
+  `solve!(…; resume = "results/ckpt")` (the folder; or the result of `load_checkpoint`). OC saves its memory (adaptive move limits, correction shift; `memory`/`restore_memory!`) and resumes exactly; SiMPL restarts its step size. An `OC` continued by `continuation` gets its `move` back at the end of `solve!`.
 - **Start:** a starting design that violates the constraint is scaled towards the lower bound (a linear constraint:
   on the entries it acts on, with equality; a nonlinear one: by regula falsi to `-1e-6 ≤ g ≤ 0`); the factor is in
   `result.start_scaling`. A resumed design is not touched, nor the design at a continuation jump.
@@ -314,9 +315,9 @@ A default never removes generality: everything it sets can be replaced from the 
 | `solve!(m; Assembly = true)` | `StateOperator` / `AdjointOperator` of a `StaticLinearModel` | `solve = (m, ctx) -> …` |
 | `solve!(m, b; Assembly = stale)` | `LinearOperator` of a `StaticLinearModel` | `solve = (m, b, ctx, stale) -> …` |
 | `()` (constant matrix) | dependencies of a `LinearOperator` | `LinearOperator(model, deps)` |
-| `RejectStep(shrink = 0.5, max = 5)` | `solve!(…; on_failure)` | `on_failure = RejectStep(…)` |
+| `RejectStep(shrink = 0.5, max_attempts = 5)` | `solve!(…; on_failure)` | `on_failure = RejectStep(…)` |
 | `default_stop(optimizer)` | `solve!(…; stop)` | `stop = StopCriteria(…)` or `stop = nothing` |
-| `Euclidean()` (unused) | `SIMP(OC())` | `metric = …` |
+| `Euclidean()` (only for the stationarity measure) | `DensityMethod(OC())` | `metric = …` |
 | `initial = true`, `history = true`, `name = "optimization"` | `OptPostProcessor` | the keyword of the same name |
 | `format = :vtu`, `precision = Float64`, `compress = false`, `async = Threads.nthreads() > 1` | `OptPostProcessor` (writers of `write_step`) | the keyword of the same name; `write_step(post, w::FieldWriter, …)` with a writer of your own; or `createvtk` in the driver |
 

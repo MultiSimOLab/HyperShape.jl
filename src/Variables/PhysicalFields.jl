@@ -36,7 +36,7 @@ function PhysicalFields(x::DesignFields; backend = :compiled, kwargs...)
   for (k, spec) in pairs(kwargs)
     src, map = spec isa Pair ? (spec.first, spec.second) : (k, spec)
     src isa Symbol || throw(ArgumentError("PhysicalFields: field $k: the source must be a Symbol, got $(typeof(src))"))
-    map isa FieldMap || throw(ArgumentError("PhysicalFields: field $k: expected a map (Identity(), HelmholtzFilter, Heaviside, …), got $(typeof(map))"))
+    map isa FieldMap || throw(ArgumentError("PhysicalFields: field $k: expected a map (Identity(), HelmholtzFilter, TanhProjection, …), got $(typeof(map))"))
     i = findfirst(==(src), xnames)
     i === nothing && throw(ArgumentError("PhysicalFields: field $k: no design field named $src; available: $(join(xnames, ", "))"))
     push!(sources, i)
@@ -187,10 +187,12 @@ end
     is_linear_field(θ::PhysicalFields, name) -> Bool
 
 Whether the physical field `name` depends linearly on its design field: every map of its chain is linear
-([`Identity`](@ref), [`HelmholtzFilter`](@ref), [`CellMean`](@ref)); a [`Heaviside`](@ref) projection is not.
+([`Identity`](@ref), [`HelmholtzFilter`](@ref), [`CellMean`](@ref)); a [`TanhProjection`](@ref) projection is not.
 """
 function is_linear_field(θ::PhysicalFields, name::Symbol)
   j = findfirst(==(name), getfield(θ, :names))
   j === nothing && throw(ArgumentError("PhysicalFields: no physical field named $name"))
   all(is_linear_stage, getfield(θ, :chains)[j])
 end
+
+Base.show(io::IO, θ::PhysicalFields) = print(io, "PhysicalFields(", join(getfield(θ, :names), ", "), ")")

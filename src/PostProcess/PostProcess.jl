@@ -181,7 +181,7 @@ the post-processor).
 post = OptPostProcessor(every = 10, filepath = "results/mbb") do post, ctx
   write_step(post, Ω, "rho" => θ.ρ, "x" => x.ρ, "u" => get_state(S))
 end
-solve!(problem, SIMP(OC()); maxiter = 300, post)
+solve!(problem, DensityMethod(OC()); maxiter = 300, post)
 ```
 """
 mutable struct OptPostProcessor{F}

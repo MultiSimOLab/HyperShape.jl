@@ -22,7 +22,7 @@ with `m = move * (ub - lb)` and `λ > 0` found by bisection on `aᵀz = V`, star
 **Move limits.** With `adapt = (dec, inc)` (default) each entry has its own move limit `mᵢ`: multiplied by `dec`
 when its last step changed sign with respect to the one before, by `inc` when it kept it, and kept in
 `[move_min, move]` (as the move limits of MMA, Svanberg 1987). It damps the oscillation of OC at the interface when a
-Heaviside projection is sharp (a step of `move` is wider than the projection band, about `1/β`). `reset!` (a
+tanh projection is sharp (a step of `move` is wider than the projection band, about `1/β`). `reset!` (a
 continuation jump) restores every `mᵢ` to `move`; `shrink!` scales them all, and the retry after a rejected step does
 not update them. `adapt = nothing` gives the scalar move
 limit of top88. `move` can follow a continuation, `Continuation(β = H => […], move = oc => […])` (see
@@ -204,7 +204,7 @@ end
 
 function _oc_step!(opt::OC, s::OCState, z, oracle, m)
   f = objective(oracle, z)
-  isfinite(f) || return StepInfo(false, f, NaN, NaN, 0.0, _step_size(m), 0.0, 1, NaN)
+  isfinite(f) || return StepInfo(false, f, NaN, NaN, 0.0, _step_size(m), 0.0, 1, NaN, NaN)
   gradient!(s.dF, oracle, z)
   c = linear_constraint(oracle)
   c === nothing && return _oc_step_nonlinear!(opt, s, z, oracle, f, m)
@@ -237,7 +237,7 @@ end
 
 function _oc_step_nonlinear!(opt::OC, s::OCState, z, oracle, f, m)
   g = constraint(oracle, z)
-  isfinite(g) || return StepInfo(false, f, NaN, NaN, 0.0, _step_size(m), Inf, 1, NaN)
+  isfinite(g) || return StepInfo(false, f, NaN, NaN, 0.0, _step_size(m), Inf, 1, NaN, NaN)
   a = constraint_gradient!(s.a, oracle, z)
   amax = maximum(a)
   amax > 0 || throw(ArgumentError("OC: the derivative of the constraint has no positive entry"))
@@ -277,3 +277,5 @@ function _oc_stationarity!(s::OCState, oracle, z, a, V)
   riesz!(s.sga, oracle, a)
   stationarity!(s.sw, oracle, z, s.sg, s.sga, a, V)
 end
+
+computes_kkt(::OC) = false

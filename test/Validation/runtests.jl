@@ -12,7 +12,7 @@ include(joinpath(@__DIR__, "..", "..", "validation", "cases.jl"))
   end
 
   base = (; case = :top88, nx = 60, ny = 20, vf = 0.5, rmin = 2.4, Emin = 1e-9)
-  t88 = (; opt = OC(adapt = nothing), stop = StopCriteria(change = 0.01))
+  t88 = (; opt = OC(adapt = nothing), stop = StopCriteria(change_tol = 0.01))
 
   @testset "MBB 60×20 against top88 with the PDE filter (237.60)" begin
     r = mbb(; base..., t88..., cellmean = true)              # the formulation of top88: cell mean of the filtered density
@@ -45,7 +45,7 @@ include(joinpath(@__DIR__, "..", "..", "validation", "cases.jl"))
     dΩ = Measure(Triangulation(model), 2)
     Vρ = design_space(model, 0)
     ρ0 = [0.2 + 0.6 * abs(sin(1.7i)) for i in 1:num_free_dofs(Vρ)]
-    z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = ρ0, physical = density_chain(dΩ, 2.4; cellmean = true))
+    z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = ρ0, map = density_chain(dΩ, 2.4; cellmean = true))
     @test gridap_to_top88(cell_means(θ, dΩ, 1.0), 60, 20) ≈ filt(T88(60, 20, 2.4), gridap_to_top88(ρ0, 60, 20)) atol = 1e-12
   end
 
@@ -68,6 +68,6 @@ include(joinpath(@__DIR__, "..", "..", "validation", "cases.jl"))
     r = cantilever3d(; n = (8, 4, 4), opt = SiMPL(), maxiter = 10, stop = nothing)
     h = r.result.history
     @test r.result.iterations == 10 && all(i -> h.objective[i+1] <= h.objective[i] * (1 + 1e-12), 1:9)
-    @test all(<=(1e-6), h.constraint) && r.asymmetry < 1e-8
+    @test all(<=(1e-6), h.constraints.volume) && r.asymmetry < 1e-8
   end
 end

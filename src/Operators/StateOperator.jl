@@ -151,3 +151,7 @@ function _check_homogeneous_trial(model, who)
     throw(ArgumentError("$who: the trial space has non-zero Dirichlet values; build the adjoint on a homogeneous space"))
   nothing
 end
+
+Base.show(io::IO, S::StateOperator) =
+  print(io, "StateOperator(", nameof(typeof(S.model)), ", ", length(S.depends), " dependencies, ",
+        S.solved ? (S.converged ? "solved" : "not converged") : "not solved", ")")

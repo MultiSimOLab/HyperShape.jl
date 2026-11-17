@@ -232,7 +232,7 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
       nev += 1
       s.have_f = true
     end
-    isfinite(s.f) || return StepInfo(false, s.f, NaN, NaN, 0.0, 0.0, _violation(c, s.z), nev, NaN)
+    isfinite(s.f) || return StepInfo(false, s.f, NaN, NaN, 0.0, 0.0, _violation(c, s.z), nev, NaN, NaN)
     gradient!(s.dF, oracle, s.z)
     riesz!(s.g, oracle, s.dF)
     s.have_grad = true
@@ -244,7 +244,7 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
   gk, Vlin, restoration = NaN, NaN, false
   if nonlinear
     gk = constraint(oracle, s.z)
-    isfinite(gk) || return StepInfo(false, f, NaN, NaN, 0.0, 0.0, Inf, nev, NaN)
+    isfinite(gk) || return StepInfo(false, f, NaN, NaN, 0.0, 0.0, Inf, nev, NaN, NaN)
     constraint_gradient!(s.a, oracle, s.z)
     amax = maximum(s.a)
     amax > 0 || throw(ArgumentError("SiMPL: the derivative of the constraint has no positive entry"))

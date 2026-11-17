@@ -106,3 +106,7 @@ function _index(names, name)
   i === nothing && throw(ArgumentError("no block or field named $name; available: $(join(names, ", "))"))
   i
 end
+
+Base.show(io::IO, z::OptVariables) =
+  print(io, "OptVariables(", join(("$n ($(length(r)))" for (n, r) in zip(z.names, z.ranges)), ", "), ")")
+Base.show(io::IO, v::FieldVariable) = print(io, "FieldVariable(", length(v.init), " values, bounds (", v.lb, ", ", v.ub, "))")
