@@ -55,11 +55,12 @@ function run_mbb(; nx = 60, ny = 20, maxiter = 300, out = "results/mbb", verbose
   t(x)    = VectorValue(0.0, -(4 - 6x[1]))      # unit point load at the top-left node (dual to its shape function)
   a(u, v) = ∫(∇(v)' ⊙ ((∂²Ψ ∘ (θ.ρ, F ∘ ∇(u)')) ⊙ ∇(u)'))dΩ
   l(v)    = ∫(t ⋅ v)dΓ
-  S = StateOperator(StaticLinearModel(l, a, U, V, bc; ls = LUSolver(), backend = :compiled), θ)
+  # the state, and how to differentiate through it: pᵀ ∂R/∂ρ [δ] at the state u and the adjoint p
+  S = StateOperator(StaticLinearModel(l, a, U, V, bc; ls = LUSolver(), backend = :compiled), θ;
+        adjoint = AdjointProblem(sensitivity = (u, p) -> (δ -> ∫((∇(p)' ⊙ ((∂²Ψ_∂ρ ∘ (θ.ρ, F ∘ ∇(u)')) ⊙ ∇(u)')) * δ)dΩ)))
 
-  # Objective (compliance, self-adjoint) and constraint
-  C   = Functional((u, θ) -> ∫(t ⋅ u)dΓ, S; adjoint = :self, scale = :initial,
-                   derivative = (u, p, θ) -> (δ -> ∫(-(∇(p)' ⊙ ((∂²Ψ_∂ρ ∘ (θ.ρ, F ∘ ∇(u)')) ⊙ ∇(u)')) * δ)dΩ))
+  # Objective (compliance, self-adjoint: p = u, no adjoint solve) and constraint
+  C   = Functional((u, θ) -> ∫(t ⋅ u)dΓ, S; dJdu = SelfAdjoint(), scale = :initial)
   Vol = Volume(θ, dΩ; max_fraction = 0.5)
   verbose > 0 && display(check_consistency((compliance = C, volume = Vol)))   # Taylor tests of the derivatives
 
@@ -91,10 +92,15 @@ result = run_mbb()
 - **Physics.** The weak forms are yours, built here from constitutive models of HyperFEM: the
   `EnergyInterpolationScheme` between a solid and a weak void (`LinearElasticity2D` with stiffness `Emin`), whose
   energy is `ρ³ Ψs + (1 − ρ³) Ψv` (SIMP with p = 3). It returns the derivatives with respect to `F = I + ∇u` and to
-  `ρ`: the second derivative in `F` gives the bilinear form, its derivative in `ρ` the sensitivity of the compliance. The state is a
-  `StateOperator` over a HyperFEM model that depends on `θ`: it is solved again only when `θ` changes.
-- **Functionals.** `Functional(J, S; derivative, adjoint, scale)`: the value and its derivative with respect to the
-  physical fields, written by you (the compliance is self-adjoint: `adjoint = :self`). `Volume` is built in.
+  `ρ`: the second derivative in `F` gives the bilinear form, its derivative in `ρ` the sensitivity of the state. The state is a
+  `StateOperator` over a HyperFEM model that depends on `θ`: it is solved again only when `θ` changes. Its
+  `AdjointProblem` says how to differentiate through it: the `sensitivity` `pᵀ ∂R/∂θ [δ]` at the state `u` and the
+  adjoint `p`, written once per state and without sign, and who solves the transposed system. Here nothing is solved
+  (the compliance is self-adjoint); for other functionals give `SymmetricState()` (reuses the factorisation of a linear
+  and symmetric state) or a model of yours with the transposed tangent.
+- **Functionals.** `Functional(J, S; dJdu, dJdθ, scale)`: the value and its partial derivatives with respect to the
+  state (`dJdu = u -> (w -> ∫(…)dΩ)`, or `SelfAdjoint()` for the compliance, so `p = u` and no adjoint is solved) and
+  to the physical fields (`dJdθ`, only if `J` reads them). HyperShape puts the signs. `Volume` is built in.
   `check_consistency` runs Taylor tests of every derivative and checks the declared dependencies: run it once on a
   coarse mesh whenever you write a new derivative.
 - **Solve.** `Optimization(objective = C, constraints = (volume = Vol,))` is the problem; `DensityMethod(SiMPL(); metric)` the method (or

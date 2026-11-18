@@ -500,7 +500,7 @@ end
 function _counters(problem)
   J = problem.objective
   fwd = J.S === nothing ? () : (J.S,)
-  adj = (J.A === nothing || J.A === J.S) ? () : (J.A,)
+  adj = J.S === nothing ? () : (J.S.adjoint,)
   filters = Any[]
   for F in (J, problem.constraints...), op in filter_operators(F.θ)
     any(o -> o === op, filters) || push!(filters, op)
@@ -561,7 +561,7 @@ constraint, only when it holds to the tolerance of the optimiser)), `continuatio
 ([`Checkpoint`](@ref)), `post` (an
 [`OptPostProcessor`](@ref HyperShape.PostProcess.OptPostProcessor): its driver is called at the starting design, at the
 accepted iterations that are multiples of `every`, at the end and after a failure, with the fields and the forward state at the accepted
-design; the adjoint state is still the one of the previous design) and
+design) and
 `monitors` (a named tuple of monitors, such as `(grey = Grey(θ, dΩ),)`: their values, see `monitor_value`, go to the
 history, the table and the closing line), `resume` (the folder of a [`Checkpoint`](@ref) or the result of
 [`load_checkpoint`](@ref)), `verbose` and `io`. An `OC` whose `move` is continued by `continuation` gets its own

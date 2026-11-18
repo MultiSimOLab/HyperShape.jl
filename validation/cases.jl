@@ -87,9 +87,9 @@ function mbb(; case, nx, ny, order = 0, opt = OC(), vf, rmin, Emin, maxiter = 20
   fb(x) = VectorValue(0.0, x[1]^2 + (x[2] - 1)^2 < 0.05^2 ? -1.0 : 0.0)
   l = case === :top88 ? (v -> ∫(tp ⋅ v)dΓ) : (v -> ∫(fb ⋅ v)dΩ)
   J = case === :top88 ? ((u, θ) -> ∫(tp ⋅ u)dΓ) : ((u, θ) -> ∫(fb ⋅ u)dΩ)
-  S = StateOperator(StaticLinearModel(l, a, U, V, bc; ls = LUSolver(), backend = :compiled), θ)
-  C = Functional(J, S; adjoint = :self, scale = 1.0,
-                 derivative = (u, w, θ) -> (δ -> ∫(-(dE ∘ θ.ρ) * (ε(w) ⊙ (σd ∘ ε(u))) * δ)dΩ))
+  S = StateOperator(StaticLinearModel(l, a, U, V, bc; ls = LUSolver(), backend = :compiled), θ;
+        adjoint = AdjointProblem(sensitivity = (u, p) -> (δ -> ∫((dE ∘ θ.ρ) * (ε(p) ⊙ (σd ∘ ε(u))) * δ)dΩ)))
+  C = Functional(J, S; dJdu = SelfAdjoint(), scale = 1.0)
   Vol = Volume(θ, dΩ; max_fraction = vf)
   check && return check_consistency(C, Vol)
   problem = Optimization(z; objective = C, constraints = (volume = Vol,))
@@ -131,9 +131,9 @@ function cantilever3d(; n = (24, 12, 12), order = 0, opt = OC(), vf = 0.3, maxit
   U = TrialFESpace(V, bc, 1.0)
   a(u, v) = ∫((E ∘ θ.ρ) * (ε(v) ⊙ (σ ∘ ε(u))))dΩ
   l(v) = ∫(t ⋅ v)dΓ
-  S = StateOperator(StaticLinearModel(l, a, U, V, bc; ls = LUSolver(), backend = :compiled), θ)
-  C = Functional((u, θ) -> ∫(t ⋅ u)dΓ, S; adjoint = :self, scale = 1.0,
-                 derivative = (u, w, θ) -> (δ -> ∫(-(dE ∘ θ.ρ) * (ε(w) ⊙ (σ ∘ ε(u))) * δ)dΩ))
+  S = StateOperator(StaticLinearModel(l, a, U, V, bc; ls = LUSolver(), backend = :compiled), θ;
+        adjoint = AdjointProblem(sensitivity = (u, p) -> (δ -> ∫((dE ∘ θ.ρ) * (ε(p) ⊙ (σ ∘ ε(u))) * δ)dΩ)))
+  C = Functional((u, θ) -> ∫(t ⋅ u)dΓ, S; dJdu = SelfAdjoint(), scale = 1.0)
   Vol = Volume(θ, dΩ; max_fraction = vf)
   check && return check_consistency(C, Vol)
   problem = Optimization(z; objective = C, constraints = (volume = Vol,))

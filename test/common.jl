@@ -42,15 +42,24 @@ function state_problem(; n = 8, dim = 2, design = :P0, backend = :lazy, gD = 0.0
   U0 = TrialFESpace(V, bc0, 1.0)
   a(u, v) = ∫((k ∘ θ.ρ) * ∇(u) ⋅ ∇(v))dΩ
   l(v) = ∫(f * v)dΩ
-  nforward, nadjoint = Ref(0), Ref(0)
+  nforward, nadjoint, nassembly = Ref(0), Ref(0), Ref(0)
   ctxs = Any[]
   model_u = StaticLinearModel(l, a, U, V, bc; ls = LUSolver(), backend)
-  S = StateOperator(model_u; depends = θ, solve = (m, ctx) -> (nforward[] += 1; push!(ctxs, (:S, ctx)); solve!(m; Assembly = true)))
-  uh = get_state(S)
-  # adjoint of J = ∫_Γ u dΓ: a(w, p) = ∫_Γ w dΓ for all w (a is symmetric), on the homogeneous space
+  uh = get_state(model_u)
+  # pᵀ ∂R/∂θ [δ] of R(u)[v] = a(u, v) − l(v)
+  sens = (u, q) -> (δ -> ∫((dk ∘ θ.ρ) * ∇(u) ⋅ ∇(q) * δ)dΩ)
+  # adjoint: the matrix of a (symmetric) with test and trial swapped, on the homogeneous space
   Ua, bca = adjoint_space === :homogeneous ? (U0, bc0) : (U, bc)
-  model_p = StaticLinearModel(w -> ∫(w)dΓ, (p, w) -> a(w, p), Ua, V, bca; ls = LUSolver(), backend)
-  A = StateOperator(model_p; depends = (θ, S), solve = (m, ctx) -> (nadjoint[] += 1; push!(ctxs, (:A, ctx)); solve!(m; Assembly = true)))
-  (; z, x, θ, H, S, A, uh, k, dk, f, dΩ, dΓ, nforward, nadjoint, Vρ, U, U0, V, bc, bc0, a, l, ctxs, Sf)
+  model_p = StaticLinearModel((p, w) -> a(w, p), Ua, V, bca; ls = LUSolver(), backend)
+  adj = AdjointProblem(model_p; sensitivity = sens,
+                       solve = (m, b, ctx, stale) -> (nadjoint[] += 1; nassembly[] += stale; push!(ctxs, (:A, ctx));
+                                                      solve!(m, b; Assembly = stale)))
+  S = StateOperator(model_u; depends = θ, adjoint = adj,
+                    solve = (m, ctx) -> (nforward[] += 1; push!(ctxs, (:S, ctx)); solve!(m; Assembly = true)))
+  # the two functionals of the tests: the compliance (self-adjoint) and the mean value on the right side
+  compliance(; kw...) = Functional((u, θ) -> ∫(f * u)dΩ, S; dJdu = SelfAdjoint(), fields = θ, kw...)
+  boundary(; kw...) = Functional((u, θ) -> ∫(u)dΓ, S; dJdu = u -> (w -> ∫(w)dΓ), fields = θ, kw...)
+  (; z, x, θ, H, S, uh, k, dk, f, dΩ, dΓ, nforward, nadjoint, nassembly, Vρ, U, U0, V, bc, bc0, a, l, ctxs, Sf, sens,
+     adj, model_p, compliance, boundary)
 end
 

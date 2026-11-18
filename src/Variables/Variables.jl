@@ -27,10 +27,8 @@ module Variables
 using LinearAlgebra
 using Gridap
 using Gridap.FESpaces
-using Gridap.Algebra: residual!
 using HyperFEM: get_spaces, StaticLinearModel, NothingBC
-using HyperFEMKernels: KernelOperator, update
-using ..Operators: LinearOperator, solve_linear!, OptContext
+using ..Operators: LinearOperator, solve_linear!, OptContext, form_assembler, assemble_form!, _check_backend
 import ..Operators: state_version, refresh!, invalidate!
 
 export FieldVariable, OptVariables, DesignFields, PhysicalFields
@@ -39,7 +37,6 @@ export single_field_design
 
 include("OptVariables.jl")
 include("DesignFields.jl")
-include("Assembly.jl")
 include("Maps.jl")
 include("PhysicalFields.jl")
 

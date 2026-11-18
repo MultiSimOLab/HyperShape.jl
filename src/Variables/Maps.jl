@@ -4,8 +4,12 @@
 # Stage interface:
 #   output(s)                 the output field (FEFunction or CellField)
 #   update_stage!(s, ctx)     recompute the output from the input (in place)
-#   pullback(s, L, ctx, key)  L: δ_out ↦ DomainContribution, linear form on the output; returns the linear form on the input
-#                             (key: identifies the form for the compiled assemblers, see Assembly.jl)
+#   pullback(s, L, ctx, key)  lazy stages: L: δ_out ↦ DomainContribution, linear form on the output; returns the
+#                             linear form on the input (key: identifies the form for the compiled assemblers)
+#   accumulate!(s, L, w, key) stages that are not lazy (filter, cell mean): assembles L and adds w times it to the
+#                             accumulated vector of the stage; nothing is solved yet
+#   flush!(s, ctx)            stages that are not lazy: pulls the accumulated vector back once (one solve of a filter)
+#                             and returns the linear form on the input; the accumulator is emptied
 #   parameter_version(s)      counter of the parameters of the map (β of a TanhProjection, the Parameters of a
 #                             PointwiseMap, the dependencies of a filter's operator); 0 if it has none
 #   is_lazy(s)                true if the output is evaluated lazily (nothing to recompute when an earlier parameter changes)
@@ -98,6 +102,8 @@ struct FilterStage{O,I,M,F,W,V,A}
   out::F       # filtered field
   w::W         # adjoint field (pullback)
   b::Vector{Float64}
+  acc::Vector{Float64}             # accumulated sensitivities on the output (reverse sweep)
+  pending::Base.RefValue{Bool}     # something was accumulated since the last flush
   V::V         # test space of the filter
   assem::A
 end
@@ -110,7 +116,7 @@ function _stage(f::HelmholtzFilter, input)
   out = FEFunction(U, zeros(num_free_dofs(U)))
   w = FEFunction(U, zeros(num_free_dofs(U)))
   b = zeros(num_free_dofs(V))
-  FilterStage(f.op, input, f.measure, out, w, b, V, form_assembler(f.backend, U, V))
+  FilterStage(f.op, input, f.measure, out, w, b, zero(b), Ref(false), V, form_assembler(f.backend, U, V))
 end
 
 output(s::FilterStage) = s.out
@@ -122,9 +128,17 @@ function update_stage!(s::FilterStage, ctx)
   s
 end
 
-function pullback(s::FilterStage, L, ctx, key)
+function accumulate!(s::FilterStage, L, w::Float64, key)
   assemble_form!(s.b, s.assem, L, key)
-  solve_linear!(get_free_dof_values(s.w), s.op, s.b, ctx)   # symmetric matrix: Aᵀ = A
+  s.acc .+= w .* s.b
+  s.pending[] = true
+  s
+end
+
+function flush!(s::FilterStage, ctx)
+  solve_linear!(get_free_dof_values(s.w), s.op, s.acc, ctx)   # symmetric matrix: Aᵀ = A
+  fill!(s.acc, 0.0)
+  s.pending[] = false
   w, dΩ = s.w, s.measure
   δ -> ∫(w * δ)dΩ
 end
@@ -285,6 +299,8 @@ struct CellMeanStage{I,M,F,W,V,A}
   out::F          # P0 field of the cell means
   w::W            # adjoint field (pullback)
   b::Vector{Float64}
+  acc::Vector{Float64}
+  pending::Base.RefValue{Bool}
   vol::Vector{Float64}
   V0::V
   assem::A
@@ -297,7 +313,7 @@ function _stage(c::CellMean, input)
   n = num_free_dofs(V0)
   vol = collect(assemble_vector(v -> ∫(v)dΩ, V0))
   all(>(0), vol) || throw(ArgumentError("CellMean: a cell has zero measure"))
-  CellMeanStage(input, dΩ, FEFunction(V0, zeros(n)), FEFunction(V0, zeros(n)), zeros(n), vol, V0,
+  CellMeanStage(input, dΩ, FEFunction(V0, zeros(n)), FEFunction(V0, zeros(n)), zeros(n), zeros(n), Ref(false), vol, V0,
                 form_assembler(c.backend, V0, V0))
 end
 
@@ -310,12 +326,26 @@ function update_stage!(s::CellMeanStage, ctx)
   s
 end
 
-function pullback(s::CellMeanStage, L, ctx, key)
+function accumulate!(s::CellMeanStage, L, w::Float64, key)
   assemble_form!(s.b, s.assem, L, key)          # L applied to the P0 basis: the derivative per cell
-  get_free_dof_values(s.w) .= s.b ./ s.vol
+  s.acc .+= w .* s.b
+  s.pending[] = true
+  s
+end
+
+function flush!(s::CellMeanStage, ctx)
+  get_free_dof_values(s.w) .= s.acc ./ s.vol
+  fill!(s.acc, 0.0)
+  s.pending[] = false
   w, dΩ = s.w, s.measure
   δ -> ∫(w * δ)dΩ
 end
+
+# accumulators of the stages that are not lazy (reverse sweep)
+is_pending(s) = false
+is_pending(s::Union{FilterStage,CellMeanStage}) = s.pending[]
+reset_accumulator!(s) = s
+reset_accumulator!(s::Union{FilterStage,CellMeanStage}) = (fill!(s.acc, 0.0); s.pending[] = false; s)
 
 is_lazy(::CellMeanStage) = false
 is_linear_stage(::CellMeanStage) = true

@@ -9,36 +9,39 @@ module Functionals
 using Gridap
 using Gridap.FESpaces
 using HyperFEM: HyperFEM, get_state, get_spaces
-using ..Operators: StateOperator, apply!, state_version, dirichlet_values
+using ..Operators: StateOperator, apply!, state_version, dirichlet_values, SelfAdjoint, has_adjoint, reset_adjoint!,
+                   is_seeded, add_seed!, add_self_seed!, solve_adjoint!, adjoint_sensitivity
 import ..Operators: invalidate!
 using ..Operators: get_model as HyperShape_get_model
 using ..Variables: PhysicalFields, DesignFields, Identity, update_fields!, design_gradient!, get_designfields,
-                   get_optvariables, is_linear_field
+                   get_optvariables, is_linear_field, reset_sink!, add_forms!, finish_sink!
 
 export Functional, Volume, functional_value, functional_gradient!
 
 """
-    Functional(J, S::StateOperator; derivative, adjoint, scale, fields = nothing, parameters = ())
-    Functional(J, θ::PhysicalFields; derivative, scale, linear = false, parameters = ())
+    Functional(J, S::StateOperator; dJdu, dJdθ = nothing, scale, fields = nothing, parameters = ())
+    Functional(J, θ::PhysicalFields; dJdθ, scale, linear = false, parameters = ())
 
 Objective or constraint.
 
-With states (first form):
+With a state (first form), `S` a [`StateOperator`](@ref) built with an
+[`AdjointProblem`](@ref HyperShape.Operators.AdjointProblem) (it declares how to solve the transposed system and the forms
+`pᵀ ∂R/∂θ` of the state):
 - `J(u, θ)`: value, a `DomainContribution` (`∫(…)dΩ`) or a number; `u = get_state(S)`.
-- `derivative(u, p, θ)`: total derivative with respect to the physical fields, `∂J/∂θ − ∂R/∂θ` contracted with the
-  adjoint `p`: a function `δ -> ∫(… * δ)dΩ` when θ has one field, or a named tuple of such functions
-  (`(ρ = δ -> …, E = δ -> …)`), one per physical field it depends on.
-- `S`: forward [`StateOperator`](@ref).
-- `adjoint` (mandatory): the adjoint state, usually
-  [`AdjointOperator`](@ref HyperShape.Operators.AdjointOperator)`(S, model)`, which solves `a(w, p) = ∂J/∂u[w]`
-  for all `w` (with `a` the tangent of the forward problem) on a space with homogeneous Dirichlet values; it must
-  depend on θ and on `S`. Or `:self` for a self-adjoint functional (then `p = u`, with the
-  sign in `derivative`; valid only when the Dirichlet values of the state are zero, which is checked here and when
-  the gradient is computed).
-- `fields`: the physical fields θ. By default the only [`PhysicalFields`](@ref) among the dependencies of `S`;
-  give it when `S` depends on none or on several.
+- `dJdu` (mandatory): the partial derivative with respect to the state, `u -> (w -> ∫(…)dΩ)` (a linear form in the
+  test function `w` of the adjoint), or [`SelfAdjoint`](@ref HyperShape.Operators.SelfAdjoint)`()` when it is the
+  load of a linear and symmetric state (the compliance): then `p = u` and no adjoint is solved.
+- `dJdθ`: the partial derivative with respect to the physical fields, `(u, θ) -> (δ -> ∫(… * δ)dΩ)`, or a named tuple
+  of such forms (`(ρ = δ -> …, E = δ -> …)`) when θ has several fields; `nothing` (default) when `J` does not read θ
+  directly.
+- `fields`: the physical fields θ, the only [`PhysicalFields`](@ref) among the dependencies of `S` (deduced; a state
+  that depends on several is not supported yet).
 
-Design only (second form, volume, perimeter): `J(θ)` and `derivative(θ)`.
+The derivative with respect to θ is `dJdθ − pᵀ ∂R/∂θ`, with `p` the adjoint of `S` seeded by `dJdu`: the signs are
+put by HyperShape. A state that depends on another state is not supported yet (an error here): the sensitivity
+through the upstream state would be missing.
+
+Design only (second form, volume, perimeter): `J(θ)` and `dJdθ(θ)`, the derivative with respect to θ.
 
 `scale` is mandatory: a positive number, `:initial` (the absolute value of the first finite evaluation; an error if
 it is zero) or `1.0` for no scaling. The value and the derivative are divided by it.
@@ -49,17 +52,18 @@ when they change. A parameter read by a model goes in the dependencies of its op
 in the `parameters` of the `PointwiseMap`. `linear` (design-only form) declares a functional affine in z, checked
 when it is used as a constraint.
 
-The value is kept until θ, a state or a parameter changes; the gradient is assembled at every call (one adjoint solve only when
-the design changed, one transposed filter solve per filter and one assembly per call).
+The value is kept until θ, a state or a parameter changes. Each gradient is one reverse sweep: the seeds of the
+functional, one adjoint solve of the state (a back substitution after the first gradient of a design; none for
+`SelfAdjoint()`), one transposed solve per filter and the assemblies of the forms.
 
 If a state does not converge, [`functional_value`](@ref) returns `NaN` and [`functional_gradient!`](@ref) fills the
 gradient with `NaN` (the optimisers treat it as a failed trial).
 """
-struct Functional{FJ,FD,S,A,T<:PhysicalFields,P<:Tuple}
+struct Functional{FJ,FD,FU,S,T<:PhysicalFields,P<:Tuple}
   J::FJ
-  DJ::FD
+  DJ::FD                        # design only: dJdθ(θ); with a state: dJdθ(u, θ) or nothing
+  dJdu::FU                      # with a state: u -> (w -> ∫…) or SelfAdjoint(); nothing for design only
   S::S
-  A::A
   θ::T
   scale_mode::Symbol            # :fixed or :initial
   scale::Base.RefValue{Float64} # NaN while :initial is not set
@@ -106,31 +110,42 @@ function _fields(S::StateOperator, fields)
   fields
 end
 
-struct _NoAdjoint end
+struct _Unused end
 
-function Functional(J, S::StateOperator; derivative, adjoint = _NoAdjoint(), scale, fields = nothing, parameters = ())
-  adjoint isa _NoAdjoint && throw(ArgumentError(
-    "Functional: adjoint is mandatory: adjoint = AdjointOperator(S, model), or adjoint = :self for a self-adjoint functional"))
+function Functional(J, S::StateOperator; dJdu = _Unused(), dJdθ = nothing, scale, fields = nothing, parameters = (),
+                    derivative = _Unused(), adjoint = _Unused())
+  (derivative isa _Unused && adjoint isa _Unused) || throw(ArgumentError(
+    "Functional: `derivative` and `adjoint` are gone for functionals with a state: declare the adjoint in the state " *
+    "(StateOperator(model, θ; adjoint = AdjointProblem(model_adj or SymmetricState(); sensitivity = p -> pᵀ∂R/∂θ))) and give " *
+    "here dJdu = u -> (w -> ∫(∂J/∂u ⋅ w)dΩ) (or SelfAdjoint()) and, if J reads θ, dJdθ = (u, θ) -> (δ -> ∫(…)dΩ)"))
+  dJdu isa _Unused && throw(ArgumentError(
+    "Functional: dJdu is mandatory: dJdu = u -> (w -> ∫(…)dΩ), or SelfAdjoint() for the compliance of a linear and symmetric state"))
+  has_adjoint(S) || throw(ArgumentError(
+    "Functional: the state has no adjoint: StateOperator(model, θ; adjoint = AdjointProblem(model_adj; sensitivity)) " *
+    "or AdjointProblem(SymmetricState(); sensitivity) for a linear and symmetric state"))
+  any(d -> d isa StateOperator, S.depends) && throw(ArgumentError(
+    "Functional: the state depends on another state; the sensitivity through it is not supported yet " *
+    "(chains of states come in a later version)"))
+  dJdu isa SelfAdjoint || S.adjoint.op !== nothing || throw(ArgumentError(
+    "Functional: the AdjointProblem of the state has no operator (only SelfAdjoint functionals); give it an adjoint model or SymmetricState()"))
+  count(d -> d isa PhysicalFields, S.depends) <= 1 || throw(ArgumentError(
+    "Functional: the state depends on several PhysicalFields; the sensitivity through all of them is not supported yet"))
   mode, value = _scale(scale)
   θ = _fields(S, fields)
-  A = if adjoint === :self
-    _check_homogeneous(S, true)
-    S
-  elseif adjoint isa StateOperator
-    adjoint === S && throw(ArgumentError("Functional: write adjoint = :self for a self-adjoint functional"))
-    (_depends_on(adjoint, θ) && _depends_on(adjoint, S)) ||
-      throw(ArgumentError("Functional: the adjoint state must depend on θ and on the forward state (use AdjointOperator(S, model))"))
-    _check_homogeneous(adjoint, false)
-    adjoint
-  else
-    throw(ArgumentError("Functional: adjoint must be a StateOperator (AdjointOperator(S, model)) or :self, got $(repr(adjoint))"))
+  if dJdu isa SelfAdjoint
+    HyperShape_get_model(S) isa HyperFEM.StaticLinearModel || throw(ArgumentError(
+      "Functional: dJdu = SelfAdjoint() needs a linear state (a StaticLinearModel): p = u is not the adjoint of a nonlinear problem"))
+    _check_homogeneous(S)
   end
-  Functional(J, derivative, S, A, θ, mode, Ref(value), [-1.0, -1.0, -1.0, NaN], false, _parameters(parameters))
+  Functional(J, dJdθ, dJdu, S, θ, mode, Ref(value), [-1.0, -1.0, -1.0, NaN], false, _parameters(parameters))
 end
 
-function Functional(J, θ::PhysicalFields; derivative, scale, linear::Bool = false, parameters = ())
+function Functional(J, θ::PhysicalFields; dJdθ = _Unused(), scale, linear::Bool = false, parameters = (),
+                    derivative = _Unused())
+  derivative isa _Unused || throw(ArgumentError("Functional: `derivative` is now `dJdθ = θ -> (δ -> ∫(…)dΩ)`"))
+  dJdθ isa _Unused && throw(ArgumentError("Functional: dJdθ is mandatory for a design-only functional: dJdθ = θ -> (δ -> ∫(…)dΩ)"))
   mode, value = _scale(scale)
-  Functional(J, derivative, nothing, nothing, θ, mode, Ref(value), [-1.0, -1.0, -1.0, NaN], linear, _parameters(parameters))
+  Functional(J, dJdθ, nothing, nothing, θ, mode, Ref(value), [-1.0, -1.0, -1.0, NaN], linear, _parameters(parameters))
 end
 
 """
@@ -154,7 +169,7 @@ function Volume(θ::PhysicalFields, dΩ; max_fraction::Real, field = nothing, sc
   scale = scale === nothing ? vmax : scale
   J = θ -> sum(∫(getproperty(θ, f))dΩ) - vmax
   DJ = θ -> NamedTuple{(f,)}((δ -> ∫(δ)dΩ,))
-  Functional(J, θ; derivative = DJ, scale, linear = is_linear_field(θ, f))
+  Functional(J, θ; dJdθ = DJ, scale, linear = is_linear_field(θ, f))
 end
 
 function Volume(x::DesignFields, dΩ; kwargs...)
@@ -166,11 +181,11 @@ end
 _total(v::Real) = Float64(v)
 _total(v) = Float64(sum(v))
 
-_state_version(F::Functional{FJ,FD,Nothing}) where {FJ,FD} = 0
+_state_version(F::Functional{FJ,FD,FU,Nothing}) where {FJ,FD,FU} = 0
 _parameter_version(F::Functional) = sum(state_version, F.parameters; init = 0)
 _state_version(F::Functional) = state_version(F.S)
 
-_compute_value(F::Functional{FJ,FD,Nothing}, ctx) where {FJ,FD} = _total(F.J(F.θ))
+_compute_value(F::Functional{FJ,FD,FU,Nothing}, ctx) where {FJ,FD,FU} = _total(F.J(F.θ))
 function _compute_value(F::Functional, ctx)
   apply!(F.S, ctx) || return NaN
   _total(F.J(get_state(F.S), F.θ))
@@ -209,55 +224,117 @@ function functional_value(F::Functional, ctx)::Float64
   v / F.scale[]
 end
 
-_forms(F::Functional{FJ,FD,Nothing}, ctx) where {FJ,FD} = F.DJ(F.θ)
-function _forms(F::Functional, ctx)
-  u = get_state(F.S)
-  p = F.A === F.S ? u : get_state(F.A)
-  F.DJ(u, p, F.θ)
-end
-
 function _as_named(forms::NamedTuple, θ)
   forms
 end
 function _as_named(form, θ)
   names = propertynames(θ)
   length(names) == 1 ||
-    throw(ArgumentError("Functional: derivative must return a named tuple of forms when θ has several fields ($(join(names, ", ")))"))
+    throw(ArgumentError("Functional: the derivative with respect to θ must be a named tuple of forms when θ has several fields ($(join(names, ", ")))"))
   NamedTuple{(names[1],)}((form,))
 end
 
-# the adjoint (or the state of a self-adjoint functional) must have homogeneous Dirichlet values
-_check_homogeneous(F::Functional{FJ,FD,Nothing}) where {FJ,FD} = nothing
-_check_homogeneous(F::Functional) = _check_homogeneous(F.A, F.A === F.S)
-function _check_homogeneous(A::StateOperator, self::Bool)
-  v = dirichlet_values(HyperShape_get_model(A))
-  v === nothing || all(iszero, v) || throw(ArgumentError(self ?
-    "Functional: adjoint = :self needs homogeneous Dirichlet values in the state; give an AdjointOperator on a homogeneous space" :
-    "Functional: the trial space of the adjoint has non-zero Dirichlet values; build the adjoint on a homogeneous space"))
+# a self-adjoint functional needs homogeneous Dirichlet values in the state
+function _check_homogeneous(S::StateOperator)
+  v = dirichlet_values(HyperShape_get_model(S))
+  v === nothing || all(iszero, v) || throw(ArgumentError(
+    "Functional: dJdu = SelfAdjoint() needs homogeneous Dirichlet values in the state; give dJdu as a form and an AdjointProblem model on a homogeneous space"))
   nothing
 end
+
+# ---------------------------------------------------------------------------------------------------------------
+# Reverse sweep: seed (each functional adds ∂J/∂u to the adjoint of its state and ∂J/∂θ to the design sink), pull
+# back (each seeded state solves its adjoint once and adds −pᵀ∂R/∂θ), finish (transposed filters once, x → z).
+
+_key(F::Functional) = objectid(F.scale)
+
+_seed!(θ, F::Functional{FJ,FD,FU,Nothing}, w, ctx) where {FJ,FD,FU} =
+  iszero(w) ? nothing : (add_forms!(θ, _as_named(F.DJ(θ), θ), w, ctx; key = _key(F)); nothing)
+
+function _seed!(θ, F::Functional, w, ctx)
+  S = F.S
+  u = get_state(S)
+  if F.dJdu isa SelfAdjoint
+    _check_homogeneous(S)
+    add_self_seed!(S, w)
+  else
+    add_seed!(S, F.dJdu(u), w, (_key(F), :dJdu))
+  end
+  F.DJ === nothing || iszero(w) || add_forms!(θ, _as_named(F.DJ(u, θ), θ), w, ctx; key = _key(F))
+  nothing
+end
+
+_reset_state!(F::Functional{FJ,FD,FU,Nothing}) where {FJ,FD,FU} = nothing
+_reset_state!(F::Functional) = (reset_adjoint!(F.S); nothing)
+
+_pull_back!(θ, F::Functional{FJ,FD,FU,Nothing}, ctx) where {FJ,FD,FU} = nothing
+function _pull_back!(θ, F::Functional, ctx)
+  S = F.S
+  is_seeded(S) || return nothing            # already pulled back in this sweep (several functionals on one state)
+  p = solve_adjoint!(S, ctx)
+  add_forms!(θ, _as_named(adjoint_sensitivity(S, p), θ), -1.0, ctx; key = objectid(S.adjoint))
+  nothing
+end
+
+_converged!(F::Functional{FJ,FD,FU,Nothing}, ctx) where {FJ,FD,FU} = true
+_converged!(F::Functional, ctx) = apply!(F.S, ctx)
 
 """
     functional_gradient!(gz, F::Functional, ctx) -> gz
 
-Scaled derivative of the functional with respect to z, written into `gz`. Solves the forward state (if needed) and
-the adjoint state, assembles `derivative` and pulls it back to z. Filled with `NaN` if a state did not converge.
+Scaled derivative of the functional with respect to z, written into `gz`: one reverse sweep (solves the forward
+state if needed, the adjoint of the state, the transposed filters). Filled with `NaN` if a state did not converge.
 """
 function functional_gradient!(gz, F::Functional, ctx)
-  update_fields!(F.θ, ctx)
-  if F.S !== nothing
-    if !apply!(F.S, ctx) || (F.A !== F.S && !apply!(F.A, ctx))
-      fill!(gz, NaN)
-      return gz
-    end
-  end
-  _check_homogeneous(F)
+  θ = F.θ
+  update_fields!(θ, ctx)
+  _converged!(F, ctx) || return fill!(gz, NaN)
   isnan(F.scale[]) && _set_scale!(F, _raw_value(F, ctx))
-  design_gradient!(gz, F.θ, _as_named(_forms(F, ctx), F.θ), ctx; key = objectid(F.scale))
+  reset_sink!(θ)
+  _reset_state!(F)
+  _seed!(θ, F, 1.0, ctx)
+  _pull_back!(θ, F, ctx)
+  finish_sink!(gz, θ, ctx)
   gz ./= F.scale[]
   gz
 end
 
+"""
+    functional_gradient!(gz, Fs::Tuple, w, ctx) -> gz
+
+Derivative with respect to z of `Σᵢ wᵢ Fᵢ` (each `Fᵢ` scaled) in one reverse sweep: every state is solved once
+whatever the number of functionals that read it (one adjoint solve per state, not per functional) and every filter
+is solved once. The functionals must share the physical fields θ. Filled with `NaN` if a state did not converge.
+"""
+function functional_gradient!(gz, Fs::Tuple{Vararg{Functional}}, w, ctx)
+  isempty(Fs) && throw(ArgumentError("functional_gradient!: no functionals"))
+  length(w) == length(Fs) || throw(DimensionMismatch("functional_gradient!: $(length(w)) weights for $(length(Fs)) functionals"))
+  θ = first(Fs).θ
+  _all_share(Fs, θ) || throw(ArgumentError("functional_gradient!: the functionals must share the physical fields θ"))
+  update_fields!(θ, ctx)
+  _all_converged!(Fs, ctx) || return fill!(gz, NaN)
+  _set_scales!(Fs, ctx)
+  reset_sink!(θ)
+  _reset_states!(Fs)
+  _seed_all!(θ, Fs, w, 1, ctx)
+  _pull_back_all!(θ, Fs, ctx)
+  finish_sink!(gz, θ, ctx)
+end
+
+# loops over the (heterogeneous) tuple of functionals, unrolled
+_all_share(::Tuple{}, θ) = true
+_all_share(t::Tuple, θ) = first(t).θ === θ && _all_share(Base.tail(t), θ)
+_all_converged!(::Tuple{}, ctx) = true
+_all_converged!(t::Tuple, ctx) = _converged!(first(t), ctx) & _all_converged!(Base.tail(t), ctx)
+_set_scales!(::Tuple{}, ctx) = nothing
+_set_scales!(t::Tuple, ctx) = (F = first(t); isnan(F.scale[]) && _set_scale!(F, _raw_value(F, ctx)); _set_scales!(Base.tail(t), ctx))
+_reset_states!(::Tuple{}) = nothing
+_reset_states!(t::Tuple) = (_reset_state!(first(t)); _reset_states!(Base.tail(t)))
+_seed_all!(θ, ::Tuple{}, w, i, ctx) = nothing
+_seed_all!(θ, t::Tuple, w, i, ctx) =
+  (F = first(t); _seed!(θ, F, Float64(w[i]) / F.scale[], ctx); _seed_all!(θ, Base.tail(t), w, i + 1, ctx))
+_pull_back_all!(θ, ::Tuple{}, ctx) = nothing
+_pull_back_all!(θ, t::Tuple, ctx) = (_pull_back!(θ, first(t), ctx); _pull_back_all!(θ, Base.tail(t), ctx))
 
 # the next value is computed again (not taken from the cache)
 invalidate!(F::Functional) = (F.cache[1] = -1.0; F)

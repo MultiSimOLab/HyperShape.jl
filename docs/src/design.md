@@ -86,26 +86,32 @@ Two kinds of operator wrap a HyperFEM computational model built by the user.
   transient models need the user's `solve` (the load stepping and the restart are modelling decisions).
 - `ctx` is a read-only context updated by HyperShape: design iteration, attempt, continuation values and phase.
   `solve!` passes it to every solve function of the user; outside the loop (checks, scripts) `nothing` is accepted.
-- The adjoint is another state operator; its forms are written by the user, typically the tangent of the forward
-  problem with trial and test functions swapped.
+- The adjoint is declared in the state, with an `AdjointProblem`: who solves the transposed system and the forms
+  `pᵀ ∂R/∂θ` of the state. The functionals that read the state only give their partial derivatives.
 
 Implemented:
 
 ```julia
 model_u = StaticLinearModel(l, a, U, V, bc; ls = LUSolver())          # forms and solver of the user; they capture θ
-S = StateOperator(model_u, θ)                                          # default solve: solve!(m; Assembly = true)
-uh = get_state(S)                                                       # fixed object
-# adjoint: a(w, p) = ∂J/∂u[w] for all w, on the space with homogeneous Dirichlet values (U0, bc0)
-model_p = StaticLinearModel(l_adj, (p, w) -> a(w, p), U0, V, bc0; ls = LUSolver())   # captures θ and uh
-A = AdjointOperator(S, model_p)                                         # depends on θ and S
+# adjoint: the transposed tangent on the space with homogeneous Dirichlet values (U0, bc0), matrix only
+model_p = StaticLinearModel((p, w) -> a(w, p), U0, V, bc0; ls = LUSolver())
+S = StateOperator(model_u, θ;                                           # default solve: solve!(m; Assembly = true)
+      adjoint = AdjointProblem(model_p; sensitivity = (u, p) -> (δ -> ∫((dk ∘ θ.ρ) * ∇(u) ⋅ ∇(p) * δ)dΩ)))
 ```
 
-A nonlinear forward state gives its own `solve`, and returns the convergence flag:
+For a linear and symmetric state, `AdjointProblem(SymmetricState(); sensitivity)` solves the adjoint with the matrix and
+the factorisation of the state itself (the forward model must be re-assembled by its solve, as the default one does);
+`AdjointProblem(; sensitivity)`, without an operator, when only self-adjoint functionals read the state. The adjoint
+field is `get_adjoint(S)`. A nonlinear forward state gives its own `solve`, and returns the convergence
+flag:
 
 ```julia
-S = StateOperator(StaticNonlinearModel(res, jac, U, V, bc; nls), θ;
-                  solve = (m, ctx) -> solve!(m; stepping = (nsteps = 10, maxbisec = 5), RestartState = false))
-A = AdjointOperator(S, StaticLinearModel(l_adj, (p, w) -> jac(1.0)(get_state(S), w, p), U0, V, bc0; ls = LUSolver()))
+model_u = StaticNonlinearModel(res, jac, U, V, bc; nls)
+uh = get_state(model_u)                                                 # captured by the transposed tangent
+S = StateOperator(model_u, θ;
+      solve   = (m, ctx) -> solve!(m; stepping = (nsteps = 10, maxbisec = 5), RestartState = false),
+      adjoint = AdjointProblem(StaticLinearModel((p, w) -> jac(1.0)(uh, w, p), U0, V, bc0; ls = LUSolver());
+                               sensitivity = (u, p) -> (δ -> ∫(…)dΩ)))
 ```
 
 - `solve` returns the solution vector (taken as converged) or a tuple whose last element is the convergence flag,
@@ -113,30 +119,34 @@ A = AdjointOperator(S, StaticLinearModel(l_adj, (p, w) -> jac(1.0)(get_state(S),
   states that depend on it are not solved and the functionals return `NaN`.
 - A state is solved again only when one of its dependencies changed; a failed solve is not repeated for the same
   design.
-- `AdjointOperator(S, model)` is a `StateOperator` whose dependencies are those of `S`, then `S` (extra ones can be
-  added); it checks that the trial space has homogeneous Dirichlet values. The functional checks that the forward
-  state depends on θ and the adjoint on θ and on the forward state.
+- The adjoint model is wrapped in a `LinearOperator` with the dependencies of `S` (extra ones with `depends`): its
+  matrix is assembled again only when the state changed, so one factorisation serves every gradient of a design. Its
+  trial space must have homogeneous Dirichlet values (checked).
+- A state that depends on another state cannot be differentiated yet (the sensitivity through the upstream state
+  would be missing): building a functional on it is an error.
 
 ## Functionals
 
 One `Functional` per objective or constraint:
 
 ```julia
-J = Functional(Jform, S; derivative = DJform, adjoint = A, scale)
+J = Functional(Jform, S; dJdu, dJdθ = nothing, scale)
 #   Jform(u, θ)       scalar value
-#   DJform(u, p, θ)   total derivative with respect to θ, as a linear form
+#   dJdu(u)           ∂J/∂u, a linear form w -> ∫(…)dΩ in the test function of the adjoint; or SelfAdjoint()
+#   dJdθ(u, θ)        ∂J/∂θ, a linear form δ -> ∫(…)dΩ (only if J reads θ directly)
 ```
 
-The value applies the forward operator `S`; the derivative applies the adjoint operator `A` and assembles `DJform`.
-θ is the physical fields `S` depends on (give `fields = θ` if it depends on none or on several).
-HyperShape then applies the transposed maps down to `z`. Implemented, with `functional_value(J, ctx)` and
-`functional_gradient!(gz, J, ctx)`:
+The value applies the forward operator `S`. The derivative is one reverse sweep: `dJdu` seeds the adjoint of `S`,
+the adjoint is solved once, and `dJdθ − pᵀ ∂R/∂θ` is pulled back through the maps down to `z` (the signs are put by
+HyperShape). θ is the physical fields `S` depends on (give `fields = θ` if it depends on none or on several).
+Implemented, with `functional_value(J, ctx)`, `functional_gradient!(gz, J, ctx)` and
+`functional_gradient!(gz, (J₁, …, Jₙ), w, ctx)` (the derivative of `Σ wᵢ Jᵢ` in one sweep: one adjoint solve per state
+and one transposed solve per filter, whatever the number of functionals):
 
-- `derivative(u, p, θ)` returns `δ -> ∫(… * δ)dΩ`, or a named tuple of such functions when θ has several fields.
-- `adjoint` is mandatory: self-adjoint functionals pass `adjoint = :self` (then `p = u`) and include the sign in
-  `derivative`.
-- Design-only functionals (volume): `Functional(Jform, θ; derivative = DJform, scale)` with `Jform(θ)` and
-  `DJform(θ)`.
+- The forms are `δ -> ∫(… * δ)dΩ`, or a named tuple of such functions when θ has several fields.
+- `dJdu = SelfAdjoint()` when `∂J/∂u` is the load of a linear and symmetric state (the compliance): `p = u`, no
+  adjoint solve; valid only with homogeneous Dirichlet values in the state (checked).
+- Design-only functionals (volume): `Functional(Jform, θ; dJdθ, scale)` with `Jform(θ)` and `dJdθ(θ)`.
 - `scale` is mandatory: a positive number, `:initial` (absolute value of the first evaluation) or `1.0`.
 
 ## Consistency checks
@@ -145,7 +155,7 @@ HyperShape then applies the transposed maps down to `z`. Implemented, with `func
 wrote and declared, and returns a report (`r.passed`, and one line per check, displayed as a table):
 
 - the gradient of each functional, by a Taylor test (the error must fall with order 2 as the step is halved);
-- the maps x → θ of each physical field alone, so that a failing gradient is located in `DJform` or in the adjoint;
+- the maps x → θ of each physical field alone, so that a failing gradient is located in the derivatives of the functional or of the state;
 - the symmetry of each filter, with the user's solve;
 - the declared dependencies: value and gradient at a new design, as usual and after forcing every reachable state
   and filter to assemble and solve again;
@@ -187,7 +197,7 @@ forms read; `Volume(x, dΩ; max_fraction)` that of the design
 density. The Helmholtz filter preserves the volume, the tanh projection does not: on a 150×50 half MBB beam with
 target 0.5, the design volume leaves the physical one at 0.64–0.68, the physical volume holds it at 0.5000.
 
-- **Constraint:** in phase 0, at most one, a design-only functional (`Volume`, or a `Functional(J, θ; derivative,
+- **Constraint:** in phase 0, at most one, a design-only functional (`Volume`, or a `Functional(J, θ; dJdθ,
   scale, linear)`). A linear one (`Volume` over identity or filter maps, or `linear = true`) is checked to be linear at
   the start and its vector `a` is computed once. A nonlinear one is linearised by the optimiser at every step and
   corrected with evaluations of the true constraint until it holds to `constraint_tol` (OC `1e-4`, SiMPL `1e-6`;
@@ -315,7 +325,7 @@ A default never removes generality: everything it sets can be replaced from the 
 
 | Default | Where | How to replace it |
 |---|---|---|
-| `solve!(m; Assembly = true)` | `StateOperator` / `AdjointOperator` of a `StaticLinearModel` | `solve = (m, ctx) -> …` |
+| `solve!(m; Assembly = true)` | `StateOperator` of a `StaticLinearModel` | `solve = (m, ctx) -> …` |
 | `solve!(m, b; Assembly = stale)` | `LinearOperator` of a `StaticLinearModel` | `solve = (m, b, ctx, stale) -> …` |
 | `()` (constant matrix) | dependencies of a `LinearOperator` | `LinearOperator(model, deps)` |
 | `RejectStep(shrink = 0.5, max_attempts = 5)` | `solve!(…; on_failure)` | `on_failure = RejectStep(…)` |
