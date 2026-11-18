@@ -341,6 +341,7 @@ function functional_gradient!(gz, Fs::Tuple{Vararg{AbstractFunctional}}, w, ctx)
   θs = unique(F -> objectid(F.θ), collect(Any, Fs))
   for G in θs
     idx = [i for i in eachindex(Fs) if Fs[i].θ === G.θ]
+    all(i -> iszero(w[i]), idx) && continue            # a group with weight zero costs nothing
     _sweep!(work, G.θ, Tuple(Fs[idx]), [w[i] for i in idx], ctx)
     gz .+= work
   end
@@ -399,7 +400,8 @@ problem = Optimization(objective = C, constraints = (volume = Vol, tip = Constra
 ```
 
 The optimiser sees `g = (F − r)/s`, with `s` the scale of `F` and `r` the upper bound (the lower one if there is no
-upper), and its bounds `[(min − r)/s, (max − r)/s]`.
+upper), and its bounds `[(min − r)/s, (max − r)/s]`. The scale belongs to the functional: with `scale = :bound`, build
+one functional per `Constraint` (a second `Constraint` with another bound on the same functional throws).
 """
 struct Constraint{F<:AbstractFunctional}
   F::F

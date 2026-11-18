@@ -60,7 +60,8 @@ violation(i::StepInfo) = maximum(i.violations; init = 0.0)
 
 Whether the optimiser treats the constraint `c` itself (natively), as OC and SiMPL do with one inequality `g ≤ 0`
 that costs no forward solve (design only). The constraints it does not handle go to the augmented Lagrangian.
-Default `false`.
+Default `false`. `solve!` asks it before scaling the constraints: only the kind of each bound (0, finite or ±Inf),
+`linear`, `design_only` and `field` are meaningful then.
 """
 handles(::Optimizer, ::ConstraintInfo) = false
 

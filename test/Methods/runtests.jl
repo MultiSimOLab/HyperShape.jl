@@ -111,6 +111,8 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     dL = HyperShape.Optimizers.weighted_gradient!(zeros(length(zk)), o, 1.5, w, zk)
     @test dL ≈ 1.5 .* gJ .+ sum(w[i] .* gs[i] for i in 1:4) rtol = 1e-10
     @test_throws DimensionMismatch HyperShape.Optimizers.weighted_gradient!(zeros(length(zk)), o, 1.0, [1.0], zk)
+    # constraints with weight zero (one on other physical fields): the gradient of the objective, bit for bit
+    @test HyperShape.Optimizers.weighted_gradient!(zeros(length(zk)), o, 1.0, zeros(4), zk) == gJ
     # another active set: same tuple of functionals, nothing to compile
     w2 = [0.0, 0.0, 0.7, 0.0]
     dL2 = HyperShape.Optimizers.weighted_gradient!(zeros(length(zk)), o, 1.5, w2, zk)

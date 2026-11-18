@@ -770,7 +770,7 @@ function _check_native(problem, opt)
     else
       push!(rest, string(n) * " (" * (c.lo == c.hi ? "equality" : !isfinite(c.hi) ? "lower bound" :
                                       isfinite(c.lo) ? "two bounds" : !is_design_only(c.F) ? "reads a state" :
-                                      "beyond the $(max_native(opt)) the optimiser treats") * ")")
+                                      "not treated by the optimiser") * ")")
     end
   end
   isempty(rest) && return nothing
