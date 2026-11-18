@@ -500,7 +500,7 @@ end
 function _counters(problem)
   J = problem.objective
   fwd = J.S === nothing ? () : (J.S,)
-  adj = (J.A === nothing || J.A === J.S) ? () : (J.A,)
+  adj = J.S === nothing ? () : (J.S.adjoint,)
   filters = Any[]
   for F in (J, problem.constraints...), op in filter_operators(F.θ)
     any(o -> o === op, filters) || push!(filters, op)

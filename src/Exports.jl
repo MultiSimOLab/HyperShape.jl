@@ -14,7 +14,9 @@ end
 
 @_export Operators LinearOperator
 @_export Operators StateOperator
-@_export Operators AdjointOperator
+@_export Operators AdjointProblem
+@_export Operators SameMatrix
+@_export Operators SelfAdjoint
 @_export Operators is_converged
 @_export Operators OptContext
 @_export Functionals Functional
@@ -60,6 +62,9 @@ end
 @_public Variables changed!
 @_public Variables set_beta!
 @_public Variables design_gradient!
+@_public Variables reset_sink!
+@_public Variables add_forms!
+@_public Variables finish_sink!
 @_public Variables update_fields!
 @_public Variables is_linear_field
 @_public Operators state_version

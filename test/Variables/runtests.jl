@@ -411,9 +411,9 @@ end
     @test out[1][1][6] ≈ out[1][1][2]
     θc = out[1][2]
     assems = getfield(θc, :assems)
-    @test length(assems[1].ops) <= HyperShape.Variables.MAX_COMPILED_FORMS
+    @test length(assems[1].ops) <= HyperShape.Operators.MAX_COMPILED_FORMS
     filter_stage = getfield(θc, :chains)[1][1]
-    @test length(filter_stage.assem.ops) <= HyperShape.Variables.MAX_COMPILED_FORMS
+    @test length(filter_stage.assem.ops) <= HyperShape.Operators.MAX_COMPILED_FORMS
     # every cached operator shares the tables of the first one
     @test all(op -> op.fields === assems[1].ops[1].fields && op.colors === assems[1].ops[1].colors, assems[1].ops)
   end

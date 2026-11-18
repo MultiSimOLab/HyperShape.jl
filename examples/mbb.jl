@@ -36,11 +36,14 @@ function run_mbb(; nx = 60, ny = 20, maxiter = 300, out = "results/mbb", verbose
   t(x)    = VectorValue(0.0, -(4 - 6x[1]))      # unit point load at the top-left node (dual to its shape function)
   a(u, v) = ∫(∇(v)' ⊙ ((∂²Ψ ∘ (θ.ρ, F ∘ ∇(u)')) ⊙ ∇(u)'))dΩ
   l(v)    = ∫(t ⋅ v)dΓ
-  S = StateOperator(StaticLinearModel(l, a, U, V, bc; ls = LUSolver(), backend = :compiled), θ)
+  model = StaticLinearModel(l, a, U, V, bc; ls = LUSolver(), backend = :compiled)
+  uh    = get_state(model)
+  # the adjoint p reuses the factorisation of this linear and symmetric state; sensitivity: pᵀ ∂R/∂ρ [δ]
+  S = StateOperator(model, θ; adjoint = AdjointProblem(SameMatrix();
+        sensitivity = p -> (δ -> ∫((∇(p)' ⊙ ((∂²Ψ_∂ρ ∘ (θ.ρ, F ∘ ∇(uh)')) ⊙ ∇(uh)')) * δ)dΩ)))
 
-  # Objective (compliance, self-adjoint) and constraint
-  C   = Functional((u, θ) -> ∫(t ⋅ u)dΓ, S; adjoint = :self, scale = :initial,
-                   derivative = (u, p, θ) -> (δ -> ∫(-(∇(p)' ⊙ ((∂²Ψ_∂ρ ∘ (θ.ρ, F ∘ ∇(u)')) ⊙ ∇(u)')) * δ)dΩ))
+  # Objective (compliance, self-adjoint: p = u, no adjoint solve) and constraint
+  C   = Functional((u, θ) -> ∫(t ⋅ u)dΓ, S; dJdu = SelfAdjoint(), scale = :initial)
   Vol = Volume(θ, dΩ; max_fraction = 0.5)
   verbose > 0 && display(check_consistency((compliance = C, volume = Vol)))   # Taylor tests of the derivatives
 

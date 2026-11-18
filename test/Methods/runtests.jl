@@ -48,17 +48,19 @@ HyperShape.monitor_value(m::_BadMonitor) = (m.n[] += 1; m.n[] == m.at ? error("b
 
 # heat compliance (self-adjoint) and the volume of the unprojected design density
 function compliance_problem(; design = :P0, n = 8, dim = 2, init = 0.4, fraction = 0.4, solve_flag = nothing,
-                            phases = nothing, sign = Ref(1.0))
+                            phases = nothing, sign = nothing)
   p = state_problem(; design, n, dim, init)
   (; z, x, θ, S, f, dk, dΩ) = p
   flag = solve_flag === nothing ? () -> true : solve_flag
   Sc = (solve_flag === nothing && phases === nothing) ? S :
-       StateOperator(S.model; depends = θ, solve = (m, ctx) -> begin
+       StateOperator(S.model; depends = θ, adjoint = p.adj, solve = (m, ctx) -> begin
          push!(p.ctxs, (:S, ctx))
          phases === nothing || push!(phases, (ctx.iteration, ctx.trial, ctx.phase))
          (solve!(m; Assembly = true), flag())
        end)
-  C = Functional((u, θ) -> ∫(f * u)dΩ, Sc; derivative = (u, w, θ) -> (δ -> ∫(-sign[] * (dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = :self, fields = θ, scale = :initial)
+  # sign (a Ref): the derivative is multiplied by sign[] (a wrong gradient when it is −1), through dJdθ
+  dJdθ = sign === nothing ? nothing : (u, θ) -> (δ -> ∫((1 - sign[]) * (dk ∘ θ.ρ) * ∇(u) ⋅ ∇(u) * δ)dΩ)
+  C = Functional((u, θ) -> ∫(f * u)dΩ, Sc; dJdu = SelfAdjoint(), dJdθ, fields = θ, scale = :initial)
   θv = PhysicalFields(x; ρ = Identity())
   vol = sum(∫(1.0)dΩ)
   Vol = Functional(θ -> sum(∫(θ.ρ)dΩ) - fraction * vol, θv; derivative = θ -> (δ -> ∫(δ)dΩ), scale = fraction * vol, linear = true)
@@ -208,8 +210,8 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
 
   @testset "Functional with an adjoint" begin
     q = compliance_problem()
-    (; z, θ, S, A, dk, dΩ, dΓ) = q
-    B = Functional((u, θ) -> ∫(u)dΓ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = A, fields = θ, scale = :initial)
+    (; z, θ, S, dΓ) = q
+    B = Functional((u, θ) -> ∫(u)dΓ, S; dJdu = u -> (w -> ∫(w)dΓ), fields = θ, scale = :initial)
     r = solve!(Optimization(z; objective = B, constraints = (volume = q.Vol,)), DensityMethod(OC(); metric = Euclidean());
                maxiter = 6, verbose = 0, on_failure = RejectStep(shrink = 0.5, max_attempts = 3), stop = nothing)
     @test all(==(1), r.history.adjoint[2:end])
@@ -418,9 +420,11 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test ck.iteration == 1 && ck.z == last(accepted)
     # an adjoint that fails: non-finite gradient, checkpoint written
     q = compliance_problem()
-    (; z, θ, S, dk, dΩ, dΓ, A) = q
-    Abad = StateOperator(A.model; depends = (θ, S), solve = (m, ctx) -> (solve!(m; Assembly = true), false))
-    B = Functional((u, θ) -> ∫(u)dΓ, S; derivative = (u, w, θ) -> (δ -> ∫(-(dk ∘ θ.ρ) * ∇(u) ⋅ ∇(w) * δ)dΩ), adjoint = Abad, fields = θ, scale = 1.0)
+    (; z, θ, S, dΓ, model_p, sens) = q
+    # an adjoint solve that gives a non-finite solution
+    Sbad = StateOperator(S.model, θ; adjoint = AdjointProblem(model_p; sensitivity = sens,
+                                                              solve = (m, b, ctx, stale) -> fill(NaN, length(b))))
+    B = Functional((u, θ) -> ∫(u)dΓ, Sbad; dJdu = u -> (w -> ∫(w)dΓ), scale = 1.0)
     dir2 = mktempdir()
     @test_throws OptimizationFailure solve!(Optimization(z; objective = B, constraints = (volume = q.Vol,)),
                                             DensityMethod(OC(); metric = Euclidean()); maxiter = 3,

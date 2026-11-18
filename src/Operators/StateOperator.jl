@@ -1,10 +1,9 @@
 """
-    StateOperator(model, deps; solve = default_solve(StateOperator, model))
-    StateOperator(model; depends, solve = …)
+    StateOperator(model, deps; solve = default_solve(StateOperator, model), adjoint = nothing)
+    StateOperator(model; depends, solve = …, adjoint = nothing)
 
-Forward or adjoint state: a HyperFEM computational model built by the user (weak forms and solver are the user's)
-that is solved again only when one of its dependencies changed. For the adjoint of a forward state use
-[`AdjointOperator`](@ref).
+Forward state: a HyperFEM computational model built by the user (weak forms and solver are the user's) that is
+solved again only when one of its dependencies changed.
 
 - `deps` or `depends` (given once, mandatory): the objects the state depends on (one object or a tuple), typically
   `θ` for a forward state. Each implements [`state_version`](@ref); physical fields and other state operators are brought
@@ -17,6 +16,10 @@ that is solved again only when one of its dependencies changed. For the adjoint 
   reach its final factor counts as not converged (an adjoint built on the tangent at the final factor would be
   inconsistent otherwise).
 
+- `adjoint`: an [`AdjointProblem`](@ref), needed to differentiate the functionals that read the state: who solves the
+  transposed system (an adjoint model with the transposed tangent, or [`SameMatrix`](@ref)`()`) and the forms
+  `pᵀ ∂R/∂θ` of the state. Without it the state only gives values.
+
 `get_state(S)` is the state field of the model, created once, so the forms of other models (the adjoint) can
 capture it; it always holds the model's current solution vector.
 
@@ -27,7 +30,7 @@ nonlinear models, the last converged load increment), not a solution. A failed s
 dependency changes; the next solve starts from what the model holds, as decided by the user's `solve`
 (`RestartState` in HyperFEM).
 """
-mutable struct StateOperator{M,F,D,U} <: AbstractOperator
+mutable struct StateOperator{M,F,D,U,A} <: AbstractOperator
   model::M
   solve::F
   depends::D
@@ -36,15 +39,22 @@ mutable struct StateOperator{M,F,D,U} <: AbstractOperator
   version::Int
   converged::Bool
   solved::Bool
+  adjoint::A
 end
 
-function StateOperator(model, deps = _Unset(); depends = _Unset(), solve = default_solve(StateOperator, model))
+function StateOperator(model, deps = _Unset(); depends = _Unset(), solve = default_solve(StateOperator, model),
+                       adjoint = nothing)
   d = _dependencies("StateOperator", deps, depends)
   d isa _Unset &&
     throw(ArgumentError("StateOperator: the dependencies are mandatory: StateOperator(model, θ) or depends = θ"))
+  adjoint isa Union{Nothing,AdjointProblem} ||
+    throw(ArgumentError("StateOperator: adjoint must be an AdjointProblem (AdjointProblem(model_adj; sensitivity) or AdjointProblem(SameMatrix(); sensitivity)); got $(typeof(adjoint))"))
   deps = _check_depends(_unique_deps(_as_depends(d)))
-  StateOperator(model, solve, deps, fill(-1, length(deps)), HyperFEM.get_state(model), 0, false, false)
+  StateOperator(model, solve, deps, fill(-1, length(deps)), HyperFEM.get_state(model), 0, false, false,
+                _adjoint_cache(adjoint, model, deps))
 end
+
+has_adjoint(S::StateOperator) = S.adjoint !== nothing
 
 state_version(S::StateOperator) = S.version
 HyperFEM.get_state(S::StateOperator) = S.state
@@ -100,32 +110,6 @@ _several_rhs(model) =
   throw(ArgumentError("no default solve for a StaticLinearModel with several right-hand sides: pass your own solve"))
 default_solve(::Type{<:StateOperator}, m::HyperFEM.StaticLinearModel{<:AbstractVector}) = _several_rhs(m)
 default_solve(::Type{<:LinearOperator}, m::HyperFEM.StaticLinearModel{<:AbstractVector}) = _several_rhs(m)
-
-"""
-    AdjointOperator(S::StateOperator, model[, deps]; depends = (), solve = default_solve(StateOperator, model))
-        -> StateOperator
-
-Adjoint state of the forward state `S`: a [`StateOperator`](@ref) over the user's `model` (weak forms and solver
-are the user's; typically the tangent of the forward problem with test and trial swapped, evaluated at
-`get_state(S)`, and the right-hand side `∂J/∂u`). Its dependencies are those of `S`, then `S`, then the extra ones
-given in `deps` or `depends` (once), without repetitions. The trial space of `model` must have homogeneous Dirichlet
-values (checked here for the HyperFEM models that expose their spaces). It is solved only after `S` converged.
-
-One adjoint covers one forward state: if `S` depends on another state `S0` (for example through a field computed by
-`S0`), the sensitivity through `S0` needs its own adjoint and is not included in the gradient of a
-[`Functional`](@ref HyperShape.Functionals.Functional) built on `S`; [`check_consistency`](@ref
-HyperShape.Checks.check_consistency) detects it. A warning is given when this adjoint is built.
-"""
-function AdjointOperator(S::StateOperator, model, deps = _Unset(); depends = _Unset(),
-                         solve = default_solve(StateOperator, model))
-  d = _dependencies("AdjointOperator", deps, depends)
-  extra = d isa _Unset ? () : _as_depends(d)
-  _check_homogeneous_trial(model, "AdjointOperator")
-  any(d -> d isa StateOperator, S.depends) &&
-    @warn "AdjointOperator: the forward state depends on another state; the sensitivity through it is not included " *
-          "in the gradient of a Functional built on this adjoint (check_consistency detects it)"
-  StateOperator(model, _unique_deps((S.depends..., S, extra...)); solve)
-end
 
 _unique_deps(t::Tuple) = foldl((acc, d) -> any(x -> x === d, acc) ? acc : (acc..., d), t; init = ())
 

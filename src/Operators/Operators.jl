@@ -5,19 +5,23 @@ Operators over HyperFEM computational models.
 
 - [`LinearOperator`](@ref): auxiliary linear solves (filter, reaction–diffusion step, velocity extension). The model
   carries the bilinear form only and HyperShape supplies the right-hand side.
-- [`StateOperator`](@ref): forward and adjoint states. The model carries the user's full weak forms.
+- [`StateOperator`](@ref): forward states. The model carries the user's full weak forms; an [`AdjointProblem`](@ref)
+  declares how to differentiate through it (the transposed solve and the forms `pᵀ ∂R/∂θ`).
 
 Both declare their dependencies (objects with a [`state_version`](@ref) counter), positionally or with `depends = ...`.
 For a `StaticLinearModel` both have a default `solve` ([`default_solve`](@ref)); any other model needs the user's.
-[`AdjointOperator`](@ref) builds the adjoint state of a forward one.
 """
 module Operators
 
 using HyperFEM: HyperFEM
+using Gridap
+using Gridap.FESpaces
 using Gridap.FESpaces: get_dirichlet_dof_values
 using Gridap.MultiField: MultiFieldFESpace
+using Gridap.Algebra: residual!
+using HyperFEMKernels: KernelOperator, update
 
-export LinearOperator, StateOperator, AdjointOperator, is_converged, OptContext, Parameter
+export LinearOperator, StateOperator, AdjointProblem, SameMatrix, SelfAdjoint, is_converged, OptContext, Parameter
 
 """
     OptContext(phase::Symbol = :setup)
@@ -243,6 +247,8 @@ Number of solves done by a [`LinearOperator`](@ref) or a [`StateOperator`](@ref)
 """
 num_solves(op::LinearOperator) = op.nsolves
 
+include("Assembly.jl")
 include("StateOperator.jl")
+include("Adjoint.jl")
 
 end

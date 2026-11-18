@@ -173,8 +173,10 @@ function _reachable(Fs)
   stack = Any[]
   for F in Fs
     push!(stack, F.θ)
-    F.S === nothing || push!(stack, F.S)
-    F.A === nothing || push!(stack, F.A)
+    if F.S !== nothing
+      push!(stack, F.S)
+      F.S.adjoint.op isa AbstractOperator && push!(stack, F.S.adjoint.op)   # the adjoint matrix (not with SameMatrix)
+    end
   end
   while !isempty(stack)
     o = popfirst!(stack)
