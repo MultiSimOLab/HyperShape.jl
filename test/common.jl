@@ -47,7 +47,7 @@ function state_problem(; n = 8, dim = 2, design = :P0, backend = :lazy, gD = 0.0
   model_u = StaticLinearModel(l, a, U, V, bc; ls = LUSolver(), backend)
   uh = get_state(model_u)
   # pᵀ ∂R/∂θ [δ] of R(u)[v] = a(u, v) − l(v)
-  sens = q -> (δ -> ∫((dk ∘ θ.ρ) * ∇(uh) ⋅ ∇(q) * δ)dΩ)
+  sens = (u, q) -> (δ -> ∫((dk ∘ θ.ρ) * ∇(u) ⋅ ∇(q) * δ)dΩ)
   # adjoint: the matrix of a (symmetric) with test and trial swapped, on the homogeneous space
   Ua, bca = adjoint_space === :homogeneous ? (U0, bc0) : (U, bc)
   model_p = StaticLinearModel((p, w) -> a(w, p), Ua, V, bca; ls = LUSolver(), backend)

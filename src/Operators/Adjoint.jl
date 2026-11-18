@@ -1,16 +1,16 @@
-# Adjoint of a forward state: what the user declares (`AdjointProblem`, `SameMatrix`, `SelfAdjoint`) and the cache that
+# Adjoint of a forward state: what the user declares (`AdjointProblem`, `SymmetricState`, `SelfAdjoint`) and the cache that
 # HyperShape builds once inside the StateOperator (`AdjointCache`). The reverse sweep that uses it (seeds from the
 # functionals, adjoint solve, forms in δθ) lives in `HyperShape.Functionals`.
 
 """
-    SameMatrix()
+    SymmetricState()
 
 Operator of an [`AdjointProblem`](@ref) for a forward state over a linear and symmetric `StaticLinearModel`: the adjoint is
 solved with the matrix and the factorisation of the forward model itself (no assembly and no factorisation for the
 adjoint, one back substitution per gradient). The forward model must be re-assembled by its own solve function (the
 default one does), because the adjoint solve overwrites its right-hand side vector.
 """
-struct SameMatrix end
+struct SymmetricState end
 
 """
     SelfAdjoint()
@@ -25,6 +25,7 @@ struct SelfAdjoint end
 
 """
     AdjointProblem(op; sensitivity, solve = <default>, depends = (), backend = :compiled)
+    AdjointProblem(; sensitivity)
 
 Adjoint problem of a forward [`StateOperator`](@ref), given with its `adjoint` keyword. With `R(u; θ)[v]` the residual of
 the forward problem and `K = ∂R/∂u` its tangent, the adjoint `p` solves `Kᵀ p = Σ ∂J/∂u` (the seeds of the
@@ -33,12 +34,13 @@ with respect to the physical fields. HyperShape puts the signs; the user writes 
 
 - `op`: who solves `Kᵀ p = b`. Either a HyperFEM model that carries the transposed tangent alone and the user's
   solver, usually `StaticLinearModel((p, w) -> jac(uh, w, p), U0, V0, bc0; ls)` (test and trial swapped, evaluated at
-  the forward state, on a space with homogeneous Dirichlet values), or [`SameMatrix`](@ref)`()` for a linear and
-  symmetric forward state (reuses its factorisation).
-- `sensitivity`: `p -> (δ -> ∫(…)dΩ)`, the linear form `pᵀ ∂R/∂θ [δ]` (without sign; for a `StaticLinearModel`
-  `R(u)[v] = a(u, v) − l(v)`, so a load that depends on θ contributes `− ∂l/∂θ`), or a named tuple of such forms
-  (`p -> (ρ = δ -> …, E = δ -> …)`) when θ has several fields. Written once per state, it serves every functional
-  that reads the state.
+  the forward state, on a space with homogeneous Dirichlet values), or [`SymmetricState`](@ref)`()` for a linear and
+  symmetric forward state (reuses its factorisation). Without `op` (second form) no adjoint is ever solved: only
+  [`SelfAdjoint`](@ref) functionals can read the state (checked when they are built).
+- `sensitivity`: `(u, p) -> (δ -> ∫(…)dΩ)`, the linear form `pᵀ ∂R/∂θ [δ]` (without sign) at the state `u` and the
+  adjoint `p`, or a named tuple of such forms (`(u, p) -> (ρ = δ -> …, E = δ -> …)`) when θ has several fields. For a
+  `StaticLinearModel` `R(u)[v] = a(u, v) − l(v)`, so a load that depends on θ contributes `− ∂l/∂θ`. Written once
+  per state, it serves every functional that reads the state.
 - `solve` (only with a model): function `(model, b, ctx, stale) -> x` of a [`LinearOperator`](@ref); default
   `solve!(m, b; Assembly = stale)` for a `StaticLinearModel` ([`default_solve`](@ref)). The matrix is re-assembled
   (`stale = true`) only when the forward state changed, so the factorisation serves every gradient of a design.
@@ -59,15 +61,19 @@ end
 
 function AdjointProblem(op; sensitivity, solve = nothing, depends = (), backend::Symbol = :compiled)
   _check_backend(backend)
-  op isa SameMatrix && solve !== nothing &&
-    throw(ArgumentError("AdjointProblem: SameMatrix() solves with the forward model; solve is only for an adjoint model"))
-  (op isa SameMatrix || applicable(HyperFEM.get_spaces, op)) ||
-    throw(ArgumentError("AdjointProblem: op must be a HyperFEM model with the transposed tangent (a StaticLinearModel) or SameMatrix(); got $(typeof(op))"))
+  op === nothing && (solve === nothing && isempty(_as_depends(depends)) ||
+    throw(ArgumentError("AdjointProblem: without an operator nothing is solved; solve and depends do not apply")))
+  op isa SymmetricState && solve !== nothing &&
+    throw(ArgumentError("AdjointProblem: SymmetricState() solves with the forward model; solve is only for an adjoint model"))
+  (op === nothing || op isa SymmetricState || applicable(HyperFEM.get_spaces, op)) ||
+    throw(ArgumentError("AdjointProblem: op must be a HyperFEM model with the transposed tangent (a StaticLinearModel) or SymmetricState(); got $(typeof(op))"))
   AdjointProblem(op, sensitivity, solve, _check_depends(_as_depends(depends)), backend)
 end
 
+AdjointProblem(; sensitivity) = AdjointProblem(nothing; sensitivity)
+
 Base.show(io::IO, a::AdjointProblem) =
-  print(io, "AdjointProblem(", a.op isa SameMatrix ? "SameMatrix()" : nameof(typeof(a.op)), ")")
+  print(io, "AdjointProblem(", a.op === nothing ? "" : a.op isa SymmetricState ? "SymmetricState()" : nameof(typeof(a.op)), ")")
 
 """
     AdjointCache
@@ -77,7 +83,7 @@ solves `Kᵀ p = b`, the adjoint field `p` (a fixed object updated in place), th
 assembler of the seeds. Internal.
 """
 mutable struct AdjointCache{O,P,A,SE}
-  op::O                       # LinearOperator over the adjoint model, or SameMatrix()
+  op::O                       # LinearOperator over the adjoint model, or SymmetricState()
   p::P                        # adjoint field, values updated in place
   rhs::Vector{Float64}        # accumulated seeds Σ wᵢ ∂Jᵢ/∂u
   tmp::Vector{Float64}
@@ -92,9 +98,11 @@ end
 _adjoint_cache(::Nothing, model, deps) = nothing
 
 function _adjoint_cache(a::AdjointProblem, model, deps)
-  if a.op isa SameMatrix
-    model isa HyperFEM.StaticLinearModel && !(model isa HyperFEM.StaticLinearModel{<:AbstractVector}) ||
-      throw(ArgumentError("AdjointProblem: SameMatrix() needs a forward StaticLinearModel with one right-hand side; got a $(nameof(typeof(model)))"))
+  if a.op === nothing || a.op isa SymmetricState
+    a.op === nothing || model isa HyperFEM.StaticLinearModel && !(model isa HyperFEM.StaticLinearModel{<:AbstractVector}) ||
+      throw(ArgumentError("AdjointProblem: SymmetricState() needs a forward StaticLinearModel with one right-hand side; got a $(nameof(typeof(model)))"))
+    applicable(HyperFEM.get_spaces, model) ||
+      throw(ArgumentError("AdjointProblem: the forward model does not expose its spaces; give an adjoint model"))
     U, V = HyperFEM.get_spaces(model)
     n = num_free_dofs(V)
     p = FEFunction(V, zeros(n))            # the test space: homogeneous Dirichlet values
@@ -177,7 +185,9 @@ function _solve_adjoint!(pv, op::LinearOperator, S, rhs, ctx)
   c.seen_state = S.version
   pv
 end
-function _solve_adjoint!(pv, ::SameMatrix, S, rhs, ctx)
+_solve_adjoint!(pv, ::Nothing, S, rhs, ctx) =
+  throw(ArgumentError("AdjointProblem() without an operator: only SelfAdjoint functionals can read this state"))
+function _solve_adjoint!(pv, ::SymmetricState, S, rhs, ctx)
   copyto!(pv, rhs)
   S.model(pv; Assembly = false)            # the factorisation of the forward model; writes the solution into pv
   pv
@@ -210,7 +220,19 @@ end
 
 The forms `pᵀ ∂R/∂θ` declared in the `sensitivity` of the [`AdjointProblem`](@ref) of `S`, at the adjoint `p` (without sign).
 """
-adjoint_sensitivity(S, p) = S.adjoint.sensitivity(p)
+adjoint_sensitivity(S, p) = S.adjoint.sensitivity(S.state, p)
+
+"""
+    get_adjoint(S::StateOperator)
+
+The adjoint field `p` of `S` (a fixed object updated in place): the adjoint of the last gradient computed through `S`.
+With several functionals in one sweep it is the adjoint of their weighted sum; with only [`SelfAdjoint`](@ref) ones,
+a multiple of the state.
+"""
+function get_adjoint(S)
+  S.adjoint === nothing && throw(ArgumentError("get_adjoint: the state has no AdjointProblem"))
+  S.adjoint.p
+end
 
 num_solves(c::AdjointCache) = c.nsolves
 invalidate!(c::AdjointCache) = (c.op isa LinearOperator && invalidate!(c.op); c)

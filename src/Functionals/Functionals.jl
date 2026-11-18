@@ -20,7 +20,7 @@ export Functional, Volume, functional_value, functional_gradient!
 
 """
     Functional(J, S::StateOperator; dJdu, dJdθ = nothing, scale, fields = nothing, parameters = ())
-    Functional(J, θ::PhysicalFields; derivative, scale, linear = false, parameters = ())
+    Functional(J, θ::PhysicalFields; dJdθ, scale, linear = false, parameters = ())
 
 Objective or constraint.
 
@@ -41,7 +41,7 @@ The derivative with respect to θ is `dJdθ − pᵀ ∂R/∂θ`, with `p` the a
 put by HyperShape. A state that depends on another state is not supported yet (an error here): the sensitivity
 through the upstream state would be missing.
 
-Design only (second form, volume, perimeter): `J(θ)` and `derivative(θ)`, the derivative with respect to θ.
+Design only (second form, volume, perimeter): `J(θ)` and `dJdθ(θ)`, the derivative with respect to θ.
 
 `scale` is mandatory: a positive number, `:initial` (the absolute value of the first finite evaluation; an error if
 it is zero) or `1.0` for no scaling. The value and the derivative are divided by it.
@@ -61,7 +61,7 @@ gradient with `NaN` (the optimisers treat it as a failed trial).
 """
 struct Functional{FJ,FD,FU,S,T<:PhysicalFields,P<:Tuple}
   J::FJ
-  DJ::FD                        # design only: derivative(θ); with a state: dJdθ(u, θ) or nothing
+  DJ::FD                        # design only: dJdθ(θ); with a state: dJdθ(u, θ) or nothing
   dJdu::FU                      # with a state: u -> (w -> ∫…) or SelfAdjoint(); nothing for design only
   S::S
   θ::T
@@ -116,16 +116,18 @@ function Functional(J, S::StateOperator; dJdu = _Unused(), dJdθ = nothing, scal
                     derivative = _Unused(), adjoint = _Unused())
   (derivative isa _Unused && adjoint isa _Unused) || throw(ArgumentError(
     "Functional: `derivative` and `adjoint` are gone for functionals with a state: declare the adjoint in the state " *
-    "(StateOperator(model, θ; adjoint = AdjointProblem(model_adj or SameMatrix(); sensitivity = p -> pᵀ∂R/∂θ))) and give " *
+    "(StateOperator(model, θ; adjoint = AdjointProblem(model_adj or SymmetricState(); sensitivity = p -> pᵀ∂R/∂θ))) and give " *
     "here dJdu = u -> (w -> ∫(∂J/∂u ⋅ w)dΩ) (or SelfAdjoint()) and, if J reads θ, dJdθ = (u, θ) -> (δ -> ∫(…)dΩ)"))
   dJdu isa _Unused && throw(ArgumentError(
     "Functional: dJdu is mandatory: dJdu = u -> (w -> ∫(…)dΩ), or SelfAdjoint() for the compliance of a linear and symmetric state"))
   has_adjoint(S) || throw(ArgumentError(
     "Functional: the state has no adjoint: StateOperator(model, θ; adjoint = AdjointProblem(model_adj; sensitivity)) " *
-    "or AdjointProblem(SameMatrix(); sensitivity) for a linear and symmetric state"))
+    "or AdjointProblem(SymmetricState(); sensitivity) for a linear and symmetric state"))
   any(d -> d isa StateOperator, S.depends) && throw(ArgumentError(
     "Functional: the state depends on another state; the sensitivity through it is not supported yet " *
     "(chains of states come in a later version)"))
+  dJdu isa SelfAdjoint || S.adjoint.op !== nothing || throw(ArgumentError(
+    "Functional: the AdjointProblem of the state has no operator (only SelfAdjoint functionals); give it an adjoint model or SymmetricState()"))
   count(d -> d isa PhysicalFields, S.depends) <= 1 || throw(ArgumentError(
     "Functional: the state depends on several PhysicalFields; the sensitivity through all of them is not supported yet"))
   mode, value = _scale(scale)
@@ -138,9 +140,12 @@ function Functional(J, S::StateOperator; dJdu = _Unused(), dJdθ = nothing, scal
   Functional(J, dJdθ, dJdu, S, θ, mode, Ref(value), [-1.0, -1.0, -1.0, NaN], false, _parameters(parameters))
 end
 
-function Functional(J, θ::PhysicalFields; derivative, scale, linear::Bool = false, parameters = ())
+function Functional(J, θ::PhysicalFields; dJdθ = _Unused(), scale, linear::Bool = false, parameters = (),
+                    derivative = _Unused())
+  derivative isa _Unused || throw(ArgumentError("Functional: `derivative` is now `dJdθ = θ -> (δ -> ∫(…)dΩ)`"))
+  dJdθ isa _Unused && throw(ArgumentError("Functional: dJdθ is mandatory for a design-only functional: dJdθ = θ -> (δ -> ∫(…)dΩ)"))
   mode, value = _scale(scale)
-  Functional(J, derivative, nothing, nothing, θ, mode, Ref(value), [-1.0, -1.0, -1.0, NaN], linear, _parameters(parameters))
+  Functional(J, dJdθ, nothing, nothing, θ, mode, Ref(value), [-1.0, -1.0, -1.0, NaN], linear, _parameters(parameters))
 end
 
 """
@@ -164,7 +169,7 @@ function Volume(θ::PhysicalFields, dΩ; max_fraction::Real, field = nothing, sc
   scale = scale === nothing ? vmax : scale
   J = θ -> sum(∫(getproperty(θ, f))dΩ) - vmax
   DJ = θ -> NamedTuple{(f,)}((δ -> ∫(δ)dΩ,))
-  Functional(J, θ; derivative = DJ, scale, linear = is_linear_field(θ, f))
+  Functional(J, θ; dJdθ = DJ, scale, linear = is_linear_field(θ, f))
 end
 
 function Volume(x::DesignFields, dΩ; kwargs...)

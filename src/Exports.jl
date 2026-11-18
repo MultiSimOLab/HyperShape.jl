@@ -15,8 +15,9 @@ end
 @_export Operators LinearOperator
 @_export Operators StateOperator
 @_export Operators AdjointProblem
-@_export Operators SameMatrix
+@_export Operators SymmetricState
 @_export Operators SelfAdjoint
+@_export Operators get_adjoint
 @_export Operators is_converged
 @_export Operators OptContext
 @_export Functionals Functional

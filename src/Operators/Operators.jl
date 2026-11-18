@@ -21,7 +21,7 @@ using Gridap.MultiField: MultiFieldFESpace
 using Gridap.Algebra: residual!
 using HyperFEMKernels: KernelOperator, update
 
-export LinearOperator, StateOperator, AdjointProblem, SameMatrix, SelfAdjoint, is_converged, OptContext, Parameter
+export LinearOperator, StateOperator, AdjointProblem, SymmetricState, SelfAdjoint, get_adjoint, is_converged, OptContext, Parameter
 
 """
     OptContext(phase::Symbol = :setup)

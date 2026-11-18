@@ -63,7 +63,7 @@ function compliance_problem(; design = :P0, n = 8, dim = 2, init = 0.4, fraction
   C = Functional((u, θ) -> ∫(f * u)dΩ, Sc; dJdu = SelfAdjoint(), dJdθ, fields = θ, scale = :initial)
   θv = PhysicalFields(x; ρ = Identity())
   vol = sum(∫(1.0)dΩ)
-  Vol = Functional(θ -> sum(∫(θ.ρ)dΩ) - fraction * vol, θv; derivative = θ -> (δ -> ∫(δ)dΩ), scale = fraction * vol, linear = true)
+  Vol = Functional(θ -> sum(∫(θ.ρ)dΩ) - fraction * vol, θv; dJdθ = θ -> (δ -> ∫(δ)dΩ), scale = fraction * vol, linear = true)
   (; p..., C, Vol, θv, S = Sc, problem = Optimization(z; objective = C, constraints = (volume = Vol,)))
 end
 
@@ -81,19 +81,19 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test o.a ≈ m ./ (0.4 * sum(m))
     @test o.V ≈ 1.0 atol = 1e-12            # (∫ρ - 0.4|Ω|)/(0.4|Ω|) ≤ 0  ⇔  aᵀz ≤ 1
     # a projected volume is not linear in z
-    Vp = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4, q.θ; derivative = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4, linear = true)
+    Vp = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4, q.θ; dJdθ = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4, linear = true)
     bad = Optimization(q.z; objective = q.C, constraints = (volume = Vp,))
     @test_throws ArgumentError solve!(bad, DensityMethod(OC(); metric = Euclidean()); maxiter = 2, verbose = 0, on_failure = RejectStep(shrink = 0.5, max_attempts = 3), stop = nothing)
     @test FunctionalOracle(q.problem, Euclidean()).metric === nothing
     # a uniform start at 0.3 used to hide a nonlinear constraint
     q3 = compliance_problem(; design, init = 0.3)
-    Vp3 = Functional(θ -> sum(∫(θ.ρ)q3.dΩ) - 0.4, q3.θ; derivative = θ -> (δ -> ∫(δ)q3.dΩ), scale = 0.4, linear = true)
+    Vp3 = Functional(θ -> sum(∫(θ.ρ)q3.dΩ) - 0.4, q3.θ; dJdθ = θ -> (δ -> ∫(δ)q3.dΩ), scale = 0.4, linear = true)
     @test_throws ArgumentError solve!(Optimization(q3.z; objective = q3.C, constraints = (volume = Vp3,)),
                                       DensityMethod(OC(); metric = Euclidean()); maxiter = 2, verbose = 0, on_failure = RejectStep(shrink = 0.5, max_attempts = 3), stop = nothing)
     @test get_values(q3.z) == fill(0.3, length(q3.z))     # z restored after the probes
     # the filtered, unprojected volume is linear and has the same vector (Neumann filter)
     θf = PhysicalFields(q.x; ρ = HelmholtzFilter(q.Sf, q.dΩ))
-    Vf = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4 * sum(m), θf; derivative = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4 * sum(m), linear = true)
+    Vf = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4 * sum(m), θf; dJdθ = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4 * sum(m), linear = true)
     of = FunctionalOracle(Optimization(q.z; objective = q.C, constraints = (volume = Vf,)), Euclidean())
     _setup_constraint!(of, Vf, q.problem.ctx)
     @test of.a ≈ m ./ (0.4 * sum(m)) rtol = 1e-10
@@ -497,7 +497,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     # a projected volume from a uniform 0.5 start with η = 0.5 on a finer mesh is not linear
     q = compliance_problem(; n = 40, init = 0.5)
     set_beta!(q.H, 3.0)
-    Vp = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4, q.θ; derivative = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4, linear = true)
+    Vp = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4, q.θ; dJdθ = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4, linear = true)
     o = FunctionalOracle(Optimization(q.z; objective = q.C, constraints = (volume = Vp,)), Euclidean())
     @test_throws ArgumentError _setup_constraint!(o, Vp, q.problem.ctx)
     # a start with values at the bounds: the first solve of SiMPL is the current design
@@ -857,13 +857,13 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     qw = compliance_problem()
     w = Parameter(1.0)
     dΩw = qw.dΩ
-    Fw = Functional(θ -> w[] * sum(∫(θ.ρ)dΩw), qw.θ; derivative = θ -> (δ -> ∫(w[] * δ)dΩw), scale = 1.0, parameters = (w,))
-    Fn = Functional(θ -> w[] * sum(∫(θ.ρ)dΩw), qw.θ; derivative = θ -> (δ -> ∫(w[] * δ)dΩw), scale = 1.0)
+    Fw = Functional(θ -> w[] * sum(∫(θ.ρ)dΩw), qw.θ; dJdθ = θ -> (δ -> ∫(w[] * δ)dΩw), scale = 1.0, parameters = (w,))
+    Fn = Functional(θ -> w[] * sum(∫(θ.ρ)dΩw), qw.θ; dJdθ = θ -> (δ -> ∫(w[] * δ)dΩw), scale = 1.0)
     ctxw = OptContext(:optimization)
     v1, n1 = functional_value(Fw, ctxw), functional_value(Fn, ctxw)
     w[] = 2.0
     @test functional_value(Fw, ctxw) ≈ 2 * v1 && functional_value(Fn, ctxw) == n1   # without parameters: stale
-    @test_throws ArgumentError Functional(θ -> 0.0, qw.θ; derivative = θ -> (δ -> ∫(δ)dΩw), scale = 1.0, parameters = (1.0,))
+    @test_throws ArgumentError Functional(θ -> 0.0, qw.θ; dJdθ = θ -> (δ -> ∫(δ)dΩw), scale = 1.0, parameters = (1.0,))
   end
 
   @testset "Screen output" begin

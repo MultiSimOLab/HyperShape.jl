@@ -25,7 +25,7 @@ function filter_problem(af_of; n = 6, depends_of = x -> ())
   Sf = LinearOperator(StaticLinearModel(af, TrialFESpace(Vf), Vf, NothingBC(); ls = LUSolver()); depends = depends_of(x),
                       solve = (m, b, ctx, stale) -> solve!(m, b; Assembly = stale))
   θ = PhysicalFields(x; ρ = TanhProjection(β = 2.0, η = 0.5) ∘ HelmholtzFilter(Sf, dΩ))
-  F = Functional(θ -> ∫(θ.ρ * θ.ρ)dΩ, θ; derivative = θ -> (δ -> ∫(2 * θ.ρ * δ)dΩ), scale = 1.0)
+  F = Functional(θ -> ∫(θ.ρ * θ.ρ)dΩ, θ; dJdθ = θ -> (δ -> ∫(2 * θ.ρ * δ)dΩ), scale = 1.0)
   (; z, x, θ, F, dΩ)
 end
 
@@ -38,7 +38,7 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     (; z, θ, S, f, dk, dΩ, dΓ, a, l) = p
     C = p.compliance(scale = :initial)
     B = p.boundary(scale = 2.0)
-    Vol = Functional(θ -> ∫(θ.ρ)dΩ, θ; derivative = θ -> (δ -> ∫(δ)dΩ), scale = 1.0)
+    Vol = Functional(θ -> ∫(θ.ρ)dΩ, θ; dJdθ = θ -> (δ -> ∫(δ)dΩ), scale = 1.0)
     z0 = copy(get_values(z))
     r = check_consistency((compliance = C, boundary = B, volume = Vol);
                           tangents = (S => ((u, v) -> a(u, v) - l(v), (u, du, v) -> a(du, v)),))
@@ -103,7 +103,7 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     p = state_problem()
     q = filter_problem(symmetric_filter)
     dΩ = p.dΩ
-    Vol = Functional(θ -> ∫(θ.ρ)dΩ, p.θ; derivative = θ -> (δ -> ∫(δ)dΩ), scale = 1.0)
+    Vol = Functional(θ -> ∫(θ.ρ)dΩ, p.θ; dJdθ = θ -> (δ -> ∫(δ)dΩ), scale = 1.0)
     @test_throws ArgumentError check_consistency(Vol, q.F)                    # different z
     @test_throws ArgumentError check_consistency()
     @test_throws ArgumentError check_consistency(Vol; steps = 1)
@@ -147,9 +147,9 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
   @testset "A missing gradient is not hidden by a large constant" begin
     q = filter_problem(symmetric_filter)
     dΩ = q.dΩ
-    F = Functional(θ -> ∫(1.0e8 + θ.ρ)dΩ, q.θ; derivative = θ -> (δ -> ∫(0.0 * δ)dΩ), scale = 1.0)
+    F = Functional(θ -> ∫(1.0e8 + θ.ρ)dΩ, q.θ; dJdθ = θ -> (δ -> ∫(0.0 * δ)dΩ), scale = 1.0)
     @test !_all_passed(check_consistency(F), "gradient")
-    G = Functional(θ -> ∫(1.0e8 + θ.ρ)dΩ, q.θ; derivative = θ -> (δ -> ∫(δ)dΩ), scale = 1.0)
+    G = Functional(θ -> ∫(1.0e8 + θ.ρ)dΩ, q.θ; dJdθ = θ -> (δ -> ∫(δ)dΩ), scale = 1.0)
     @test _all_passed(check_consistency(G), "gradient")
   end
 
@@ -194,7 +194,7 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     z = OptVariables(ρ = FieldVariable(V0; bounds = (0.0, Inf), init = [0.5 + 0.3 * sin(i) for i in 1:num_free_dofs(V0)]))
     x = DesignFields(z; ρ = Identity())
     θ = PhysicalFields(x; ρ = TanhProjection(β = 2.0, η = 0.5), E = :ρ => Identity())
-    F = Functional(θ -> ∫(θ.ρ * θ.E)dΩ, θ; derivative = θ -> (ρ = δ -> ∫(θ.E * δ)dΩ, E = δ -> ∫(θ.ρ * δ)dΩ), scale = 1.0)
+    F = Functional(θ -> ∫(θ.ρ * θ.E)dΩ, θ; dJdθ = θ -> (ρ = δ -> ∫(θ.E * δ)dΩ, E = δ -> ∫(θ.ρ * δ)dΩ), scale = 1.0)
     r = check_consistency((energy = F,))
     @test r.passed
     @test _all_passed(r, "design chain of θ.ρ") && _all_passed(r, "design chain of θ.E")
@@ -218,10 +218,9 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     q = Parameter(1.0)
     for extra in ((), (q,))
       m = StaticLinearModel(l, a, U, V, bc; ls = LUSolver())
-      um = get_state(m)
       S = StateOperator(m, θ;
                         adjoint = AdjointProblem(StaticLinearModel((p, w) -> q[] * a(w, p), U0, V, bc0; ls = LUSolver());
-                                                 sensitivity = r -> (δ -> ∫((dk ∘ θ.ρ) * ∇(um) ⋅ ∇(r) * δ)dΩ),
+                                                 sensitivity = (u, r) -> (δ -> ∫((dk ∘ θ.ρ) * ∇(u) ⋅ ∇(r) * δ)dΩ),
                                                  depends = extra))
       B = Functional((u, θ) -> ∫(u)dΓ, S; dJdu = u -> (w -> ∫(q[] * w)dΓ), scale = 1.0)
       functional_gradient!(zeros(length(z)), B, nothing)
@@ -242,7 +241,7 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     x = DesignFields(z; ρ = Identity())
     θ = PhysicalFields(x; ρ = Identity())
     ε = 3e-6
-    F = Functional(θ -> ∫(θ.ρ + ε * θ.ρ * θ.ρ)dΩ, θ; derivative = θ -> (δ -> ∫((1 + 2ε * θ.ρ) * δ)dΩ), scale = 1.0)
+    F = Functional(θ -> ∫(θ.ρ + ε * θ.ρ * θ.ρ)dΩ, θ; dJdθ = θ -> (δ -> ∫((1 + 2ε * θ.ρ) * δ)dΩ), scale = 1.0)
     r = check_consistency(F; direction = fill(0.1, n), h0 = 1e-2)
     g = only(_results(r, "gradient"))
     @test !g.passed && occursin("inconclusive", g.message)
@@ -254,7 +253,7 @@ symmetric_filter(x, dΩ) = (u, v) -> ∫(0.01 * ∇(u) ⋅ ∇(v) + u * v)dΩ
     Sf = HyperShape.Variables.filter_operators(q.θ)[1]
     dΩ = q.dΩ
     θ2 = PhysicalFields(q.x; ρ = TanhProjection(β = 3.0, η = 0.4) ∘ HelmholtzFilter(Sf, dΩ), E = :ρ => HelmholtzFilter(Sf, dΩ))
-    F = Functional(θ -> ∫(θ.ρ * θ.E)dΩ, θ2; derivative = θ -> (ρ = δ -> ∫(θ.E * δ)dΩ, E = δ -> ∫(θ.ρ * δ)dΩ), scale = 1.0)
+    F = Functional(θ -> ∫(θ.ρ * θ.E)dΩ, θ2; dJdθ = θ -> (ρ = δ -> ∫(θ.E * δ)dΩ, E = δ -> ∫(θ.ρ * δ)dΩ), scale = 1.0)
     r = check_consistency(F)
     @test r.passed
     @test length(_results(r, "design chain")) == 2 && length(_results(r, "symmetry")) == 1

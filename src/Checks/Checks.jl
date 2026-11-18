@@ -175,7 +175,7 @@ function _reachable(Fs)
     push!(stack, F.θ)
     if F.S !== nothing
       push!(stack, F.S)
-      F.S.adjoint.op isa AbstractOperator && push!(stack, F.S.adjoint.op)   # the adjoint matrix (not with SameMatrix)
+      F.S.adjoint.op isa AbstractOperator && push!(stack, F.S.adjoint.op)   # the adjoint matrix (not with SymmetricState)
     end
   end
   while !isempty(stack)

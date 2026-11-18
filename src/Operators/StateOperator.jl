@@ -17,7 +17,7 @@ solved again only when one of its dependencies changed.
   inconsistent otherwise).
 
 - `adjoint`: an [`AdjointProblem`](@ref), needed to differentiate the functionals that read the state: who solves the
-  transposed system (an adjoint model with the transposed tangent, or [`SameMatrix`](@ref)`()`) and the forms
+  transposed system (an adjoint model with the transposed tangent, or [`SymmetricState`](@ref)`()`) and the forms
   `pᵀ ∂R/∂θ` of the state. Without it the state only gives values.
 
 `get_state(S)` is the state field of the model, created once, so the forms of other models (the adjoint) can
@@ -48,7 +48,7 @@ function StateOperator(model, deps = _Unset(); depends = _Unset(), solve = defau
   d isa _Unset &&
     throw(ArgumentError("StateOperator: the dependencies are mandatory: StateOperator(model, θ) or depends = θ"))
   adjoint isa Union{Nothing,AdjointProblem} ||
-    throw(ArgumentError("StateOperator: adjoint must be an AdjointProblem (AdjointProblem(model_adj; sensitivity) or AdjointProblem(SameMatrix(); sensitivity)); got $(typeof(adjoint))"))
+    throw(ArgumentError("StateOperator: adjoint must be an AdjointProblem (AdjointProblem(model_adj; sensitivity) or AdjointProblem(SymmetricState(); sensitivity)); got $(typeof(adjoint))"))
   deps = _check_depends(_unique_deps(_as_depends(d)))
   StateOperator(model, solve, deps, fill(-1, length(deps)), HyperFEM.get_state(model), 0, false, false,
                 _adjoint_cache(adjoint, model, deps))

@@ -93,24 +93,25 @@ Implemented:
 
 ```julia
 model_u = StaticLinearModel(l, a, U, V, bc; ls = LUSolver())          # forms and solver of the user; they capture θ
-uh = get_state(model_u)                                                 # fixed object, captured by the adjoint forms
 # adjoint: the transposed tangent on the space with homogeneous Dirichlet values (U0, bc0), matrix only
 model_p = StaticLinearModel((p, w) -> a(w, p), U0, V, bc0; ls = LUSolver())
 S = StateOperator(model_u, θ;                                           # default solve: solve!(m; Assembly = true)
-      adjoint = AdjointProblem(model_p; sensitivity = p -> (δ -> ∫((dk ∘ θ.ρ) * ∇(uh) ⋅ ∇(p) * δ)dΩ)))
+      adjoint = AdjointProblem(model_p; sensitivity = (u, p) -> (δ -> ∫((dk ∘ θ.ρ) * ∇(u) ⋅ ∇(p) * δ)dΩ)))
 ```
 
-For a linear and symmetric state, `AdjointProblem(SameMatrix(); sensitivity)` solves the adjoint with the matrix and
-the factorisation of the state itself. A nonlinear forward state gives its own `solve`, and returns the convergence
+For a linear and symmetric state, `AdjointProblem(SymmetricState(); sensitivity)` solves the adjoint with the matrix and
+the factorisation of the state itself (the forward model must be re-assembled by its solve, as the default one does);
+`AdjointProblem(; sensitivity)`, without an operator, when only self-adjoint functionals read the state. The adjoint
+field is `get_adjoint(S)`. A nonlinear forward state gives its own `solve`, and returns the convergence
 flag:
 
 ```julia
 model_u = StaticNonlinearModel(res, jac, U, V, bc; nls)
-uh = get_state(model_u)
+uh = get_state(model_u)                                                 # captured by the transposed tangent
 S = StateOperator(model_u, θ;
       solve   = (m, ctx) -> solve!(m; stepping = (nsteps = 10, maxbisec = 5), RestartState = false),
       adjoint = AdjointProblem(StaticLinearModel((p, w) -> jac(1.0)(uh, w, p), U0, V, bc0; ls = LUSolver());
-                               sensitivity = p -> (δ -> ∫(…)dΩ)))
+                               sensitivity = (u, p) -> (δ -> ∫(…)dΩ)))
 ```
 
 - `solve` returns the solution vector (taken as converged) or a tuple whose last element is the convergence flag,
@@ -145,8 +146,7 @@ and one transposed solve per filter, whatever the number of functionals):
 - The forms are `δ -> ∫(… * δ)dΩ`, or a named tuple of such functions when θ has several fields.
 - `dJdu = SelfAdjoint()` when `∂J/∂u` is the load of a linear and symmetric state (the compliance): `p = u`, no
   adjoint solve; valid only with homogeneous Dirichlet values in the state (checked).
-- Design-only functionals (volume): `Functional(Jform, θ; derivative = DJform, scale)` with `Jform(θ)` and
-  `DJform(θ)`.
+- Design-only functionals (volume): `Functional(Jform, θ; dJdθ, scale)` with `Jform(θ)` and `dJdθ(θ)`.
 - `scale` is mandatory: a positive number, `:initial` (absolute value of the first evaluation) or `1.0`.
 
 ## Consistency checks
@@ -197,7 +197,7 @@ forms read; `Volume(x, dΩ; max_fraction)` that of the design
 density. The Helmholtz filter preserves the volume, the tanh projection does not: on a 150×50 half MBB beam with
 target 0.5, the design volume leaves the physical one at 0.64–0.68, the physical volume holds it at 0.5000.
 
-- **Constraint:** in phase 0, at most one, a design-only functional (`Volume`, or a `Functional(J, θ; derivative,
+- **Constraint:** in phase 0, at most one, a design-only functional (`Volume`, or a `Functional(J, θ; dJdθ,
   scale, linear)`). A linear one (`Volume` over identity or filter maps, or `linear = true`) is checked to be linear at
   the start and its vector `a` is computed once. A nonlinear one is linearised by the optimiser at every step and
   corrected with evaluations of the true constraint until it holds to `constraint_tol` (OC `1e-4`, SiMPL `1e-6`;
