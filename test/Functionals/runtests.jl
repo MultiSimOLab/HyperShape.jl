@@ -132,6 +132,42 @@ struct _NoSpaces <: HyperFEM.ComputationalModels.ComputationalModel end   # a mo
     set_beta!(H, 6.0)                                      # a new β changes θ: states solved again
     functional_value(C, nothing)
     @test nforward[] == 3
+    # the state solved again with the same dependencies (invalidate!): the adjoint matrix is assembled again
+    functional_gradient!(g, B, nothing)
+    na = nassembly[]
+    HyperShape.Operators.invalidate!(S)
+    functional_gradient!(g, B, nothing)
+    @test nassembly[] == na + 1
+    # a zero weight seeds nothing: no adjoint solve
+    n0 = nadjoint[]
+    functional_gradient!(g, (C, B), [1.0, 0.0], nothing)
+    @test nadjoint[] == n0
+  end
+
+  @testset "Seeds on a vector-valued space with the compiled backend: no fallback" begin
+    model = CartesianDiscreteModel((0, 2, 0, 1), (8, 4))
+    labels = get_face_labeling(model)
+    add_tag_from_tags!(labels, "left", [1, 3, 7]); add_tag_from_tags!(labels, "right", [2, 4, 8])
+    Ω = Triangulation(model); dΩ = Measure(Ω, 2)
+    dΓ = Measure(BoundaryTriangulation(model; tags = "right"), 2)
+    Vρ = TestFESpace(model, ReferenceFE(lagrangian, Float64, 0); conformity = :L2)
+    z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = [0.3 + 0.5 * abs(sin(2.3i)) for i in 1:num_free_dofs(Vρ)],
+                                  map = Identity())
+    E(ρ) = 1e-3 + ρ^3; dE(ρ) = 3ρ^2
+    σ(ε) = 0.5 * tr(ε) * one(ε) + ε
+    t = VectorValue(0.0, -1.0)
+    bc = BoundaryConditions(BoundaryCondition("left", VectorValue(0.0, 0.0)))
+    V = TestFESpace(Ω, ReferenceFE(lagrangian, VectorValue{2,Float64}, 1), bc; conformity = :H1)
+    U = TrialFESpace(V, bc, 1.0)
+    a(u, v) = ∫((E ∘ θ.ρ) * (ε(v) ⊙ (σ ∘ ε(u))))dΩ
+    m = StaticLinearModel(v -> ∫(t ⋅ v)dΓ, a, U, V, bc; ls = LUSolver())
+    uh = get_state(m)
+    S = StateOperator(m, θ; adjoint = AdjointProblem(SameMatrix();
+                                                     sensitivity = q -> (δ -> ∫((dE ∘ θ.ρ) * (ε(q) ⊙ (σ ∘ ε(uh))) * δ)dΩ)))
+    g = VectorValue(1.0, 0.5)
+    J = Functional((u, θ) -> ∫(g ⋅ u)dΓ, S; dJdu = u -> (w -> ∫(g ⋅ w)dΓ), scale = 1.0)
+    gz = @test_logs functional_gradient!(zeros(length(z)), J, nothing)     # no warning of HyperFEMKernels
+    @test all(r -> 1.9 < r < 2.1, taylor_rates(() -> functional_value(J, nothing), gz, z, direction(length(z))))
   end
 
   @testset "Several functionals in one reverse sweep" begin
@@ -328,6 +364,7 @@ struct _NoSpaces <: HyperFEM.ComputationalModels.ComputationalModel end   # a mo
                            sensitivity = q -> (δ -> ∫((dk ∘ θ.ρ) * (1 + c * uh * uh) * ∇(uh) ⋅ ∇(q) * δ)dΩ))
       S = StateOperator(model_u, θ; adjoint = adj, solve = (m, ctx) -> solve!(m; stepping = stepping[], RestartState = false))
       @test S.adjoint.op.depends === (θ,)
+      @test_throws ArgumentError Functional((u, θ) -> ∫(u)dΓ, S; dJdu = SelfAdjoint(), scale = 1.0)   # p = u is wrong
       Functional((u, θ) -> ∫(u)dΓ, S; dJdu = u -> (w -> ∫(w)dΓ), scale = 1.0), S
     end
     with_logger(SimpleLogger(stderr, LogError)) do
@@ -351,17 +388,20 @@ struct _NoSpaces <: HyperFEM.ComputationalModels.ComputationalModel end   # a mo
     p = state_problem()
     (; z, θ, S, f, dk, dΩ, dΓ, a, l, U, U0, V, bc, bc0, sens) = p
     # default solves of a StaticLinearModel: the same states and gradients as the explicit solves
-    Sd = StateOperator(StaticLinearModel(l, a, U, V, bc; ls = LUSolver()), θ;
+    md = StaticLinearModel(l, a, U, V, bc; ls = LUSolver())
+    ud = get_state(md)                                     # the sensitivity reads the state of this model
+    Sd = StateOperator(md, θ;
                        adjoint = AdjointProblem(StaticLinearModel((p, w) -> a(w, p), U0, V, bc0; ls = LUSolver());
-                                                sensitivity = sens))
+                                                sensitivity = q -> (δ -> ∫((dk ∘ θ.ρ) * ∇(ud) ⋅ ∇(q) * δ)dΩ)))
     @test Sd.solve === HyperShape.Operators.default_solve(StateOperator, Sd.model)
     @test Sd.adjoint.op.solve === HyperShape.Operators.default_solve(LinearOperator, Sd.adjoint.op.model)
     @test Sd.adjoint.op.depends === (θ,)
     Jd = Functional((u, θ) -> ∫(u)dΓ, Sd; dJdu = u -> (w -> ∫(w)dΓ), scale = 1.0)
     Je = p.boundary(scale = 1.0)
     @test Jd.θ === θ                                   # θ deduced from the dependencies of S
+    gd = functional_gradient!(zeros(length(z)), Jd, nothing)   # before anything solves p.S
     @test functional_value(Jd, nothing) == functional_value(Je, nothing)
-    @test functional_gradient!(zeros(length(z)), Jd, nothing) ≈ functional_gradient!(zeros(length(z)), Je, nothing) rtol = 1e-12
+    @test gd ≈ functional_gradient!(zeros(length(z)), Je, nothing) rtol = 1e-12
     @test get_free_dof_values(get_state(Sd)) == get_free_dof_values(get_state(S))
     # default solve of the filter
     Lf = LinearOperator(StaticLinearModel((u, v) -> ∫(u * v)dΩ, U0, V, NothingBC(); ls = LUSolver()))
@@ -390,7 +430,8 @@ struct _NoSpaces <: HyperFEM.ComputationalModels.ComputationalModel end   # a mo
     θ2 = PhysicalFields(p.x; ρ = Identity())
     S2 = StateOperator(Sd.model, (θ, θ2); adjoint = p.adj)
     @test_throws ArgumentError Functional((u, θ) -> ∫(u)dΓ, S2; dJdu = SelfAdjoint(), scale = 1.0)
-    @test Functional((u, θ) -> ∫(u)dΓ, S2; dJdu = SelfAdjoint(), scale = 1.0, fields = θ).θ === θ
+    err = try Functional((u, θ) -> ∫(u)dΓ, S2; dJdu = SelfAdjoint(), scale = 1.0, fields = θ); nothing catch e; e end
+    @test err isa ArgumentError && occursin("several PhysicalFields", err.msg)   # the sensitivity through θ2 would be missing
     @test_throws ArgumentError Functional((u, θ) -> ∫(u)dΓ, StateOperator(Sd.model, z; adjoint = p.adj);
                                           dJdu = SelfAdjoint(), scale = 1.0)
     @test_throws ArgumentError Functional((u, θ) -> ∫(u)dΓ, Sd; dJdu = SelfAdjoint(), scale = 1.0,

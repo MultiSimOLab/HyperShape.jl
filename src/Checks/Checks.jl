@@ -60,9 +60,9 @@ Checks, at the current design, that the derivatives the user wrote and the depen
 consistent. The functionals must share the same optimisation variables `z`. Four kinds of checks:
 
 1. **Gradient of each functional** (Taylor test): `J(z + hδ) − J(z) − h⟨∇J, δ⟩` must decrease with order 2 when `h`
-   is halved. It covers `DJform`, the adjoint state and the maps x → θ at once.
+   is halved. It covers the partial derivatives of the functional (`dJdu`, `dJdθ`), the adjoint and the `sensitivity` of the state, and the maps x → θ at once.
 2. **Design chain of each physical field** (Taylor test of `½∫θ²` through the maps alone, for every `PhysicalFields`
-   reached from the functionals): if it passes and the gradient of a functional fails, the error is in `DJform` or
+   reached from the functionals): if it passes and the gradient of a functional fails, the error is in the derivatives of the functional or of the state or
    in the adjoint, not in the maps.
 3. **Symmetry of each filter**: `cᵀA⁻¹b = bᵀA⁻¹c` for two random vectors, with the user's solve.
 4. **Dependencies**: at a perturbed design, value and gradient computed as usual are compared with the ones obtained
@@ -71,7 +71,7 @@ consistent. The functionals must share the same optimisation variables `z`. Four
    matrix that reads the design with `depends = ()`, or a state listed in `depends` that under-declares its own
    dependencies). The check only changes the design: a `Parameter` read by a model but not declared is not detected
    (it does not change while the check runs). An object that no declared dependency leads to cannot be checked: its
-   stale values go unnoticed when `DJform` treats it as fixed too.
+   stale values go unnoticed when the derivatives treat it as fixed too.
 
 Optionally, `tangents = (S => (res, jac), …)` adds a Taylor test of the tangent `jac(u, du, v)` against the residual
 `res(u, v)` of the state `S` at its current solution, in a random direction of its free values (the user's forms in
@@ -94,7 +94,7 @@ Keyword arguments:
 - `rtol = 1e-8`: relative tolerance of the symmetry and dependency checks (increase it with iterative solvers or
   Newton tolerances).
 
-Cost: each forward state is solved at most `steps + 4` times and each adjoint state at most 4 times (states shared
+Cost: each forward state is solved at most `steps + 4` times and each adjoint at most 4 times (states shared
 by several functionals are solved once per design); each filter is solved once per step for checks 1 and 2, twice
 for check 3, and again whenever a gradient is pulled back. Use small meshes for nonlinear problems.
 

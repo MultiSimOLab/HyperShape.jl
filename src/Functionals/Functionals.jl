@@ -34,8 +34,8 @@ With a state (first form), `S` a [`StateOperator`](@ref) built with an
 - `dJdθ`: the partial derivative with respect to the physical fields, `(u, θ) -> (δ -> ∫(… * δ)dΩ)`, or a named tuple
   of such forms (`(ρ = δ -> …, E = δ -> …)`) when θ has several fields; `nothing` (default) when `J` does not read θ
   directly.
-- `fields`: the physical fields θ. By default the only [`PhysicalFields`](@ref) among the dependencies of `S`;
-  give it when `S` depends on none or on several.
+- `fields`: the physical fields θ, the only [`PhysicalFields`](@ref) among the dependencies of `S` (deduced; a state
+  that depends on several is not supported yet).
 
 The derivative with respect to θ is `dJdθ − pᵀ ∂R/∂θ`, with `p` the adjoint of `S` seeded by `dJdu`: the signs are
 put by HyperShape. A state that depends on another state is not supported yet (an error here): the sensitivity
@@ -126,9 +126,15 @@ function Functional(J, S::StateOperator; dJdu = _Unused(), dJdθ = nothing, scal
   any(d -> d isa StateOperator, S.depends) && throw(ArgumentError(
     "Functional: the state depends on another state; the sensitivity through it is not supported yet " *
     "(chains of states come in a later version)"))
+  count(d -> d isa PhysicalFields, S.depends) <= 1 || throw(ArgumentError(
+    "Functional: the state depends on several PhysicalFields; the sensitivity through all of them is not supported yet"))
   mode, value = _scale(scale)
   θ = _fields(S, fields)
-  dJdu isa SelfAdjoint && _check_homogeneous(S)
+  if dJdu isa SelfAdjoint
+    HyperShape_get_model(S) isa HyperFEM.StaticLinearModel || throw(ArgumentError(
+      "Functional: dJdu = SelfAdjoint() needs a linear state (a StaticLinearModel): p = u is not the adjoint of a nonlinear problem"))
+    _check_homogeneous(S)
+  end
   Functional(J, dJdθ, dJdu, S, θ, mode, Ref(value), [-1.0, -1.0, -1.0, NaN], false, _parameters(parameters))
 end
 
@@ -238,7 +244,7 @@ end
 _key(F::Functional) = objectid(F.scale)
 
 _seed!(θ, F::Functional{FJ,FD,FU,Nothing}, w, ctx) where {FJ,FD,FU} =
-  add_forms!(θ, _as_named(F.DJ(θ), θ), w, ctx; key = _key(F))
+  iszero(w) ? nothing : (add_forms!(θ, _as_named(F.DJ(θ), θ), w, ctx; key = _key(F)); nothing)
 
 function _seed!(θ, F::Functional, w, ctx)
   S = F.S
@@ -249,7 +255,7 @@ function _seed!(θ, F::Functional, w, ctx)
   else
     add_seed!(S, F.dJdu(u), w, (_key(F), :dJdu))
   end
-  F.DJ === nothing || add_forms!(θ, _as_named(F.DJ(u, θ), θ), w, ctx; key = _key(F))
+  F.DJ === nothing || iszero(w) || add_forms!(θ, _as_named(F.DJ(u, θ), θ), w, ctx; key = _key(F))
   nothing
 end
 
@@ -299,22 +305,31 @@ function functional_gradient!(gz, Fs::Tuple{Vararg{Functional}}, w, ctx)
   isempty(Fs) && throw(ArgumentError("functional_gradient!: no functionals"))
   length(w) == length(Fs) || throw(DimensionMismatch("functional_gradient!: $(length(w)) weights for $(length(Fs)) functionals"))
   θ = first(Fs).θ
-  all(F -> F.θ === θ, Fs) || throw(ArgumentError("functional_gradient!: the functionals must share the physical fields θ"))
+  _all_share(Fs, θ) || throw(ArgumentError("functional_gradient!: the functionals must share the physical fields θ"))
   update_fields!(θ, ctx)
-  all(F -> _converged!(F, ctx), Fs) || return fill!(gz, NaN)
-  for F in Fs
-    isnan(F.scale[]) && _set_scale!(F, _raw_value(F, ctx))
-  end
+  _all_converged!(Fs, ctx) || return fill!(gz, NaN)
+  _set_scales!(Fs, ctx)
   reset_sink!(θ)
-  foreach(_reset_state!, Fs)
-  for (F, wi) in zip(Fs, w)
-    _seed!(θ, F, Float64(wi) / F.scale[], ctx)
-  end
-  for F in Fs
-    _pull_back!(θ, F, ctx)
-  end
+  _reset_states!(Fs)
+  _seed_all!(θ, Fs, w, 1, ctx)
+  _pull_back_all!(θ, Fs, ctx)
   finish_sink!(gz, θ, ctx)
 end
+
+# loops over the (heterogeneous) tuple of functionals, unrolled
+_all_share(::Tuple{}, θ) = true
+_all_share(t::Tuple, θ) = first(t).θ === θ && _all_share(Base.tail(t), θ)
+_all_converged!(::Tuple{}, ctx) = true
+_all_converged!(t::Tuple, ctx) = _converged!(first(t), ctx) & _all_converged!(Base.tail(t), ctx)
+_set_scales!(::Tuple{}, ctx) = nothing
+_set_scales!(t::Tuple, ctx) = (F = first(t); isnan(F.scale[]) && _set_scale!(F, _raw_value(F, ctx)); _set_scales!(Base.tail(t), ctx))
+_reset_states!(::Tuple{}) = nothing
+_reset_states!(t::Tuple) = (_reset_state!(first(t)); _reset_states!(Base.tail(t)))
+_seed_all!(θ, ::Tuple{}, w, i, ctx) = nothing
+_seed_all!(θ, t::Tuple, w, i, ctx) =
+  (F = first(t); _seed!(θ, F, Float64(w[i]) / F.scale[], ctx); _seed_all!(θ, Base.tail(t), w, i + 1, ctx))
+_pull_back_all!(θ, ::Tuple{}, ctx) = nothing
+_pull_back_all!(θ, t::Tuple, ctx) = (_pull_back!(θ, first(t), ctx); _pull_back_all!(θ, Base.tail(t), ctx))
 
 # the next value is computed again (not taken from the cache)
 invalidate!(F::Functional) = (F.cache[1] = -1.0; F)

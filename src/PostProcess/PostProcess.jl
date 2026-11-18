@@ -152,8 +152,7 @@ accepted design:
 - at the end of the run (converged, stalled or `maxiter`) and when it fails (at the last accepted design, if the
   forward problem can still be solved there), when that iteration has not been written yet.
 
-`ctx` is the [`OptContext`](@ref) (phase `:optimization`, `ctx.iteration` the iteration of the design). The adjoint
-state is still the one of the previous design. Nothing is called during [`check_consistency`](@ref
+`ctx` is the [`OptContext`](@ref) (phase `:optimization`, `ctx.iteration` the iteration of the design). Nothing is called during [`check_consistency`](@ref
 HyperShape.Checks.check_consistency) or for the trial designs of a line search. An error thrown by the driver stops the
 optimisation, except in the call after a failure (then it is reported and the failure is thrown).
 

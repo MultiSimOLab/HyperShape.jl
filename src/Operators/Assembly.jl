@@ -37,7 +37,8 @@ end
 
 function form_assembler(backend::Symbol, U, V)
   _check_backend(backend)
-  backend === :lazy && return LazyAssembler(SparseMatrixAssembler(U, V), V)
+  # multi-field test spaces (the adjoint of a coupled state) are assembled by Gridap
+  (backend === :lazy || V isa MultiFieldFESpace) && return LazyAssembler(SparseMatrixAssembler(U, V), V)
   CompiledAssembler(U, V, Measure(get_triangulation(V), 1), zeros(num_free_dofs(U)), Any[], Any[])
 end
 
@@ -52,7 +53,7 @@ function assemble_form!(b, a::LazyAssembler, L, key)
 end
 
 _as_residual(L) = (u, v) -> L(v)
-_zero_tangent(dΩ) = (u, du, v) -> ∫(0.0 * du * v)dΩ
+_zero_tangent(dΩ) = (u, du, v) -> ∫(0.0 * (du ⊙ v))dΩ      # ⊙: scalar and vector-valued fields
 
 function assemble_form!(b, a::CompiledAssembler, L, key)
   res, jac = _as_residual(L), _zero_tangent(a.dΩ)

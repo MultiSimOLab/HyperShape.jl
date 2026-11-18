@@ -18,7 +18,8 @@ struct SameMatrix end
 Value of `dJdu` in a [`Functional`](@ref HyperShape.Functionals.Functional) whose derivative with respect to the state
 is the load of the state (`∂J/∂u = ℓ`, for example the compliance `J = ℓ(u)` of a linear and symmetric problem): the
 adjoint is the state itself, `p = u`, and no adjoint is solved. Valid only when the Dirichlet values of the state are
-zero (checked).
+zero (checked) and on a `StaticLinearModel` (checked). The term `− pᵀ ∂R/∂θ` of the state is already the whole
+derivative of the compliance: do not add it again in `dJdθ`.
 """
 struct SelfAdjoint end
 
@@ -34,7 +35,8 @@ with respect to the physical fields. HyperShape puts the signs; the user writes 
   solver, usually `StaticLinearModel((p, w) -> jac(uh, w, p), U0, V0, bc0; ls)` (test and trial swapped, evaluated at
   the forward state, on a space with homogeneous Dirichlet values), or [`SameMatrix`](@ref)`()` for a linear and
   symmetric forward state (reuses its factorisation).
-- `sensitivity`: `p -> (δ -> ∫(…)dΩ)`, the linear form `pᵀ ∂R/∂θ [δ]` (without sign), or a named tuple of such forms
+- `sensitivity`: `p -> (δ -> ∫(…)dΩ)`, the linear form `pᵀ ∂R/∂θ [δ]` (without sign; for a `StaticLinearModel`
+  `R(u)[v] = a(u, v) − l(v)`, so a load that depends on θ contributes `− ∂l/∂θ`), or a named tuple of such forms
   (`p -> (ρ = δ -> …, E = δ -> …)`) when θ has several fields. Written once per state, it serves every functional
   that reads the state.
 - `solve` (only with a model): function `(model, b, ctx, stale) -> x` of a [`LinearOperator`](@ref); default
@@ -84,6 +86,7 @@ mutable struct AdjointCache{O,P,A,SE}
   has_rhs::Bool               # a seed other than a self-adjoint one was added
   self_weight::Float64        # Σ of the weights of the self-adjoint seeds (p = self_weight · u + K⁻ᵀ rhs)
   nsolves::Int                # adjoint solves done
+  seen_state::Int             # version of the forward state at the last adjoint solve
 end
 
 _adjoint_cache(::Nothing, model, deps) = nothing
@@ -102,12 +105,14 @@ function _adjoint_cache(a::AdjointProblem, model, deps)
     n = num_free_dofs(V)
     num_free_dofs(U) == n ||
       throw(DimensionMismatch("AdjointProblem: the adjoint model has $(num_free_dofs(U)) unknowns and $n equations"))
+    nu = num_free_dofs(first(HyperFEM.get_spaces(model)))
+    n == nu || throw(DimensionMismatch("AdjointProblem: the adjoint model has $n unknowns and the state $nu"))
     p = FEFunction(U, zeros(n))
     solve = a.solve === nothing ? default_solve(LinearOperator, a.op) : a.solve
     op = LinearOperator(a.op, _unique_deps((deps..., a.depends...)); solve)
     invalidate!(op)          # the matrix of the adjoint model was assembled before the state was solved
   end
-  AdjointCache(op, p, zeros(n), zeros(n), form_assembler(a.backend, U, V), a.sensitivity, false, 0.0, 0)
+  AdjointCache(op, p, zeros(n), zeros(n), form_assembler(a.backend, U, V), a.sensitivity, false, 0.0, 0, -1)
 end
 
 """
@@ -144,6 +149,7 @@ Adds `w ⋅ form` to the right-hand side of the adjoint of `S`; `form` is the li
 on the test space of the adjoint (`key` identifies it for the compiled assembler).
 """
 function add_seed!(S, form, w::Float64, key)
+  iszero(w) && return S                    # nothing to add (and no adjoint solve for it)
   c = S.adjoint
   assemble_form!(c.tmp, c.assem, form, key)
   c.rhs .+= w .* c.tmp
@@ -157,11 +163,20 @@ end
 Adds `w ⋅ ∂J/∂u` for a [`SelfAdjoint`](@ref) functional: its contribution to the adjoint is `w ⋅ u`, without a solve.
 """
 function add_self_seed!(S, w::Float64)
+  iszero(w) && return S
   S.adjoint.self_weight += w
   S
 end
 
-_solve_adjoint!(pv, op::LinearOperator, S, rhs, ctx) = solve_linear!(pv, op, rhs, ctx)
+function _solve_adjoint!(pv, op::LinearOperator, S, rhs, ctx)
+  # the adjoint matrix is evaluated at the state: assembled again whenever the state was solved again, also when no
+  # declared dependency changed (invalidate!, a nonlinear solve restarted from scratch)
+  c = S.adjoint
+  c.seen_state == S.version || invalidate!(op)
+  solve_linear!(pv, op, rhs, ctx)
+  c.seen_state = S.version
+  pv
+end
 function _solve_adjoint!(pv, ::SameMatrix, S, rhs, ctx)
   copyto!(pv, rhs)
   S.model(pv; Assembly = false)            # the factorisation of the forward model; writes the solution into pv

@@ -238,7 +238,7 @@ function gradient!(dF, o::FunctionalOracle, v)
   set_context!(o.ctx, :phase, :optimization)
   functional_gradient!(dF, o.J, o.ctx)
   all(isfinite, dF) ||
-    throw(OptimizationFailure("the gradient of the objective is not finite (did the adjoint state converge?)"))
+    throw(OptimizationFailure("the gradient of the objective is not finite (did the adjoint solve give a finite solution?)"))
   copyto!(o.snap_z, v)
   copyto!(o.snap_dF, dF)
   o.snap_f = functional_value(o.J, o.ctx)       # cached: same design

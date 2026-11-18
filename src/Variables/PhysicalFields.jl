@@ -183,7 +183,7 @@ the forms for the compiled backend (see [`design_gradient!`](@ref)).
 function add_forms!(θ::PhysicalFields, forms::NamedTuple, w::Real, ctx; key = 0)
   names, sources, chains = getfield(θ, :names), getfield(θ, :sources), getfield(θ, :chains)
   for k in keys(forms)
-    k in names || throw(ArgumentError("design_gradient!: no physical field named $k; available: $(join(names, ", "))"))
+    k in names || throw(ArgumentError("derivative with respect to θ: no physical field named $k; available: $(join(names, ", "))"))
   end
   for (j, name) in enumerate(names)
     haskey(forms, name) || continue
@@ -203,7 +203,7 @@ with something accumulated), adds them over the physical fields that share a des
 function finish_sink!(gz, θ::PhysicalFields, ctx)
   x = getfield(θ, :x)
   z = get_optvariables(x)
-  length(gz) == length(z) || throw(DimensionMismatch("design_gradient!: gz has $(length(gz)) values, z has $(length(z))"))
+  length(gz) == length(z) || throw(DimensionMismatch("gradient: gz has $(length(gz)) values, z has $(length(z))"))
   sources, chains, gx = getfield(θ, :sources), getfield(θ, :chains), getfield(θ, :gx)
   for (j, chain) in enumerate(chains)
     _flush_chain!(θ, sources[j], chain, ctx, (:flush, j))
