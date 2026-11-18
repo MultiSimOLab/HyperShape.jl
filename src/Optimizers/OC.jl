@@ -96,8 +96,9 @@ mutable struct OCState{V}
 end
 
 function init(opt::OC, z, oracle)
-  has_constraint(oracle) || throw(ArgumentError("OC needs a constraint (aᵀz ≤ V or g(z) ≤ 0)"))
-  c = linear_constraint(oracle)
+  num_constraints(oracle) == 1 ||
+    throw(ArgumentError("OC needs exactly one constraint (aᵀz ≤ V or g(z) ≤ 0); the oracle has $(num_constraints(oracle))"))
+  c = linear_constraint(oracle, 1)
   c === nothing || minimum(c[1]) > 0 || throw(ArgumentError("OC needs a linear constraint with a > 0"))
   v() = similar(z)
   s = OCState(opt.move, false, v(), copy(z), v(), 0.0, v(), v(), v(), 0, v(), v(), v())
@@ -117,7 +118,7 @@ function reset!(opt::OC, s::OCState)
 end
 # memory for a checkpoint: [k > 0, shift, m, dprev, z_old] (adaptive limits and correction shift)
 function memory(::OC, s::OCState, z)
-  vcat(Float64(s.k > 0), s.shift, collect(s.m), collect(s.dprev), collect(s.z_old))
+  vcat(Float64(s.k > 0), s.shift, _gather(s.m), _gather(s.dprev), _gather(s.z_old))
 end
 
 function restore_memory!(::OC, s::OCState, z, v)
@@ -206,7 +207,7 @@ function _oc_step!(opt::OC, s::OCState, z, oracle, m)
   f = objective(oracle, z)
   isfinite(f) || return StepInfo(false, f, NaN, NaN, 0.0, _step_size(m), 0.0, 1, NaN, NaN)
   gradient!(s.dF, oracle, z)
-  c = linear_constraint(oracle)
+  c = linear_constraint(oracle, 1)
   c === nothing && return _oc_step_nonlinear!(opt, s, z, oracle, f, m)
   a, V = c
   lb, ub = bounds(oracle)
@@ -236,9 +237,9 @@ function _next_shift(sh, G, lo, hi, prev)
 end
 
 function _oc_step_nonlinear!(opt::OC, s::OCState, z, oracle, f, m)
-  g = constraint(oracle, z)
+  g = constraint(oracle, 1, z)
   isfinite(g) || return StepInfo(false, f, NaN, NaN, 0.0, _step_size(m), Inf, 1, NaN, NaN)
-  a = constraint_gradient!(s.a, oracle, z)
+  a = constraint_gradient!(s.a, oracle, 1, z)
   amax = maximum(a)
   amax > 0 || throw(ArgumentError("OC: the derivative of the constraint has no positive entry"))
   # entries with a zero derivative (a saturated projection, or a block the constraint does not depend on) cost no
@@ -253,7 +254,7 @@ function _oc_step_nonlinear!(opt::OC, s::OCState, z, oracle, f, m)
   Vlin = dot(a, zo) - g
   sh = s.shift
   _, λ, reached, active = _oc_bisect!(z, zo, B, a, lb, ub, Vlin - sh, m, η, tol, opt.max_bisections)
-  G = constraint(oracle, z)
+  G = constraint(oracle, 1, z)
   lo, hi, prev = (-Inf, NaN), (Inf, NaN), (NaN, NaN)
   for _ in 1:opt.max_corrections
     (isfinite(G) && abs(G) > opt.constraint_tol) || break
@@ -264,7 +265,7 @@ function _oc_step_nonlinear!(opt::OC, s::OCState, z, oracle, f, m)
     prev = (sh, G)
     sh = sn
     _, λ, reached, active = _oc_bisect!(z, zo, B, a, lb, ub, Vlin - sh, m, η, tol, opt.max_bisections)
-    G = constraint(oracle, z)
+    G = constraint(oracle, 1, z)
   end
   s.shift = isfinite(sh) ? sh : 0.0
   @. B = z - zo

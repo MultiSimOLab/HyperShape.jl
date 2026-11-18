@@ -188,6 +188,41 @@ struct _NoSpaces <: HyperFEM.ComputationalModels.ComputationalModel end   # a mo
     @test all(r -> 1.9 < r < 2.1, taylor_rates(() -> functional_value(J, nothing), gz, z, direction(length(z))))
   end
 
+  @testset "A tuple of one functional is the functional" begin
+    for scale in (3.7, :initial)
+      p = state_problem()
+      z = p.z
+      B = p.boundary(; scale)
+      g1 = functional_gradient!(zeros(length(z)), B, nothing)
+      g2 = functional_gradient!(zeros(length(z)), (B,), [1.0], nothing)
+      @test g1 == g2                                       # bit for bit: the scale rule divides by the same s
+      @test functional_gradient!(zeros(length(z)), (B,), [2.5], nothing) ≈ 2.5 .* g1 rtol = 1e-14
+    end
+  end
+
+  @testset "Constraint: bounds, :bound scale and errors" begin
+    p = state_problem()
+    (; θ, dΩ) = p
+    mk(scale) = Functional(θ -> ∫(θ.ρ)dΩ, θ; dJdθ = θ -> (δ -> ∫(δ)dΩ), scale)
+    c = Constraint(mk(1.0))
+    @test (c.lo, c.hi) == (-Inf, 0.0)                     # a functional alone: F ≤ 0
+    @test Constraint(c) === c
+    c = Constraint(mk(1.0); min = 0.2)
+    @test (c.lo, c.hi) == (0.2, Inf) && HyperShape.Functionals._reference(c) == 0.2
+    c = Constraint(mk(1.0); min = -1, max = 3)
+    @test (c.lo, c.hi) == (-1.0, 3.0) && HyperShape.Functionals._reference(c) == 3.0
+    c = Constraint(mk(1.0); equal = 0.5)
+    @test c.lo == c.hi == 0.5
+    cb = Constraint(mk(:bound); min = -4.0, max = 2.0)
+    @test HyperShape.Functionals.get_scale(cb.F) == 4.0   # largest finite bound in absolute value
+    @test_throws ArgumentError Constraint(mk(:bound); max = 0.0)
+    @test_throws ArgumentError Constraint(mk(1.0); max = 1.0, min = 2.0)
+    @test_throws ArgumentError Constraint(mk(1.0); equal = 1.0, max = 2.0)
+    @test_throws ArgumentError Constraint(mk(1.0); max = NaN)
+    @test_throws ArgumentError Constraint(mk(1.0); min = Inf)
+    @test_throws ArgumentError functional_value(mk(:bound), nothing)   # :bound outside a Constraint
+  end
+
   @testset "Several functionals in one reverse sweep" begin
     for vb in (:compiled, :lazy)
       p = state_problem(; vector_backend = vb)
@@ -209,7 +244,9 @@ struct _NoSpaces <: HyperFEM.ComputationalModels.ComputationalModel end   # a mo
       @test_throws DimensionMismatch functional_gradient!(zeros(length(z)), Fs, [1.0], nothing)
       θ2 = PhysicalFields(p.x; ρ = Identity())
       V2 = Functional(θ -> ∫(θ.ρ)dΩ, θ2; dJdθ = θ -> (δ -> ∫(δ)dΩ), scale = 1.0)
-      @test_throws ArgumentError functional_gradient!(zeros(length(z)), (C, V2), [1.0, 1.0], nothing)
+      # functionals on different physical fields of the same z: one sweep per group, added
+      gC, gV2 = functional_gradient!(zeros(length(z)), C, nothing), functional_gradient!(zeros(length(z)), V2, nothing)
+      @test functional_gradient!(zeros(length(z)), (C, V2, Vol), [1.0, -2.0, 0.5], nothing) ≈ gC .- 2 .* gV2 .+ 0.5 .* gs[4] rtol = 1e-10
     end
   end
 

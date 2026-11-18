@@ -16,7 +16,18 @@ using ..Operators: get_model as HyperShape_get_model
 using ..Variables: PhysicalFields, DesignFields, Identity, update_fields!, design_gradient!, get_designfields,
                    get_optvariables, is_linear_field, reset_sink!, add_forms!, finish_sink!
 
-export Functional, Volume, functional_value, functional_gradient!
+export AbstractFunctional, Functional, Constraint, Volume, functional_value, functional_gradient!
+
+"""
+    AbstractFunctional
+
+Supertype of the objectives and constraints. What the optimisation oracle uses of a subtype `F`:
+[`functional_value`](@ref), [`functional_gradient!`](@ref) (alone and in a weighted tuple), `get_scale(F)`,
+`is_design_only(F)` (no state is solved for it), `is_linear(F)` (declared affine in z), `physical_fields(F)`,
+`responses(F)` (the states it reads) and `invalidate!(F)`. The internals of the reverse sweep (`_seed!`,
+`_pull_back!`) will change with chains of states.
+"""
+abstract type AbstractFunctional end
 
 """
     Functional(J, S::StateOperator; dJdu, dJdθ = nothing, scale, fields = nothing, parameters = ())
@@ -59,13 +70,13 @@ functional, one adjoint solve of the state (a back substitution after the first 
 If a state does not converge, [`functional_value`](@ref) returns `NaN` and [`functional_gradient!`](@ref) fills the
 gradient with `NaN` (the optimisers treat it as a failed trial).
 """
-struct Functional{FJ,FD,FU,S,T<:PhysicalFields,P<:Tuple}
+struct Functional{FJ,FD,FU,S,T<:PhysicalFields,P<:Tuple} <: AbstractFunctional
   J::FJ
   DJ::FD                        # design only: dJdθ(θ); with a state: dJdθ(u, θ) or nothing
   dJdu::FU                      # with a state: u -> (w -> ∫…) or SelfAdjoint(); nothing for design only
   S::S
   θ::T
-  scale_mode::Symbol            # :fixed or :initial
+  scale_mode::Symbol            # :fixed, :initial or :bound (set by Constraint)
   scale::Base.RefValue{Float64} # NaN while :initial is not set
   cache::Vector{Float64}        # [version of θ, version of S, version of the parameters, raw value] of the last evaluation
   linear::Bool                  # design-only and affine in z (declared; checked when used as a constraint)
@@ -87,13 +98,19 @@ Base.show(io::IO, F::Functional) =
         F.scale[], ")")
 
 function _scale(scale)
-  if scale === :initial
-    return :initial, NaN
+  if scale === :initial || scale === :bound
+    return scale, NaN
   elseif scale isa Real && isfinite(scale) && scale > 0
     return :fixed, Float64(scale)
   end
-  throw(ArgumentError("Functional: scale must be a positive number, :initial or 1.0, got $scale"))
+  throw(ArgumentError("Functional: scale must be a positive number, :initial, :bound (in a Constraint) or 1.0, got $scale"))
 end
+
+get_scale(F::Functional) = F.scale[]
+is_design_only(F::Functional) = F.S === nothing
+is_linear(F::Functional) = F.linear
+physical_fields(F::Functional) = F.θ
+responses(F::Functional) = F.S === nothing ? () : (F.S,)
 
 _depends_on(S::StateOperator, obj) = any(d -> d === obj, S.depends)
 
@@ -204,6 +221,8 @@ function _raw_value(F::Functional, ctx)::Float64
 end
 
 function _set_scale!(F::Functional, v)
+  F.scale_mode === :bound && isnan(F.scale[]) &&
+    throw(ArgumentError("Functional: scale = :bound takes the scale from the bounds of a Constraint; use it inside Constraint(F; max, min, equal)"))
   if F.scale_mode === :initial && isnan(F.scale[])
     isfinite(v) || return F
     v == 0 && throw(ArgumentError("Functional: scale = :initial with a zero first value; give the scale explicitly"))
@@ -302,23 +321,42 @@ end
 """
     functional_gradient!(gz, Fs::Tuple, w, ctx) -> gz
 
-Derivative with respect to z of `Σᵢ wᵢ Fᵢ` (each `Fᵢ` scaled) in one reverse sweep: every state is solved once
-whatever the number of functionals that read it (one adjoint solve per state, not per functional) and every filter
-is solved once. The functionals must share the physical fields θ. Filled with `NaN` if a state did not converge.
+Derivative with respect to z of `Σᵢ wᵢ Fᵢ` (each `Fᵢ` scaled) in one reverse sweep per set of physical fields θ:
+every state is solved once whatever the number of functionals that read it (one adjoint solve per state, not per
+functional) and every filter is solved once. The seeds are `wᵢ sᵣ/sᵢ` and the result is divided by `sᵣ`, the scale
+of the first functional of the sweep, so that a tuple of one functional gives the same bits as
+`functional_gradient!(gz, F, ctx)`. Functionals on different θ (a `Volume` of the design fields) are summed sweep by
+sweep. Filled with `NaN` if a state did not converge.
 """
-function functional_gradient!(gz, Fs::Tuple{Vararg{Functional}}, w, ctx)
+function functional_gradient!(gz, Fs::Tuple{Vararg{AbstractFunctional}}, w, ctx)
   isempty(Fs) && throw(ArgumentError("functional_gradient!: no functionals"))
   length(w) == length(Fs) || throw(DimensionMismatch("functional_gradient!: $(length(w)) weights for $(length(Fs)) functionals"))
   θ = first(Fs).θ
-  _all_share(Fs, θ) || throw(ArgumentError("functional_gradient!: the functionals must share the physical fields θ"))
+  _all_share(Fs, θ) && return _sweep!(gz, θ, Fs, w, ctx)
+  # several θ: one sweep per θ, added
+  fill!(gz, 0.0)
+  work = similar(gz)
+  θs = unique(F -> objectid(F.θ), collect(Any, Fs))
+  for G in θs
+    idx = [i for i in eachindex(Fs) if Fs[i].θ === G.θ]
+    _sweep!(work, G.θ, Tuple(Fs[idx]), [w[i] for i in idx], ctx)
+    gz .+= work
+  end
+  gz
+end
+
+function _sweep!(gz, θ, Fs, w, ctx)
   update_fields!(θ, ctx)
   _all_converged!(Fs, ctx) || return fill!(gz, NaN)
   _set_scales!(Fs, ctx)
+  sref = first(Fs).scale[]
   reset_sink!(θ)
   _reset_states!(Fs)
-  _seed_all!(θ, Fs, w, 1, ctx)
+  _seed_all!(θ, Fs, w, sref, 1, ctx)
   _pull_back_all!(θ, Fs, ctx)
   finish_sink!(gz, θ, ctx)
+  gz ./= sref
+  gz
 end
 
 # loops over the (heterogeneous) tuple of functionals, unrolled
@@ -330,13 +368,63 @@ _set_scales!(::Tuple{}, ctx) = nothing
 _set_scales!(t::Tuple, ctx) = (F = first(t); isnan(F.scale[]) && _set_scale!(F, _raw_value(F, ctx)); _set_scales!(Base.tail(t), ctx))
 _reset_states!(::Tuple{}) = nothing
 _reset_states!(t::Tuple) = (_reset_state!(first(t)); _reset_states!(Base.tail(t)))
-_seed_all!(θ, ::Tuple{}, w, i, ctx) = nothing
-_seed_all!(θ, t::Tuple, w, i, ctx) =
-  (F = first(t); _seed!(θ, F, Float64(w[i]) / F.scale[], ctx); _seed_all!(θ, Base.tail(t), w, i + 1, ctx))
+_seed_all!(θ, ::Tuple{}, w, sref, i, ctx) = nothing
+_seed_all!(θ, t::Tuple, w, sref, i, ctx) =
+  (F = first(t); _seed!(θ, F, Float64(w[i]) * sref / F.scale[], ctx); _seed_all!(θ, Base.tail(t), w, sref, i + 1, ctx))
 _pull_back_all!(θ, ::Tuple{}, ctx) = nothing
 _pull_back_all!(θ, t::Tuple, ctx) = (_pull_back!(θ, first(t), ctx); _pull_back_all!(θ, Base.tail(t), ctx))
 
 # the next value is computed again (not taken from the cache)
 invalidate!(F::Functional) = (F.cache[1] = -1.0; F)
+
+"""
+    Constraint(F::AbstractFunctional; max = nothing, min = nothing, equal = nothing)
+
+A constraint on the functional `F`, in the units of `F` (before scaling): `F ≤ max`, `F ≥ min`, `min ≤ F ≤ max` or
+`F = equal`. Without bounds, `F ≤ 0`; a functional given alone in the constraints of an [`Optimization`](@ref HyperShape.Methods.Optimization)
+is `Constraint(F; max = 0.0)` (as `Volume`). With `scale = :bound` in `F`, its scale is the largest finite bound in
+absolute value, so the bound is written once:
+
+```julia
+Tip = Functional((u, θ) -> ∫(g ⋅ u)dΓo, S; dJdu = u -> (w -> ∫(g ⋅ w)dΓo), scale = :bound)
+problem = Optimization(objective = C, constraints = (volume = Vol, tip = Constraint(Tip; max = 0.25)))
+```
+
+The optimiser sees `g = (F − r)/s`, with `s` the scale of `F` and `r` the upper bound (the lower one if there is no
+upper), and its bounds `[(min − r)/s, (max − r)/s]`.
+"""
+struct Constraint{F<:AbstractFunctional}
+  F::F
+  lo::Float64
+  hi::Float64
+end
+
+function Constraint(F::AbstractFunctional; max = nothing, min = nothing, equal = nothing)
+  if equal !== nothing
+    (max === nothing && min === nothing) || throw(ArgumentError("Constraint: equal excludes max and min"))
+    lo = hi = Float64(equal)
+  else
+    (max === nothing && min === nothing) && (max = 0.0)        # a functional alone: F ≤ 0
+    lo = min === nothing ? -Inf : Float64(min)
+    hi = max === nothing ? Inf : Float64(max)
+  end
+  (isnan(lo) || isnan(hi) || lo > hi || lo == Inf || hi == -Inf) &&
+    throw(ArgumentError("Constraint: need min ≤ max (finite where given), got min = $lo, max = $hi"))
+  if F isa Functional && F.scale_mode === :bound
+    b = maximum(abs, filter(isfinite, (lo, hi)))
+    b > 0 || throw(ArgumentError("Constraint: scale = :bound with zero bounds; give the scale explicitly"))
+    F.scale[] = b
+  end
+  Constraint(F, lo, hi)
+end
+
+Constraint(c::Constraint) = c
+
+# reference value r subtracted from F (units of F): the upper bound, or the lower one
+_reference(c::Constraint) = isfinite(c.hi) ? c.hi : c.lo
+
+Base.show(io::IO, c::Constraint) =
+  print(io, "Constraint(", c.lo == c.hi ? "= $(c.hi)" : c.lo == -Inf ? "≤ $(c.hi)" : c.hi == Inf ? "≥ $(c.lo)" :
+        "in [$(c.lo), $(c.hi)]", ")")
 
 end

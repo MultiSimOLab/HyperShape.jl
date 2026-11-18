@@ -115,7 +115,9 @@ function _sync!(s::SiMPLState, z, oracle)
   lb, ub = bounds(oracle)
   _to_latent!(s.ψ, z, lb, ub)
   _to_design!(s.z, s.ψ, lb, ub)
-  c = linear_constraint(oracle)
+  num_constraints(oracle) <= 1 ||
+    throw(ArgumentError("SiMPL treats one constraint itself; the oracle has $(num_constraints(oracle))"))
+  c = num_constraints(oracle) == 0 ? nothing : linear_constraint(oracle, 1)
   if c === nothing
     fill!(s.ga, 0)   # a nonlinear constraint sets it at every step
   else
@@ -223,7 +225,8 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
   s.shrunk || (s.scale = 1.0)   # the previous step stood
   s.shrunk = false
   lb, ub = bounds(oracle)
-  c = linear_constraint(oracle)
+  nc = num_constraints(oracle)
+  c = nc == 0 ? nothing : linear_constraint(oracle, 1)
   nev = 0
 
   if !s.have_grad
@@ -240,12 +243,12 @@ function step!(opt::SiMPL, s::SiMPLState, z, oracle, ctx)
   f = s.f
 
   # nonlinear constraint: linearised at z (aᵀz ≤ Vlin, then corrected per trial)
-  nonlinear = c === nothing && has_constraint(oracle)
+  nonlinear = c === nothing && nc == 1
   gk, Vlin, restoration = NaN, NaN, false
   if nonlinear
-    gk = constraint(oracle, s.z)
+    gk = constraint(oracle, 1, s.z)
     isfinite(gk) || return StepInfo(false, f, NaN, NaN, 0.0, 0.0, Inf, nev, NaN, NaN)
-    constraint_gradient!(s.a, oracle, s.z)
+    constraint_gradient!(s.a, oracle, 1, s.z)
     amax = maximum(s.a)
     amax > 0 || throw(ArgumentError("SiMPL: the derivative of the constraint has no positive entry"))
     @. s.a = max(s.a, 1e-12 * amax)
@@ -355,7 +358,7 @@ function _corrected_shift!(opt, s, oracle, Vlin, alb, α, lb, ub)
   cap(x) = isfinite(x) ? min(x, smax) : smax
   sh = cap(s.shift)
   μ = _volume_shift!(opt, s, s.a, Vlin - sh, α, lb, ub)
-  G = constraint(oracle, s.z_trial)
+  G = constraint(oracle, 1, s.z_trial)
   lo, hi, prev = (-Inf, NaN), (Inf, NaN), (NaN, NaN)
   for _ in 1:opt.max_corrections
     isfinite(G) || break
@@ -367,7 +370,7 @@ function _corrected_shift!(opt, s, oracle, Vlin, alb, α, lb, ub)
     prev = (sh, t)
     sh = sn
     μ = _volume_shift!(opt, s, s.a, Vlin - sh, α, lb, ub)
-    G = constraint(oracle, s.z_trial)
+    G = constraint(oracle, 1, s.z_trial)
   end
   s.shift = isfinite(sh) ? sh : 0.0
   μ, G
@@ -379,3 +382,7 @@ function _bregman(oracle, s, lb, ub)
                            _σ(-s.ψ_trial) * (_logσ(-s.ψ_trial) - _logσ(-s.ψ)))
   inner(oracle, s.one, s.work)
 end
+
+# OC and SiMPL treat one inequality g ≤ 0 that solves no state (each correction of the step evaluates it)
+handles(::Union{OC,SiMPL}, c::ConstraintInfo) = is_upper(c) && c.hi == 0 && c.design_only && !c.field
+max_native(::Union{OC,SiMPL}) = 1

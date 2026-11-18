@@ -15,11 +15,13 @@ const _NS = HyperShape.Optimizers
 _NS.init(::NoStatOpt, z, oracle) = _NS.init(SiMPL(), z, oracle)
 function _NS.step!(::NoStatOpt, state, z, oracle, ctx)
   i = _NS.step!(SiMPL(), state, z, oracle, ctx)
-  _NS.StepInfo(i.accepted, i.f, i.f_new, i.kkt, i.change, i.step, i.violation, i.evaluations, i.multiplier, NaN)
+  _NS.StepInfo(i.accepted, i.f, i.f_new, i.kkt, i.change, i.step, _NS.violation(i), i.evaluations, i.multipliers[1], NaN)
 end
 _NS.shrink!(::NoStatOpt, state, f) = _NS.shrink!(SiMPL(), state, f)
 _NS.reset!(::NoStatOpt, state) = _NS.reset!(SiMPL(), state)
 _NS.constraint_tol(::NoStatOpt) = _NS.constraint_tol(SiMPL())
+_NS.handles(::NoStatOpt, c::_NS.ConstraintInfo) = _NS.handles(SiMPL(), c)     # a third-party optimiser declares them
+_NS.max_native(::NoStatOpt) = 1
 
 # a monitor of the user
 struct _CountMonitor
@@ -71,15 +73,73 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
 
 @testset "Methods" begin
 
+  @testset "Several constraints: oracle and the check of the optimiser" begin
+    q = compliance_problem()
+    (; z, dΩ, θ) = q
+    vol = sum(∫(1.0)dΩ)
+    Vraw = Functional(θ -> sum(∫(θ.ρ)dΩ), q.θv; dJdθ = θ -> (δ -> ∫(δ)dΩ), scale = :bound, linear = true)
+    B = q.boundary(scale = :initial)
+    Vp = Functional(θ -> sum(∫(θ.ρ)dΩ), θ; dJdθ = θ -> (δ -> ∫(δ)dΩ), scale = 2.0)
+    pb = Optimization(z; objective = q.C,
+                      constraints = (volume = q.Vol, floor = Constraint(Vraw; min = 0.1vol), tip = Constraint(B; max = 1e3),
+                                     band = Constraint(Vp; min = 0.1vol, max = 0.9vol)))
+    o = FunctionalOracle(pb, Euclidean())
+    @test HyperShape.Optimizers.num_constraints(o) == 4
+    foreach(i -> HyperShape.Optimizers.linear_constraint(o, i) === nothing &&
+                 HyperShape.Methods._is_linear(o, i) && _setup_constraint!(o, i, pb.ctx), 1:4)
+    zk = o.zk
+    copyto!(zk, get_values(z))
+    infos = [HyperShape.Optimizers.constraint_info(o, i) for i in 1:4]
+    @test infos[1].lo == -Inf && infos[1].hi == 0 && infos[1].linear && infos[1].design_only
+    @test infos[2].hi == Inf && infos[2].lo == 0 && infos[2].linear          # g = (F − min)/s ≥ 0
+    @test !infos[3].design_only && !infos[3].linear && infos[3].hi == 0
+    @test infos[4].lo ≈ -0.8vol / 2.0 && infos[4].hi == 0 && !infos[4].linear
+    f0 = HyperShape.Optimizers.objective(o, zk)
+    gJ = HyperShape.Optimizers.gradient!(zeros(length(zk)), o, zk)
+    gs = map(1:4) do i
+      gi = HyperShape.Optimizers.constraint(o, i, zk)
+      i == 2 && @test gi ≈ (sum(∫(q.θv.ρ)dΩ) - 0.1vol) / (0.1vol) rtol = 1e-12
+      i == 4 && @test gi ≈ (sum(∫(θ.ρ)dΩ) - 0.9vol) / 2.0 rtol = 1e-12
+      HyperShape.Optimizers.constraint_gradient!(zeros(length(zk)), o, i, zk)
+    end
+    HyperShape.Optimizers.objective(o, zk)
+    w = [0.3, -1.2, 0.0, 2.0]
+    dL = HyperShape.Optimizers.weighted_gradient!(zeros(length(zk)), o, 1.5, w, zk)
+    @test dL ≈ 1.5 .* gJ .+ sum(w[i] .* gs[i] for i in 1:4) rtol = 1e-10
+    # OC and SiMPL treat one constraint g ≤ 0 that solves no state; the rest needs the augmented Lagrangian
+    for opt in (OC(), SiMPL())
+      err = try
+        solve!(pb, DensityMethod(opt; metric = Euclidean()); maxiter = 2, verbose = 0)
+        nothing
+      catch e
+        e
+      end
+      @test err isa ArgumentError && occursin("augmented Lagrangian", err.msg) &&
+            occursin("floor", err.msg) && occursin("tip", err.msg) && !occursin("volume", err.msg)
+    end
+    lower = Optimization(z; objective = q.C, constraints = (floor = Constraint(Vraw; min = 0.1vol),))
+    @test_throws ArgumentError solve!(lower, DensityMethod(OC(); metric = Euclidean()); maxiter = 2, verbose = 0)
+  end
+
+  @testset "Constraint(F; max = 0) is the functional alone (bit for bit)" begin
+    hs = map((c -> c, c -> Constraint(c; max = 0.0))) do wrap
+      q = compliance_problem()
+      pb = Optimization(q.z; objective = q.C, constraints = (volume = wrap(q.Vol),))
+      r = solve!(pb, DensityMethod(OC(); metric = Euclidean()); maxiter = 6, verbose = 0, stop = nothing)
+      (r.history.objective, r.history.constraints.volume, copy(get_values(r.z)))
+    end
+    @test hs[1] == hs[2]
+  end
+
   @testset "Oracle: volume vector, linearity, metric ($(design))" for design in (:P0, :P1)
     q = compliance_problem(; design)
     m = collect(assemble_vector(v -> ∫(v)q.dΩ, q.Vρ))
     o = FunctionalOracle(q.problem, LumpedMass(q.dΩ))
     @test o.metric ≈ m
     design === :P0 && @test all(≈(1 / 64), o.metric)
-    _setup_constraint!(o, q.Vol, q.problem.ctx)
-    @test o.a ≈ m ./ (0.4 * sum(m))
-    @test o.V ≈ 1.0 atol = 1e-12            # (∫ρ - 0.4|Ω|)/(0.4|Ω|) ≤ 0  ⇔  aᵀz ≤ 1
+    _setup_constraint!(o, 1, q.problem.ctx)
+    @test o.a[1] ≈ m ./ (0.4 * sum(m))
+    @test o.V[1] ≈ 1.0 atol = 1e-12            # (∫ρ - 0.4|Ω|)/(0.4|Ω|) ≤ 0  ⇔  aᵀz ≤ 1
     # a projected volume is not linear in z
     Vp = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4, q.θ; dJdθ = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4, linear = true)
     bad = Optimization(q.z; objective = q.C, constraints = (volume = Vp,))
@@ -95,18 +155,21 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     θf = PhysicalFields(q.x; ρ = HelmholtzFilter(q.Sf, q.dΩ))
     Vf = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4 * sum(m), θf; dJdθ = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4 * sum(m), linear = true)
     of = FunctionalOracle(Optimization(q.z; objective = q.C, constraints = (volume = Vf,)), Euclidean())
-    _setup_constraint!(of, Vf, q.problem.ctx)
-    @test of.a ≈ m ./ (0.4 * sum(m)) rtol = 1e-10
+    _setup_constraint!(of, 1, q.problem.ctx)
+    @test of.a[1] ≈ m ./ (0.4 * sum(m)) rtol = 1e-10
   end
 
   @testset "Problem and method arguments" begin
     q = compliance_problem()
-    @test Optimization(q.z; objective = q.C, constraints = (volume = q.Vol,)).constraints === (volume = q.Vol,)
+    c = Optimization(q.z; objective = q.C, constraints = (volume = q.Vol,)).constraints
+    @test keys(c) == (:volume,) && c.volume.F === q.Vol && (c.volume.lo, c.volume.hi) == (-Inf, 0.0)
     @test Optimization(objective = q.C, constraints = (volume = q.Vol,)).z === q.z          # z deduced
     @test_throws ArgumentError Optimization(q.z; objective = q.C, constraints = q.Vol)       # not named
     @test_throws ArgumentError Optimization(q.z; objective = q.C, constraints = (q.Vol,))
-    @test_throws ArgumentError Optimization(q.z; objective = q.C, constraints = (a = q.Vol, b = q.Vol))
-    @test_throws ArgumentError Optimization(q.z; objective = q.C, constraints = (c = q.C,))   # has states
+    # several constraints and constraints with states are problems; whether the optimiser treats them, solve! checks
+    @test length(Optimization(q.z; objective = q.C, constraints = (a = q.Vol, b = q.Vol)).constraints) == 2
+    @test Optimization(q.z; objective = q.C, constraints = (c = q.C,)).constraints.c.F === q.C
+    @test_throws ArgumentError Optimization(q.z; objective = q.C, constraints = (c = 1.0,))   # not a functional
     @test_throws ArgumentError Optimization(q.z; objective = q.C, constraints = (objective = q.Vol,))
     @test occursin("volume", sprint(show, Optimization(objective = q.C, constraints = (volume = q.Vol,))))
     # short show methods (no fields of the mesh in the REPL)
@@ -499,7 +562,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     set_beta!(q.H, 3.0)
     Vp = Functional(θ -> sum(∫(θ.ρ)q.dΩ) - 0.4, q.θ; dJdθ = θ -> (δ -> ∫(δ)q.dΩ), scale = 0.4, linear = true)
     o = FunctionalOracle(Optimization(q.z; objective = q.C, constraints = (volume = Vp,)), Euclidean())
-    @test_throws ArgumentError _setup_constraint!(o, Vp, q.problem.ctx)
+    @test_throws ArgumentError _setup_constraint!(o, 1, q.problem.ctx)
     # a start with values at the bounds: the first solve of SiMPL is the current design
     phases = Tuple{Int,Int,Symbol}[]
     q = compliance_problem(; init = [isodd(i) ? 0.0 : 0.8 for i in 1:64], phases)
@@ -602,7 +665,9 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     a = ones(nz); a[1:5] .= 0
     lb = zeros(nz)
     zk = fill(0.6, nz)
-    t = HyperShape.Methods._make_feasible!((C = q.Vol, a = a, V = 0.4 * sum(a), lb = lb, z = q.z), zk)
+    of = FunctionalOracle(q.problem, Euclidean())
+    of.a[1] = a; of.V[1] = 0.4 * sum(a); of.lb .= lb
+    t = HyperShape.Methods._make_feasible!(of, zk)
     @test t ≈ 0.4 / 0.6 && all(==(0.6), zk[1:5]) && dot(a, zk) ≈ 0.4 * sum(a)
     # printing at level 0 allocates nothing
     h = OptHistory(4, (:β,); constraints = (:volume,), monitors = (:grey,))

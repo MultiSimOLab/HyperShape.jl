@@ -72,6 +72,15 @@ Common supertype of [`LinearOperator`](@ref) and [`StateOperator`](@ref).
 """
 abstract type AbstractOperator end
 
+"""
+    AbstractResponse
+
+Supertype of the operators that a functional can be differentiated through: a forward state with its adjoint
+([`StateOperator`](@ref) with an [`AdjointProblem`](@ref)). Declared for the reverse sweep of chains of states,
+trajectories and eigenproblems (later versions); its contract is not fixed yet.
+"""
+abstract type AbstractResponse <: AbstractOperator end
+
 _as_depends(d::Tuple) = d
 _as_depends(d) = (d,)
 

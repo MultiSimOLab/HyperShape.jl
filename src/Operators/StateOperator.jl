@@ -30,7 +30,7 @@ nonlinear models, the last converged load increment), not a solution. A failed s
 dependency changes; the next solve starts from what the model holds, as decided by the user's `solve`
 (`RestartState` in HyperFEM).
 """
-mutable struct StateOperator{M,F,D,U,A} <: AbstractOperator
+mutable struct StateOperator{M,F,D,U,A} <: AbstractResponse
   model::M
   solve::F
   depends::D

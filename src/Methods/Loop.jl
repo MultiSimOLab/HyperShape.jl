@@ -434,7 +434,7 @@ function _write_checkpoint(c::Checkpoint, problem, opt, state, zk, hist, k, stag
     "blocks" => String.(collect(problem.z.names)),
     "continuation" => String.(collect(cont_names)),
     "scales" => Dict{String,Any}("objective" => problem.objective.scale[],
-                                 (String(n) => F.scale[] for (n, F) in pairs(problem.constraints))...),
+                                 (String(n) => get_scale(c.F) for (n, c) in pairs(problem.constraints))...),
     "z_file" => zfile,
     "history_file" => hfile,
     "optimizer" => string(nameof(typeof(opt))))
@@ -498,14 +498,17 @@ end
 # Solve counters
 
 function _counters(problem)
-  J = problem.objective
-  fwd = J.S === nothing ? () : (J.S,)
-  adj = J.S === nothing ? () : (J.S.adjoint,)
-  filters = Any[]
-  for F in (J, problem.constraints...), op in filter_operators(F.θ)
-    any(o -> o === op, filters) || push!(filters, op)
+  Fs = (problem.objective, (c.F for c in problem.constraints)...)
+  fwd, filters = Any[], Any[]
+  for F in Fs
+    for S in responses(F)
+      any(o -> o === S, fwd) || push!(fwd, S)
+    end
+    for op in filter_operators(physical_fields(F))
+      any(o -> o === op, filters) || push!(filters, op)
+    end
   end
-  fwd, adj, Tuple(filters)
+  Tuple(fwd), Tuple(S.adjoint for S in fwd), Tuple(filters)
 end
 
 _count(ops) = sum(num_solves, ops; init = 0)
@@ -630,11 +633,11 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
   end
   pr = _Printer(io, verbose, schedule, keys(monitors))
   # a nonlinear constraint is met to the tolerance of the optimiser: above it, the value is shown in red
-  any(c -> !c.linear, problem.constraints) && (pr.red = min(_RED_CONSTRAINT, constraint_tol(opt)))
+  any(c -> !is_linear(c.F), problem.constraints) && (pr.red = min(_RED_CONSTRAINT, constraint_tol(opt)))
   lb, ub = get_bounds(z)
   (all(isfinite, lb) && all(isfinite, ub)) || throw(ArgumentError("DensityMethod: the bounds of z must be finite"))
   cont_names = schedule === nothing ? () : schedule.names
-  Fs = (problem.objective, problem.constraints...)
+  Fs = (problem.objective, (c.F for c in problem.constraints)...)
 
   k0, stage, stage_iters = 0, schedule === nothing ? 0 : 1, 0
   cnames = keys(problem.constraints)
@@ -675,7 +678,10 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
   oracle = FunctionalOracle(problem, method.metric)
   ops = _counters(problem)
   cstart = map(_count, ops)
-  _is_linear(oracle) && _setup_constraint!(oracle, only(problem.constraints), ctx)
+  _check_native(oracle, opt, cnames)
+  for i in 1:num_constraints(oracle)
+    _is_linear(oracle, i) && _setup_constraint!(oracle, i, ctx)
+  end
   set_context!(ctx, :phase, :optimization)
   zk = oracle.zk
   copyto!(zk, get_values(z))
@@ -751,13 +757,27 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
   end
 end
 
+# The constraints the optimiser does not treat itself (see `handles`) need the augmented Lagrangian (next version)
+function _check_native(o::FunctionalOracle, opt, names)
+  infos = [constraint_info(o, i) for i in 1:num_constraints(o)]
+  native = Int[]
+  for (i, c) in enumerate(infos)
+    length(native) < max_native(opt) && handles(opt, c) && push!(native, i)
+  end
+  rest = [names[i] for i in eachindex(infos) if !(i in native)]
+  isempty(rest) || throw(ArgumentError("solve!: $(nameof(typeof(opt))) treats itself at most $(max_native(opt)) " *
+    "constraint(s) of the form g ≤ 0 that solve no state; $(join(rest, ", ")) need the augmented Lagrangian, " *
+    "which comes in the next version of HyperShape"))
+  nothing
+end
+
 # A start that violates the constraint is scaled towards the lower bound, z = lb + t (z - lb), so that it holds (with
 # equality for a linear constraint, -1e-6 ≤ g ≤ 0 for a nonlinear one): the pattern of the design is kept, the bounds
 # hold, and optimisers that need a feasible start (SiMPL) can start.
 function _make_feasible!(o, zk)
-  o.C === nothing && return nothing
-  o.a === nothing && return _make_feasible_nonlinear!(o, zk)
-  a, V = o.a, o.V
+  num_constraints(o) == 0 && return nothing
+  o.a[1] === nothing && return _make_feasible_nonlinear!(o, zk)
+  a, V = o.a[1], o.V[1]
   az = dot(a, zk)
   az - V <= 1e-12 * max(abs(V), 1.0) && return nothing
   alb = dot(a, o.lb)
@@ -772,19 +792,19 @@ end
 # t by regula falsi (Illinois) on g(lb + t (z - lb)) = -tol/2 in (0, 1], on the entries the constraint depends on (a
 # nonzero derivative at the start); each evaluation costs the filter solves
 function _make_feasible_nonlinear!(o, zk; tol = 1e-6, maxit = 60)
-  g1 = constraint(o, zk)
+  g1 = constraint(o, 1, zk)
   isfinite(g1) || throw(ArgumentError("Optimization: the constraint is not finite at the starting design"))
   g1 <= 0 && return nothing
   # entries the constraint depends on: nonzero derivative at the start or at the middle of the bounds (a saturated
   # projection gives exact zeros where the constraint still depends on the entry)
-  acts = constraint_gradient!(similar(zk), o, zk) .!= 0
+  acts = constraint_gradient!(similar(zk), o, 1, zk) .!= 0
   zmid = (o.lb .+ o.ub) ./ 2
-  constraint(o, zmid)
-  acts .|= constraint_gradient!(similar(zk), o, zmid) .!= 0
-  constraint(o, zk)
+  constraint(o, 1, zmid)
+  acts .|= constraint_gradient!(similar(zk), o, 1, zmid) .!= 0
+  constraint(o, 1, zk)
   z0 = copy(zk)
   zt = similar(zk)
-  gt(t) = (@. zt = ifelse(acts, o.lb + t * (z0 - o.lb), z0); constraint(o, zt) + tol / 2)
+  gt(t) = (@. zt = ifelse(acts, o.lb + t * (z0 - o.lb), z0); constraint(o, 1, zt) + tol / 2)
   t0, t1 = 0.0, 1.0
   h0, h1 = gt(t0), g1 + tol / 2
   h0 < 0 || throw(ArgumentError("Optimization: the constraint cannot be met within the bounds (it is violated at the lower bound)"))
@@ -803,7 +823,7 @@ function _make_feasible_nonlinear!(o, zk; tol = 1e-6, maxit = 60)
       side = 1
     end
   end
-  constraint(o, zt) <= 0 || (t = t0; @. zt = ifelse(acts, o.lb + t * (z0 - o.lb), z0))   # end on the feasible side
+  constraint(o, 1, zt) <= 0 || (t = t0; @. zt = ifelse(acts, o.lb + t * (z0 - o.lb), z0))   # end on the feasible side
   copyto!(zk, zt)
   set_values!(o.z, zk)
   t
@@ -936,7 +956,8 @@ function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_
     _print_row(pr, hist)
     r = _stop_reason(stop, info, hist, run.stage_start, ctx)
     # with a nonlinear constraint, convergence also needs the constraint met to the tolerance of the optimiser
-    (r !== nothing && !_is_linear(oracle) && has_constraint(oracle) && info.violation > constraint_tol(opt)) && (r = nothing)
+    (r !== nothing && any(i -> oracle.a[i] === nothing, 1:num_constraints(oracle)) &&
+     violation(info) > constraint_tol(opt)) && (r = nothing)
     done = false
     if r !== nothing
       if schedule === nothing || run.stage == schedule.nstages

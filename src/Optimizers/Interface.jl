@@ -7,9 +7,9 @@ Supertype of the optimisers. A subtype implements [`init`](@ref), [`step!`](@ref
 abstract type Optimizer end
 
 """
-    StepInfo
+    StepInfo{K}
 
-What [`step!`](@ref) reports about one design step.
+What [`step!`](@ref) reports about one design step, for an optimiser that handles `K` constraints.
 
 - `accepted`: `false` if no acceptable step was found; `z` is then left unchanged.
 - `f`: objective at the design before the step.
@@ -17,27 +17,59 @@ What [`step!`](@ref) reports about one design step.
 - `kkt`: optimality measure at the design before the step, if the optimiser computes one (`NaN` otherwise).
 - `change`: `maximum(abs, z_new - z_old)`.
 - `step`: step size (SiMPL) or move limit (OC) used; with adaptive move limits, their mean over all entries.
-- `violation`: `max(0, g(z))` of the constraint at the returned design (`0` without constraint).
 - `evaluations`: number of calls to `objective` in the step (forward solves).
-- `multiplier`: multiplier of the constraint (linearised at the current design if it is nonlinear) used in the
-  step: in OC the `λ` of the last bisection (never `0`), in SiMPL the shift `μ` of the volume projection (`0` if the
-  constraint is inactive); `NaN` without a constraint or when the step fails.
 - `stationarity`: stationarity measure at the design before the step, `S = ‖z − P(z − g)‖_M` (see
   [`stationarity!`](@ref)); `NaN` if the optimiser does not compute it.
+- `violations`: for each constraint, its violation at the returned design (see `ConstraintInfo`; `max(0, g(z))` for
+  `g ≤ 0`). [`violation`](@ref) is the largest.
+- `multipliers`: for each constraint, its multiplier (linearised at the current design if it is nonlinear) used in
+  the step: in OC the `λ` of the last bisection (never `0`), in SiMPL the shift `μ` of the volume projection (`0` if
+  the constraint is inactive); `NaN` when the step fails.
+
+OC and SiMPL report `StepInfo{1}` (with violation `0` and multiplier `NaN` when the problem has no constraint),
+built with `StepInfo(accepted, f, f_new, kkt, change, step, violation, evaluations, multiplier, stationarity)`.
 """
-struct StepInfo
+struct StepInfo{K}
   accepted::Bool
   f::Float64
   f_new::Float64
   kkt::Float64
   change::Float64
   step::Float64
-  violation::Float64
   evaluations::Int
-  multiplier::Float64
   stationarity::Float64
+  violations::NTuple{K,Float64}
+  multipliers::NTuple{K,Float64}
 end
 
+# one constraint (OC, SiMPL)
+StepInfo(accepted::Bool, f::Real, f_new::Real, kkt::Real, change::Real, step::Real, violation::Real, evaluations::Integer,
+         multiplier::Real, stationarity::Real) =
+  StepInfo{1}(accepted, f, f_new, kkt, change, step, evaluations, stationarity, (Float64(violation),), (Float64(multiplier),))
+
+"""
+    violation(info::StepInfo) -> Float64
+
+Largest violation of the constraints at the returned design (`0` without constraints).
+"""
+violation(i::StepInfo) = maximum(i.violations; init = 0.0)
+
+
+"""
+    handles(opt::Optimizer, c::ConstraintInfo) -> Bool
+
+Whether the optimiser treats the constraint `c` itself (natively), as OC and SiMPL do with one inequality `g ≤ 0`
+that costs no forward solve (design only). The constraints it does not handle go to the augmented Lagrangian.
+Default `false`.
+"""
+handles(::Optimizer, ::ConstraintInfo) = false
+
+"""
+    max_native(opt::Optimizer) -> Int
+
+How many constraints the optimiser can treat natively (see [`handles`](@ref)). Default `0`.
+"""
+max_native(::Optimizer) = 0
 
 """
     constraint_tol(opt::Optimizer) -> Float64
@@ -53,6 +85,9 @@ constraint_tol(::Optimizer) = Inf
 Whether the optimiser reports an optimality measure (`kkt` in [`StepInfo`](@ref)); `StopCriteria(kkt_tol)` needs one.
 """
 computes_kkt(::Optimizer) = true
+
+# a vector of any type copied into a Vector{Float64} (checkpoints), without scalar indexing
+_gather(x) = copyto!(Vector{Float64}(undef, length(x)), x)
 
 """
     memory(opt::Optimizer, state, z) -> Vector{Float64} or nothing
