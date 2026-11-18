@@ -117,6 +117,8 @@ function _sync!(s::SiMPLState, z, oracle)
   _to_design!(s.z, s.ψ, lb, ub)
   num_constraints(oracle) <= 1 ||
     throw(ArgumentError("SiMPL treats one constraint itself; the oracle has $(num_constraints(oracle))"))
+  (num_constraints(oracle) == 0 || handles(SiMPL(), constraint_info(oracle, 1))) ||
+    throw(ArgumentError("SiMPL treats one constraint g(z) ≤ 0 that solves no state; the oracle gives $(constraint_info(oracle, 1))"))
   c = num_constraints(oracle) == 0 ? nothing : linear_constraint(oracle, 1)
   if c === nothing
     fill!(s.ga, 0)   # a nonlinear constraint sets it at every step

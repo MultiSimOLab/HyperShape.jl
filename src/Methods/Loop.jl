@@ -631,6 +631,7 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
     n in taken && throw(ArgumentError("solve!: $n is the name of a column of the table or a continued parameter; " *
                                       "choose another name for the monitor"))
   end
+  _check_native(problem, opt)
   pr = _Printer(io, verbose, schedule, keys(monitors))
   # a nonlinear constraint is met to the tolerance of the optimiser: above it, the value is shown in red
   any(c -> !is_linear(c.F), problem.constraints) && (pr.red = min(_RED_CONSTRAINT, constraint_tol(opt)))
@@ -678,7 +679,6 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
   oracle = FunctionalOracle(problem, method.metric)
   ops = _counters(problem)
   cstart = map(_count, ops)
-  _check_native(oracle, opt, cnames)
   for i in 1:num_constraints(oracle)
     _is_linear(oracle, i) && _setup_constraint!(oracle, i, ctx)
   end
@@ -757,18 +757,26 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
   end
 end
 
-# The constraints the optimiser does not treat itself (see `handles`) need the augmented Lagrangian (next version)
-function _check_native(o::FunctionalOracle, opt, names)
-  infos = [constraint_info(o, i) for i in 1:num_constraints(o)]
-  native = Int[]
-  for (i, c) in enumerate(infos)
-    length(native) < max_native(opt) && handles(opt, c) && push!(native, i)
+# The constraints the optimiser does not treat itself (see `handles`) need the augmented Lagrangian (next version).
+# Checked before anything is solved: whether a constraint is treated does not depend on its scale (bounds 0 or ±Inf).
+function _check_native(problem, opt)
+  native = Symbol[]
+  rest = String[]
+  for (n, c) in pairs(problem.constraints)
+    r = _reference(c)
+    info = ConstraintInfo(c.lo - r, c.hi - r; linear = is_linear(c.F), design_only = is_design_only(c.F))
+    if length(native) < max_native(opt) && handles(opt, info)
+      push!(native, n)
+    else
+      push!(rest, string(n) * " (" * (c.lo == c.hi ? "equality" : !isfinite(c.hi) ? "lower bound" :
+                                      isfinite(c.lo) ? "two bounds" : !is_design_only(c.F) ? "reads a state" :
+                                      "beyond the $(max_native(opt)) the optimiser treats") * ")")
+    end
   end
-  rest = [names[i] for i in eachindex(infos) if !(i in native)]
-  isempty(rest) || throw(ArgumentError("solve!: $(nameof(typeof(opt))) treats itself at most $(max_native(opt)) " *
-    "constraint(s) of the form g ≤ 0 that solve no state; $(join(rest, ", ")) need the augmented Lagrangian, " *
-    "which comes in the next version of HyperShape"))
-  nothing
+  isempty(rest) && return nothing
+  throw(ArgumentError("solve!: $(nameof(typeof(opt))) treats itself at most $(max_native(opt)) constraint(s) " *
+    "F ≤ max that solve no state (see HyperShape.Optimizers.handles and max_native, which an optimiser of the user " *
+    "defines); $(join(rest, ", ")) need the augmented Lagrangian, which comes in the next version of HyperShape"))
 end
 
 # A start that violates the constraint is scaled towards the lower bound, z = lb + t (z - lb), so that it holds (with

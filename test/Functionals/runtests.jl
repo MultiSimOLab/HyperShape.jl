@@ -220,6 +220,13 @@ struct _NoSpaces <: HyperFEM.ComputationalModels.ComputationalModel end   # a mo
     @test_throws ArgumentError Constraint(mk(1.0); equal = 1.0, max = 2.0)
     @test_throws ArgumentError Constraint(mk(1.0); max = NaN)
     @test_throws ArgumentError Constraint(mk(1.0); min = Inf)
+    @test_throws ArgumentError Constraint(mk(1.0); max = Inf)                # no finite bound
+    @test_throws ArgumentError Constraint(mk(1.0); min = -Inf)
+    @test_throws ArgumentError Constraint(mk(:bound); max = Inf)
+    Fb = mk(:bound)
+    Constraint(Fb; max = 2.0)
+    @test HyperShape.Functionals.get_scale(Constraint(Fb; max = -2.0).F) == 2.0   # the same scale: accepted
+    @test_throws ArgumentError Constraint(Fb; max = 10.0)                    # another scale for the same functional
     @test_throws ArgumentError functional_value(mk(:bound), nothing)   # :bound outside a Constraint
   end
 

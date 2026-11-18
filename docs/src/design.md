@@ -199,11 +199,13 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
 
 - **Constraints:** any number, named, each a functional alone (`g ≤ 0`, as `Volume`) or a
   `Constraint(F; max, min, equal)` in the units of `F` (with `scale = :bound` the scale is taken from the bounds).
+  The banner shows the bounds in the units of `F`; the history and the table, the scaled value `(F − r)/s` (`r` the
+  upper bound, or the lower one if there is none).
   Each optimiser declares which constraints it treats itself (`handles`, `max_native`): OC and SiMPL treat one
   `g ≤ 0` that solves no state; `solve!` names the others and stops (the augmented Lagrangian comes next). The
   oracle gives the optimiser, for each constraint `i`, its bounds and kind (`constraint_info`), its value and
   derivative, and `weighted_gradient!`, the derivative of `w₀ f + Σ wᵢ gᵢ` in one reverse sweep (one adjoint solve
-  per state). For the constraint an optimiser treats: A linear one (`Volume` over identity or filter maps, or `linear = true`) is checked to be linear at
+  per state). For the constraint that OC or SiMPL treats, a linear one (`Volume` over identity or filter maps, or `linear = true`) is checked to be linear at
   the start and its vector `a` is computed once. A nonlinear one is linearised by the optimiser at every step and
   corrected with evaluations of the true constraint until it holds to `constraint_tol` (OC `1e-4`, SiMPL `1e-6`;
   SiMPL keeps every iterate feasible; at an infeasible design, after a continuation jump, it first takes restoration

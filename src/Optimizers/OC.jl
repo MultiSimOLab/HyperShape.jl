@@ -98,6 +98,8 @@ end
 function init(opt::OC, z, oracle)
   num_constraints(oracle) == 1 ||
     throw(ArgumentError("OC needs exactly one constraint (aᵀz ≤ V or g(z) ≤ 0); the oracle has $(num_constraints(oracle))"))
+  handles(opt, constraint_info(oracle, 1)) ||
+    throw(ArgumentError("OC treats one constraint g(z) ≤ 0 that solves no state; the oracle gives $(constraint_info(oracle, 1))"))
   c = linear_constraint(oracle, 1)
   c === nothing || minimum(c[1]) > 0 || throw(ArgumentError("OC needs a linear constraint with a > 0"))
   v() = similar(z)

@@ -87,7 +87,7 @@ function assemble_form!(b, a::CompiledAssembler, L, key)
       k = findfirst(k -> !isequal(k, :forward), a.keys)   # least recently used, never the filter's load vector
       k === nothing && (k = 1)
       push!(a.evicted, a.keys[k])
-      length(a.evicted) > MAX_CAPACITY && popfirst!(a.evicted)
+      length(a.evicted) > 4MAX_CAPACITY && popfirst!(a.evicted)   # bounded memory of the keys dropped
       deleteat!(a.keys, k); deleteat!(a.ops, k)
     end
     push!(a.keys, key)

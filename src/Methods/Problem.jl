@@ -177,9 +177,11 @@ design-only one solves no state); `weighted_gradient!` differentiates `w₀ f + 
   asks again at that design and gets them without solves.
 - A gradient that is not finite throws [`OptimizationFailure`](@ref).
 """
-mutable struct FunctionalOracle{J,C<:Tuple,Z,M,V<:AbstractVector{Float64}} <: AbstractOracle
+mutable struct FunctionalOracle{J,C<:Tuple,Z,M,V<:AbstractVector{Float64},FS<:Tuple} <: AbstractOracle
   J::J
   cons::C                       # the constraints (Constraint objects)
+  Fs::FS                        # (objective, functional of each constraint): one tuple type for weighted_gradient!
+  wbuf::Vector{Float64}         # its weights
   z::Z
   ctx::OptContext
   zk::V                         # the loop's current design (shared with the loop)
@@ -201,7 +203,8 @@ function FunctionalOracle(problem::Optimization, metric)
   m === nothing || all(>(0), m) || throw(ArgumentError("DensityMethod: the metric has non-positive entries"))
   v = get_values(z)
   cons = Tuple(values(problem.constraints))
-  FunctionalOracle(problem.objective, cons, z, problem.ctx, copy(v), copyto!(similar(v), lb), copyto!(similar(v), ub),
+  Fs = (problem.objective, map(c -> c.F, cons)...)
+  FunctionalOracle(problem.objective, cons, Fs, zeros(length(Fs)), z, problem.ctx, copy(v), copyto!(similar(v), lb), copyto!(similar(v), ub),
                    Union{Nothing,typeof(v)}[nothing for _ in cons], zeros(length(cons)), m,
                    zero(v), zero(v), NaN, false)
 end
@@ -271,6 +274,8 @@ function _constraint_scale(o::FunctionalOracle, i)
     _set_design!(o, o.zk)
     functional_value(F, o.ctx)
     s = get_scale(F)
+    isfinite(s) || throw(ArgumentError("Optimization: the constraint $i is not finite at the starting design (did its " *
+                                       "state converge?); its scale = :initial needs a finite first value"))
   end
   s
 end
@@ -310,13 +315,17 @@ end
 
 # ∇(w0 f + Σ wᵢ gᵢ): linear constraints through their vectors, the functionals in one reverse sweep
 function weighted_gradient!(dL, o::FunctionalOracle, w0, w, v)
+  length(w) == length(o.cons) ||
+    throw(DimensionMismatch("weighted_gradient!: $(length(w)) weights for $(length(o.cons)) constraints"))
   v = _canonical(o, v)
-  get_values(o.z) == v ||
-    throw(ArgumentError("FunctionalOracle: weighted_gradient! asked at a design different from the last evaluation"))
+  _set_design!(o, v)                     # a design served from the snapshot may not be the one in z
   set_context!(o.ctx, :phase, :optimization)
-  idx = [i for i in eachindex(w) if o.a[i] === nothing && !iszero(w[i])]
-  Fs = (o.J, (o.cons[i].F for i in idx)...)
-  functional_gradient!(dL, Fs, vcat(Float64(w0), Float64[w[i] for i in idx]), o.ctx)
+  wb = o.wbuf
+  wb[1] = w0
+  for i in eachindex(w)
+    wb[i + 1] = o.a[i] === nothing ? w[i] : 0.0      # linear constraints through their vectors
+  end
+  functional_gradient!(dL, o.Fs, wb, o.ctx)
   for i in eachindex(w)
     o.a[i] === nothing || iszero(w[i]) || (dL .+= w[i] .* o.a[i])
   end
@@ -372,9 +381,9 @@ function _setup_constraint!(o::FunctionalOracle, i::Integer, ctx)
   o
 end
 
-_constraint_values(o::FunctionalOracle, zk) = ntuple(i -> constraint(o, i, zk), length(o.cons))
+_constraint_values(o::FunctionalOracle{J,C}, zk) where {J,C} = ntuple(i -> constraint(o, i, zk), Val(fieldcount(C)))
 # the multipliers reported by the optimiser, in the order of the constraints (all native in this version)
-_multipliers(o::FunctionalOracle, info) =
-  ntuple(i -> i <= length(info.multipliers) ? info.multipliers[i] : NaN, length(o.cons))
+_multipliers(o::FunctionalOracle{J,C}, info) where {J,C} =
+  ntuple(i -> i <= length(info.multipliers) ? info.multipliers[i] : NaN, Val(fieldcount(C)))
 
 Base.show(io::IO, m::DensityMethod) = print(io, "DensityMethod(", nameof(typeof(m.optimizer)), ")")

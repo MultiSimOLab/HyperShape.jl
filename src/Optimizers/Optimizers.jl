@@ -15,6 +15,10 @@ info  = step!(opt, state, z, oracle, ctx) # overwrites z with the next design, r
 reset!(opt, state)                      # forget the history (continuation jump, remeshing)
 shrink!(opt, state, factor)             # roll back the last step and reduce the next one
 ```
+
+An optimiser that treats constraints itself also declares which ones, with [`handles`](@ref) and
+[`max_native`](@ref) (by default none: `solve!` then refuses every constraint until the augmented Lagrangian
+comes).
 """
 module Optimizers
 

@@ -22,6 +22,10 @@ _NS.reset!(::NoStatOpt, state) = _NS.reset!(SiMPL(), state)
 _NS.constraint_tol(::NoStatOpt) = _NS.constraint_tol(SiMPL())
 _NS.handles(::NoStatOpt, c::_NS.ConstraintInfo) = _NS.handles(SiMPL(), c)     # a third-party optimiser declares them
 _NS.max_native(::NoStatOpt) = 1
+# an optimiser of the user that does not declare handles/max_native
+struct PlainOpt <: HyperShape.Optimizers.Optimizer end
+_NS.init(::PlainOpt, z, oracle) = _NS.init(SiMPL(), z, oracle)
+_NS.step!(::PlainOpt, state, z, oracle, ctx) = _NS.step!(SiMPL(), state, z, oracle, ctx)
 
 # a monitor of the user
 struct _CountMonitor
@@ -106,6 +110,16 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     w = [0.3, -1.2, 0.0, 2.0]
     dL = HyperShape.Optimizers.weighted_gradient!(zeros(length(zk)), o, 1.5, w, zk)
     @test dL ≈ 1.5 .* gJ .+ sum(w[i] .* gs[i] for i in 1:4) rtol = 1e-10
+    @test_throws DimensionMismatch HyperShape.Optimizers.weighted_gradient!(zeros(length(zk)), o, 1.0, [1.0], zk)
+    # another active set: same tuple of functionals, nothing to compile
+    w2 = [0.0, 0.0, 0.7, 0.0]
+    dL2 = HyperShape.Optimizers.weighted_gradient!(zeros(length(zk)), o, 1.5, w2, zk)
+    @test dL2 ≈ 1.5 .* gJ .+ 0.7 .* gs[3] rtol = 1e-10
+    # a rejected trial: the current design served from the snapshot, then the weighted gradient there
+    zt = clamp.(zk .+ 0.05 .* sin.(1:length(zk)), 0.0, 1.0)
+    HyperShape.Optimizers.objective(o, zt)
+    HyperShape.Optimizers.objective(o, zk)
+    @test HyperShape.Optimizers.weighted_gradient!(zeros(length(zk)), o, 1.5, w, zk) ≈ dL rtol = 1e-10
     # OC and SiMPL treat one constraint g ≤ 0 that solves no state; the rest needs the augmented Lagrangian
     for opt in (OC(), SiMPL())
       err = try
@@ -119,6 +133,28 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     end
     lower = Optimization(z; objective = q.C, constraints = (floor = Constraint(Vraw; min = 0.1vol),))
     @test_throws ArgumentError solve!(lower, DensityMethod(OC(); metric = Euclidean()); maxiter = 2, verbose = 0)
+    # refused before anything is solved or printed
+    n0 = num_solves(q.S)
+    buf = IOBuffer()
+    @test_throws ArgumentError solve!(pb, DensityMethod(OC(); metric = Euclidean()); maxiter = 2, io = buf)
+    @test num_solves(q.S) == n0 && isempty(take!(buf))
+    # OC and SiMPL check by themselves what they are given (an oracle used outside solve!)
+    ol = FunctionalOracle(lower, Euclidean())
+    _setup_constraint!(ol, 1, lower.ctx)
+    @test_throws ArgumentError init(OC(), copy(get_values(z)), ol)
+    @test_throws ArgumentError init(SiMPL(), copy(get_values(z)), ol)
+    # an optimiser of the user that does not declare what it treats: the message says how
+    err = try
+      solve!(q.problem, DensityMethod(PlainOpt(); metric = Euclidean()); maxiter = 2, verbose = 0); nothing
+    catch e
+      e
+    end
+    @test err isa ArgumentError && occursin("handles", err.msg) && occursin("max_native", err.msg)
+    # a constraint that cannot be evaluated at the start, with scale = :initial
+    Vnan = Functional(θ -> NaN * sum(∫(θ.ρ)dΩ), q.θv; dJdθ = θ -> (δ -> ∫(δ)dΩ), scale = :initial)
+    on = FunctionalOracle(Optimization(z; objective = q.C, constraints = (bad = Vnan,)), Euclidean())
+    err = try HyperShape.Optimizers.constraint_info(on, 1); nothing catch e; e end
+    @test err isa ArgumentError && occursin("not finite", err.msg)
   end
 
   @testset "Constraint(F; max = 0) is the functional alone (bit for bit)" begin

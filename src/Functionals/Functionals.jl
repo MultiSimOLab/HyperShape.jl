@@ -55,7 +55,8 @@ through the upstream state would be missing.
 Design only (second form, volume, perimeter): `J(θ)` and `dJdθ(θ)`, the derivative with respect to θ.
 
 `scale` is mandatory: a positive number, `:initial` (the absolute value of the first finite evaluation; an error if
-it is zero) or `1.0` for no scaling. The value and the derivative are divided by it.
+it is zero), `:bound` (for a constraint: the largest finite bound of its [`Constraint`](@ref) in absolute value) or
+`1.0` for no scaling. The value and the derivative are divided by it.
 
 `parameters`: [`Parameter`](@ref HyperShape.Operators.Parameter)s (or other objects with a `state_version`) that `J`
 reads directly, not through θ or a state (a weight that is continued, for example): the value is computed again
@@ -326,7 +327,8 @@ every state is solved once whatever the number of functionals that read it (one 
 functional) and every filter is solved once. The seeds are `wᵢ sᵣ/sᵢ` and the result is divided by `sᵣ`, the scale
 of the first functional of the sweep, so that a tuple of one functional gives the same bits as
 `functional_gradient!(gz, F, ctx)`. Functionals on different θ (a `Volume` of the design fields) are summed sweep by
-sweep. Filled with `NaN` if a state did not converge.
+sweep. A functional with weight zero costs nothing (its state is not solved). Filled with `NaN` if a state did not
+converge.
 """
 function functional_gradient!(gz, Fs::Tuple{Vararg{AbstractFunctional}}, w, ctx)
   isempty(Fs) && throw(ArgumentError("functional_gradient!: no functionals"))
@@ -347,9 +349,10 @@ end
 
 function _sweep!(gz, θ, Fs, w, ctx)
   update_fields!(θ, ctx)
-  _all_converged!(Fs, ctx) || return fill!(gz, NaN)
-  _set_scales!(Fs, ctx)
-  sref = first(Fs).scale[]
+  _all_converged!(Fs, w, 1, ctx) || return fill!(gz, NaN)
+  _set_scales!(Fs, w, 1, ctx)
+  s1 = first(Fs).scale[]
+  sref = isfinite(s1) ? s1 : 1.0          # the first one has weight zero and no scale yet: any reference will do
   reset_sink!(θ)
   _reset_states!(Fs)
   _seed_all!(θ, Fs, w, sref, 1, ctx)
@@ -362,15 +365,20 @@ end
 # loops over the (heterogeneous) tuple of functionals, unrolled
 _all_share(::Tuple{}, θ) = true
 _all_share(t::Tuple, θ) = first(t).θ === θ && _all_share(Base.tail(t), θ)
-_all_converged!(::Tuple{}, ctx) = true
-_all_converged!(t::Tuple, ctx) = _converged!(first(t), ctx) & _all_converged!(Base.tail(t), ctx)
-_set_scales!(::Tuple{}, ctx) = nothing
-_set_scales!(t::Tuple, ctx) = (F = first(t); isnan(F.scale[]) && _set_scale!(F, _raw_value(F, ctx)); _set_scales!(Base.tail(t), ctx))
+# a functional with weight zero is skipped (its state is not solved, it is not seeded): the tuple keeps one type
+# whatever the weights, so a change of the active set of an augmented Lagrangian compiles nothing
+_all_converged!(::Tuple{}, w, i, ctx) = true
+_all_converged!(t::Tuple, w, i, ctx) =
+  (iszero(w[i]) || _converged!(first(t), ctx)) & _all_converged!(Base.tail(t), w, i + 1, ctx)
+_set_scales!(::Tuple{}, w, i, ctx) = nothing
+_set_scales!(t::Tuple, w, i, ctx) = (F = first(t); (!iszero(w[i]) && isnan(F.scale[])) && _set_scale!(F, _raw_value(F, ctx));
+                                     _set_scales!(Base.tail(t), w, i + 1, ctx))
 _reset_states!(::Tuple{}) = nothing
 _reset_states!(t::Tuple) = (_reset_state!(first(t)); _reset_states!(Base.tail(t)))
 _seed_all!(θ, ::Tuple{}, w, sref, i, ctx) = nothing
 _seed_all!(θ, t::Tuple, w, sref, i, ctx) =
-  (F = first(t); _seed!(θ, F, Float64(w[i]) * sref / F.scale[], ctx); _seed_all!(θ, Base.tail(t), w, sref, i + 1, ctx))
+  (F = first(t); iszero(w[i]) || _seed!(θ, F, Float64(w[i]) * sref / F.scale[], ctx);
+   _seed_all!(θ, Base.tail(t), w, sref, i + 1, ctx))
 _pull_back_all!(θ, ::Tuple{}, ctx) = nothing
 _pull_back_all!(θ, t::Tuple, ctx) = (_pull_back!(θ, first(t), ctx); _pull_back_all!(θ, Base.tail(t), ctx))
 
@@ -408,11 +416,15 @@ function Constraint(F::AbstractFunctional; max = nothing, min = nothing, equal =
     lo = min === nothing ? -Inf : Float64(min)
     hi = max === nothing ? Inf : Float64(max)
   end
-  (isnan(lo) || isnan(hi) || lo > hi || lo == Inf || hi == -Inf) &&
-    throw(ArgumentError("Constraint: need min ≤ max (finite where given), got min = $lo, max = $hi"))
+  (isnan(lo) || isnan(hi) || lo > hi || isinf(lo) && lo > 0 || isinf(hi) && hi < 0 || !(isfinite(lo) || isfinite(hi))) &&
+    throw(ArgumentError("Constraint: need min ≤ max with at least one finite bound, got min = $lo, max = $hi"))
   if F isa Functional && F.scale_mode === :bound
-    b = maximum(abs, filter(isfinite, (lo, hi)))
+    b = isfinite(lo) && isfinite(hi) ? Base.max(abs(lo), abs(hi)) : isfinite(hi) ? abs(hi) : abs(lo)
     b > 0 || throw(ArgumentError("Constraint: scale = :bound with zero bounds; give the scale explicitly"))
+    # the scale belongs to the functional: a second Constraint on it must give the same one
+    (isnan(F.scale[]) || F.scale[] == b) ||
+      throw(ArgumentError("Constraint: this functional (scale = :bound) already has the scale $(F.scale[]) from " *
+                          "another Constraint; build one functional per Constraint"))
     F.scale[] = b
   end
   Constraint(F, lo, hi)
