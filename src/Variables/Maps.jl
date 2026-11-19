@@ -48,6 +48,41 @@ parameter_version(s) = 0
 # whether the stage is linear in its input (a nonlinear stage makes a volume a nonlinear constraint)
 is_linear_stage(s) = false
 
+# The frozen zone of a design field, imposed at the end of every chain built from it: on the frozen cells the output
+# is the image of the frozen value (θ = χ ? value : chain(x)); its derivative vanishes there. Affine, lazy, no solve.
+# The image of the frozen value is kept as one value per cell (`img`, P0), recomputed from its lazy form only when a
+# parameter of the chain changes (`_refresh_mask!`), so θ costs one selection per point and not a second projection.
+struct MaskStage{I,O,F,C,V,L,R}
+  input::I
+  out::O
+  free::F
+  χ::C
+  img::V            # P0: image of the frozen value on the frozen cells
+  img_lazy::L       # its lazy form (the pointwise maps applied to the frozen value)
+  reference::R      # the pointwise maps applied to the design field x (for check_consistency)
+  seen::Base.RefValue{Int}   # parameter version of the chain at the last refresh
+end
+_select_frozen(c, χ, v) = χ > 0.5 ? v : c
+function _mask_stage(input, zone, img_lazy, reference)
+  img = FEFunction(get_fe_space(zone.value), zeros(num_free_dofs(get_fe_space(zone.value))))
+  s = MaskStage(input, Operation(_select_frozen)(input, zone.χ, img), zone.free, zone.χ, img, img_lazy, reference, Ref(-1))
+  _refresh_mask!(s, 0)
+end
+function _refresh_mask!(s::MaskStage, version)
+  s.seen[] == version && return s
+  interpolate!(s.img_lazy, get_free_dof_values(s.img), get_fe_space(s.img))   # exact: the value is constant per cell
+  s.seen[] = version
+  s
+end
+output(s::MaskStage) = s.out
+update_stage!(s::MaskStage, ctx) = s
+pullback(s::MaskStage, L, ctx, key) = (free = s.free; δ -> L(free * δ))
+is_linear_stage(::MaskStage) = true
+
+# maps evaluated point by point (they carry the frozen value into θ); filters and cell means leave it as it is. A new
+# kind of FieldMap that acts point by point must declare `_pointwise(::MyMap) = true`.
+_pointwise(m) = false
+
 """
     HelmholtzFilter(dΩ; rmin, order = 1, backend = :compiled, model_backend = <default>, solve = <default>, kwargs...)
     HelmholtzFilter(op::LinearOperator, dΩ; backend = :compiled)
@@ -228,7 +263,7 @@ end
 Map applied point by point at the quadrature points, `θ = f(input)`, with its derivative `df` written by the user
 (no automatic differentiation; check it with `check_consistency`): for example a projection or a threshold of the
 user's own. `f` and `df` are functions of one number. If they read [`Parameter`](@ref HyperShape.Operators.Parameter)s (or other objects with a
-`state_version`), list them in `parameters`, so the physical fields count as changed when they change (continuation).
+`state_version`), list them in `parameters`, so the physical fields count as changed when they change (continuation). The value of a frozen zone through the map is also recomputed only then.
 Lazy, like [`TanhProjection`](@ref): nothing is recomputed, the forms evaluate `f` and `df` when they are assembled.
 
 ```julia
@@ -356,3 +391,7 @@ Base.show(io::IO, h::TanhProjection) = print(io, "TanhProjection(β = ", h.β, "
 Base.show(io::IO, c::CellMean) = print(io, "CellMean(", c.backend, ")")
 Base.show(io::IO, c::ComposedMap) = join(io, reverse(c.maps), " ∘ ")
 Base.show(io::IO, m::PointwiseMap) = print(io, "PointwiseMap(", length(m.parameters), " parameters)")
+
+_pointwise(::Identity) = true
+_pointwise(::TanhProjection) = true
+_pointwise(::PointwiseMap) = true

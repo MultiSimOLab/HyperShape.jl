@@ -33,9 +33,10 @@ import ..Operators: state_version, refresh!, invalidate!
 
 export FieldVariable, OptVariables, DesignFields, PhysicalFields
 export Identity, HelmholtzFilter, TanhProjection, CellMean, PointwiseMap
-export single_field_design
+export single_field_design, frozen_indicator, tag_adjacent_cells!
 
 include("OptVariables.jl")
+include("Zones.jl")
 include("DesignFields.jl")
 include("Maps.jl")
 include("PhysicalFields.jl")
@@ -44,7 +45,7 @@ refresh!(x::DesignFields, ctx) = update_fields!(x, ctx)
 refresh!(θ::PhysicalFields, ctx) = update_fields!(θ, ctx)
 
 """
-    single_field_design(name, V; bounds, init, map, backend = :compiled) -> (z, x, θ)
+    single_field_design(name, V; bounds, init, map, frozen = nothing, backend = :compiled) -> (z, x, θ)
 
 Shortcut for one design field and its physical fields with the same name:
 
@@ -53,11 +54,11 @@ z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = 0.5,
                               map = TanhProjection(β = 1.0, η = 0.5) ∘ HelmholtzFilter(dΩ; rmin, ls))
 ```
 
-is `OptVariables(ρ = FieldVariable(Vρ; bounds, init))`, `DesignFields(z; ρ = Identity())` and
+is `OptVariables(ρ = FieldVariable(Vρ; bounds, init, frozen))`, `DesignFields(z; ρ = Identity())` and
 `PhysicalFields(x; ρ = map, backend)`: `map` is the chain from the design field to the physical one.
 """
-function single_field_design(name::Symbol, V; bounds, init, map, backend::Symbol = :compiled)
-  z = OptVariables(; NamedTuple{(name,)}((FieldVariable(V; bounds, init),))...)
+function single_field_design(name::Symbol, V; bounds, init, map, frozen = nothing, backend::Symbol = :compiled)
+  z = OptVariables(; NamedTuple{(name,)}((FieldVariable(V; bounds, init, frozen),))...)
   x = DesignFields(z; NamedTuple{(name,)}((Identity(),))...)
   θ = PhysicalFields(x; backend, NamedTuple{(name,)}((map,))...)
   z, x, θ

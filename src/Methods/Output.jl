@@ -93,7 +93,8 @@ function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, 
   title = " HyperShape · DensityMethod($(nameof(typeof(opt)))) "
   W = textwidth(_header(p, ntuple(_ -> "", length(p.widths))))   # as wide as the table
   _styled(p, "━━" * title * "━"^max(3, W - 2 - textwidth(title)) * "\n", :cyan; bold = true)
-  blocks = join(("$n ($(length(r)))" for (n, r) in zip(z.names, z.ranges)), ", ")
+  blocks = join(("$n ($(length(r))" * (b.zone === nothing ? "" : ", $(b.zone.ncells) frozen cells") * ")"
+                 for (n, r, b) in zip(z.names, z.ranges, z.blocks)), ", ")
   nc = length(problem.constraints)
   lag = method.lagrangian
   println(p.io, "  design variables $(length(z)): $blocks · constraint", nc > 1 ? "s" : "", ": ",

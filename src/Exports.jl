@@ -60,6 +60,8 @@ end
 @_export Variables PointwiseMap
 @_export Operators Parameter
 @_export Variables single_field_design
+@_export Variables frozen_indicator
+@_export Variables tag_adjacent_cells!
 @_export Variables get_values
 @_export Variables set_values!
 

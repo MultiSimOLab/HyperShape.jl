@@ -236,6 +236,31 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test err isa ArgumentError && occursin("version 1", err.msg)
   end
 
+  @testset "Frozen zones in the loop: consistency, banner, checkpoint" begin
+    for order in (0, 1)
+      q = frozen_mbb(; order)
+      rep = check_consistency((compliance = q.C, volume = q.Vol))
+      @test rep.passed && any(r -> occursin("frozen zone of θ.ρ", r.label) && occursin("8 cells", r.message), rep.results)
+    end
+    q = frozen_mbb()
+    buf = IOBuffer()
+    r = solve!(q.problem, DensityMethod(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter = 20, verbose = 1, io = buf, stop = nothing)
+    @test occursin("ρ (88, 8 frozen cells)", String(take!(buf)))
+    χ = frozen_indicator(q.x, :ρ)
+    @test sum(∫(χ * (q.θ.ρ - 1.0) * (q.θ.ρ - 1.0))q.dΩ) == 0 && r.history.constraints.volume[end] <= 1e-6
+    # a resumed run continues as the uninterrupted one (OC), with the frozen cells in the checkpoint
+    dir = mktempdir()
+    runs = map((nothing, dir)) do resume
+      q = frozen_mbb()
+      resume === nothing ||
+        solve!(q.problem, DensityMethod(OC()); maxiter = 4, verbose = 0, stop = nothing, checkpoint = Checkpoint(filepath = dir, every = 4))
+      q = frozen_mbb()
+      solve!(q.problem, DensityMethod(OC()); maxiter = 8, verbose = 0, stop = nothing, resume)
+    end
+    @test runs[1].history.objective == runs[2].history.objective && get_values(runs[1].z) == get_values(runs[2].z)
+    @test load_checkpoint(dir).frozen_cells == Dict(:ρ => 8)
+  end
+
   @testset "Constraint(F; max = 0) is the functional alone (bit for bit)" begin
     hs = map((c -> c, c -> Constraint(c; max = 0.0))) do wrap
       q = compliance_problem()

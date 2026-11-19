@@ -61,3 +61,16 @@ end
 _pullback_block!(gz_block, x::DesignFields, i, gx) = (gz_block .+= gx; gz_block)
 
 Base.show(io::IO, x::DesignFields) = print(io, "DesignFields(", join(getfield(x, :names), ", "), ")")
+
+"""
+    frozen_indicator(x::DesignFields, name) -> CellField
+
+Indicator of the cells of the frozen zones of the design field `name` (1 on them, 0 elsewhere; a P0 field), for
+example to write them with the results. Throws if the field has no frozen zone (see [`FieldVariable`](@ref)).
+"""
+function frozen_indicator(x::DesignFields, name::Symbol)
+  z = getfield(x, :z)
+  zone = z.blocks[_index(z.names, name)].zone
+  zone === nothing && throw(ArgumentError("frozen_indicator: the design field $name has no frozen zone"))
+  zone.χ
+end
