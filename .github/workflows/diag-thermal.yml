@@ -1,0 +1,24 @@
+name: Diag thermal
+on:
+  push:
+    branches: [ diag-thermal ]
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['min', '1']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: ${{ matrix.version }}
+      - uses: julia-actions/cache@v3
+      - name: Environment
+        run: julia -e 'using Pkg; Pkg.activate("diagenv"); Pkg.develop(path="."); Pkg.add(name="Gridap", version="0.20.8"); Pkg.add(["HyperFEM", "Test", "SparseArrays"])'
+      - name: Thermal, 4 threads
+        run: julia -t 4 --project=diagenv diag/diag_thermal.jl
+      - name: Thermal, 1 thread
+        run: julia -t 1 --project=diagenv diag/diag_thermal.jl
