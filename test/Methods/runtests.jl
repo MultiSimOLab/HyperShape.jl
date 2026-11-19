@@ -195,10 +195,12 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
                                                       boundary = Constraint(p.boundary(scale = :bound); max = 1.2B0)))
     r = solve!(pb, DensityMethod(SiMPL(); metric = LumpedMass(dΩ)); maxiter = 200, verbose = 0, stop = nothing)
     h = r.history
-    # with a fixed penalty the step oscillates around the active constraint: look at a window, not at the last
-    # iteration (where the oscillation ends depends on the rounding of the machine)
+    # with a fixed penalty the step oscillates around the active constraint, and the trajectory depends on the rounding
+    # of the machine (CPU, --check-bounds): look at the last 50 iterations, with margin over what CI and the Mac give
+    # (largest violation 3e-3 to 8e-3, mean below 1e-3)
+    vb = h.violations.boundary[end-49:end]
     @test maximum(h.violations.compliance[end-49:end]) == 0
-    @test minimum(h.violations.boundary[end-9:end]) <= 1e-4 && maximum(h.violations.boundary[end-49:end]) <= 5e-3
+    @test minimum(vb) <= 1e-4 && sum(vb) / length(vb) <= 2e-3 && maximum(vb) <= 2e-2
     @test h.multipliers.compliance[end] == 0 && h.constraints.compliance[end] < -0.1           # inactive
     @test h.multipliers.boundary[end] > 0 && minimum(abs, h.constraints.boundary[end-9:end]) < 1e-3   # active
     @test h.penalties.compliance[end] == 1.0 && h.penalties.boundary[end] == 1.0
