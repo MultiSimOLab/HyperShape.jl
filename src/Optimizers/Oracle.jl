@@ -172,7 +172,7 @@ Writes into `g` the primal representative `M⁻¹ dF` of the dual vector `dF`. D
 riesz!(g, ::AbstractOracle, dF) = copyto!(g, dF)
 
 """
-    FunctionOracle(f, df!; lb = 0.0, ub = 1.0, constraint = nothing, metric = nothing)
+    FunctionOracle(f, df!; lb = 0.0, ub = 1.0, constraint = nothing, constraints = nothing, metric = nothing)
 
 Oracle built from plain functions, for analytical tests and small problems.
 
@@ -180,6 +180,8 @@ Oracle built from plain functions, for analytical tests and small problems.
 - `df!(dF, z)`: writes `∂F/∂z` into `dF`.
 - `constraint = (a, V)` with a vector `a`: linear constraint `aᵀz ≤ V`.
 - `constraint = (g, dg!)` with functions: nonlinear constraint `g(z) ≤ 0`, `dg!(dG, z)` writes `∂g/∂z`.
+- `constraints = ((g₁, dg₁!, lo₁, hi₁), …)`: several constraints `loᵢ ≤ gᵢ(z) ≤ hiᵢ` (taken as nonlinear), instead of
+  `constraint`.
 - `metric = m`: diagonal metric, `inner(x, y) = Σ mᵢ xᵢ yᵢ` and `riesz!(g, dF) = dF ./ m` (cell volumes for P0
   designs, lumped mass for P1 designs). `nothing` is the Euclidean metric.
 
@@ -196,9 +198,21 @@ mutable struct FunctionOracle{F,G,L,U,C,M} <: AbstractOracle
   nderivative::Int
 end
 
-function FunctionOracle(f, df!; lb = 0.0, ub = 1.0, constraint = nothing, metric = nothing)
+# several constraints (g, dg!, lo, hi)
+struct _Constraints{T<:Tuple}
+  c::T
+  infos::Vector{ConstraintInfo}
+end
+
+function FunctionOracle(f, df!; lb = 0.0, ub = 1.0, constraint = nothing, constraints = nothing, metric = nothing)
   constraint === nothing || constraint isa Tuple{AbstractVector,Real} || constraint isa Tuple{Function,Function} ||
     throw(ArgumentError("FunctionOracle: constraint must be (a, V) or (g, dg!)"))
+  if constraints !== nothing
+    constraint === nothing || throw(ArgumentError("FunctionOracle: give constraint or constraints, not both"))
+    (constraints isa Tuple && all(c -> c isa Tuple{Any,Any,Real,Real}, constraints)) ||
+      throw(ArgumentError("FunctionOracle: constraints must be a tuple of (g, dg!, lo, hi)"))
+    constraint = _Constraints(constraints, [ConstraintInfo(c[3], c[4]; design_only = true) for c in constraints])
+  end
   FunctionOracle(f, df!, lb, ub, constraint, metric, 0, 0)
 end
 
@@ -223,6 +237,13 @@ linear_constraint(o::FunctionOracle, i) = o.constraint isa Tuple{AbstractVector,
 constraint(o::FunctionOracle{F,G,L,U,<:Tuple{Function,Function}}, i::Integer, z) where {F,G,L,U} = o.constraint[1](z)
 constraint_gradient!(dG, o::FunctionOracle{F,G,L,U,<:Tuple{Function,Function}}, i::Integer, z) where {F,G,L,U} =
   (o.constraint[2](dG, z); dG)
+
+num_constraints(o::FunctionOracle{F,G,L,U,<:_Constraints}) where {F,G,L,U} = length(o.constraint.c)
+constraint_info(o::FunctionOracle{F,G,L,U,<:_Constraints}, i) where {F,G,L,U} = o.constraint.infos[i]
+linear_constraint(o::FunctionOracle{F,G,L,U,<:_Constraints}, i) where {F,G,L,U} = nothing
+constraint(o::FunctionOracle{F,G,L,U,<:_Constraints}, i::Integer, z) where {F,G,L,U} = o.constraint.c[i][1](z)
+constraint_gradient!(dG, o::FunctionOracle{F,G,L,U,<:_Constraints}, i::Integer, z) where {F,G,L,U} =
+  (o.constraint.c[i][2](dG, z); dG)
 
 inner(o::FunctionOracle{F,G,L,U,C,Nothing}, x, y) where {F,G,L,U,C} = dot(x, y)
 inner(o::FunctionOracle{F,G,L,U,C,<:Vector{Float64}}, x::Vector{Float64}, y::Vector{Float64}) where {F,G,L,U,C} =

@@ -3,7 +3,7 @@
 
 Optimisers for problems with a box-bounded design vector `z` and constraints `lo ≤ g(z) ≤ hi`, linear or not (for
 example the volume of a projected density). OC and SiMPL treat one inequality themselves (see `handles`); the others
-go to the augmented Lagrangian.
+go to the augmented Lagrangian ([`AugmentedLagrangian`](@ref)).
 
 The module is independent of finite elements: an optimiser sees vectors, bounds and an oracle (see
 [`AbstractOracle`](@ref)). A new optimiser is a subtype of [`Optimizer`](@ref) that implements the four functions of
@@ -17,8 +17,8 @@ shrink!(opt, state, factor)             # roll back the last step and reduce the
 ```
 
 An optimiser that treats constraints itself also declares which ones, with [`handles`](@ref) and
-[`max_native`](@ref) (by default none: `solve!` then refuses every constraint until the augmented Lagrangian
-comes).
+[`max_native`](@ref) (by default none: every constraint then goes to the augmented Lagrangian,
+[`AugmentedLagrangian`](@ref)), and may implement [`objective_changed!`](@ref) (default `reset!`).
 """
 module Optimizers
 
@@ -29,10 +29,14 @@ export AbstractOracle, FunctionOracle
 export objective, gradient!, bounds, num_constraints, constraint_info, linear_constraint, constraint, constraint_gradient!,
        constraints!, weighted_gradient!, riesz!
 export OC, SiMPL, constraint_tol, computes_kkt, set_move!, memory, restore_memory!, stationarity!
+export AugmentedLagrangian, Bertsekas, MultiplierUpdate, AugmentedLagrangianOracle, end_iteration!, objective_changed!,
+       multipliers, penalties
+public term, weight, initial_penalty, update!
 
 include("Oracle.jl")
 include("Interface.jl")
 include("OC.jl")
 include("SiMPL.jl")
+include("AugmentedLagrangian.jl")
 
 end

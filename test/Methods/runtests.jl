@@ -122,41 +122,118 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     HyperShape.Optimizers.objective(o, zt)
     HyperShape.Optimizers.objective(o, zk)
     @test HyperShape.Optimizers.weighted_gradient!(zeros(length(zk)), o, 1.5, w, zk) ≈ dL rtol = 1e-10
-    # OC and SiMPL treat one constraint g ≤ 0 that solves no state; the rest needs the augmented Lagrangian
-    for opt in (OC(), SiMPL())
-      err = try
-        solve!(pb, DensityMethod(opt; metric = Euclidean()); maxiter = 2, verbose = 0)
-        nothing
-      catch e
-        e
-      end
-      @test err isa ArgumentError && occursin("augmented Lagrangian", err.msg) &&
-            occursin("floor", err.msg) && occursin("tip", err.msg) && !occursin("volume", err.msg)
-    end
+    # who treats what: the volume native (OC, SiMPL), the others to the augmented Lagrangian, decided without solves
+    split(opt, lag = AugmentedLagrangian()) = HyperShape.Methods._native_split(pb, opt, lag)
+    @test split(OC()) == [1] && split(SiMPL()) == [1]
+    @test split(SiMPL(), AugmentedLagrangian(native = ())) == Int[]
+    @test_throws ArgumentError split(OC(), AugmentedLagrangian(native = ()))           # OC needs one of its own
+    @test_throws ArgumentError split(SiMPL(), AugmentedLagrangian(native = (:tip,)))   # reads a state
+    @test_throws ArgumentError split(SiMPL(), AugmentedLagrangian(native = (:nope,)))
+    @test_throws ArgumentError split(SiMPL(), AugmentedLagrangian(native = (:volume, :volume)))
     lower = Optimization(z; objective = q.C, constraints = (floor = Constraint(Vraw; min = 0.1vol),))
-    @test_throws ArgumentError solve!(lower, DensityMethod(OC(); metric = Euclidean()); maxiter = 2, verbose = 0)
-    # refused before anything is solved or printed
-    n0 = num_solves(q.S)
+    @test HyperShape.Methods._native_split(lower, SiMPL(), AugmentedLagrangian()) == Int[]
+    @test_throws ArgumentError HyperShape.Methods._native_split(lower, OC(), AugmentedLagrangian())
+    # the banner says who treats each constraint
     buf = IOBuffer()
-    @test_throws ArgumentError solve!(pb, DensityMethod(OC(); metric = Euclidean()); maxiter = 2, io = buf)
-    @test num_solves(q.S) == n0 && isempty(take!(buf))
+    solve!(pb, DensityMethod(SiMPL(); metric = Euclidean()); maxiter = 1, verbose = 1, io = buf, stop = nothing)
+    out = String(take!(buf))
+    @test occursin("augmented Lagrangian: Bertsekas(μ0 = 1.0, growth = 1.0) (default)", out) && occursin("native", out)
     # OC and SiMPL check by themselves what they are given (an oracle used outside solve!)
     ol = FunctionalOracle(lower, Euclidean())
     _setup_constraint!(ol, 1, lower.ctx)
     @test_throws ArgumentError init(OC(), copy(get_values(z)), ol)
     @test_throws ArgumentError init(SiMPL(), copy(get_values(z)), ol)
-    # an optimiser of the user that does not declare what it treats: the message says how
-    err = try
-      solve!(q.problem, DensityMethod(PlainOpt(); metric = Euclidean()); maxiter = 2, verbose = 0); nothing
-    catch e
-      e
-    end
-    @test err isa ArgumentError && occursin("handles", err.msg) && occursin("max_native", err.msg)
+    # an optimiser of the user that does not declare what it treats: every constraint goes to the augmented Lagrangian
+    @test HyperShape.Methods._native_split(q.problem, PlainOpt(), AugmentedLagrangian()) == Int[]
     # a constraint that cannot be evaluated at the start, with scale = :initial
     Vnan = Functional(θ -> NaN * sum(∫(θ.ρ)dΩ), q.θv; dJdθ = θ -> (δ -> ∫(δ)dΩ), scale = :initial)
     on = FunctionalOracle(Optimization(z; objective = q.C, constraints = (bad = Vnan,)), Euclidean())
     err = try HyperShape.Optimizers.constraint_info(on, 1); nothing catch e; e end
     @test err isa ArgumentError && occursin("not finite", err.msg)
+  end
+
+  @testset "Augmented Lagrangian: two constraints with the state (thermal)" begin
+    # minimum physical volume s.t. compliance ≤ 1.3 C₀ (self-adjoint) and mean boundary value ≤ 1.2 B₀ (own adjoint)
+    p = state_problem(; n = 16, init = fill(0.6, 256))
+    (; θ, dΩ) = p
+    C0 = functional_value(p.compliance(scale = 1.0), nothing)
+    B0 = functional_value(p.boundary(scale = 1.0), nothing)
+    vol = Functional(θ -> ∫(θ.ρ)dΩ, θ; dJdθ = θ -> (δ -> ∫(δ)dΩ), scale = 1.0)
+    pb = Optimization(objective = vol, constraints = (compliance = Constraint(p.compliance(scale = :bound); max = 1.3C0),
+                                                      boundary = Constraint(p.boundary(scale = :bound); max = 1.2B0)))
+    r = solve!(pb, DensityMethod(SiMPL(); metric = LumpedMass(dΩ)); maxiter = 200, verbose = 0, stop = nothing)
+    h = r.history
+    @test h.violations.compliance[end] <= 1e-4 && h.violations.boundary[end] <= 1e-4
+    @test h.multipliers.compliance[end] == 0 && h.constraints.compliance[end] < -0.1           # inactive
+    @test h.multipliers.boundary[end] > 0 && abs(h.constraints.boundary[end]) < 1e-3           # active
+    @test h.penalties.compliance[end] == 1.0 && h.penalties.boundary[end] == 1.0
+    @test h.objective[end] < 0.6                         # below the uniform start
+    @test sum(h.adjoint) <= r.iterations                  # at most one adjoint solve per iteration (one sweep)
+    # LinearInState: the same derivative as the form written by hand
+    Bl = Functional((u, θ) -> ∫(u)p.dΓ, p.S; dJdu = LinearInState(), fields = θ, scale = 1.0)
+    g1 = functional_gradient!(zeros(length(p.z)), Bl, nothing)
+    g2 = functional_gradient!(zeros(length(p.z)), p.boundary(scale = 1.0), nothing)
+    @test g1 ≈ g2 rtol = 1e-12
+  end
+
+  @testset "Augmented Lagrangian with a native constraint, a lower bound and a checkpoint" begin
+    # minimum compliance s.t. physical volume ≤ 0.4 (native) and mean boundary value ≥ 0.5 B₀ (augmented Lagrangian)
+    mk() = begin
+      p = state_problem(; n = 16, init = fill(0.4, 256))
+      B0 = functional_value(p.boundary(scale = 1.0), nothing)
+      pb = Optimization(objective = p.compliance(scale = :initial),
+                        constraints = (volume = Volume(p.θ, p.dΩ; max_fraction = 0.4),
+                                       boundary = Constraint(p.boundary(scale = :bound); min = 0.5B0)))
+      p, pb
+    end
+    p, pb = mk()
+    r = solve!(pb, DensityMethod(SiMPL(); metric = LumpedMass(p.dΩ)); maxiter = 320, verbose = 0, stop = nothing)
+    h = r.history
+    @test h.violations.volume[end] <= 1e-6 && h.violations.boundary[end] <= 1e-4
+    @test h.multipliers.boundary[end] < 0                 # the lower bound is active
+    @test isnan(h.penalties.volume[end]) && h.penalties.boundary[end] == 1.0
+    # a resumed run continues as the uninterrupted one (OC saves its memory; λ and μ are in the checkpoint)
+    dir = mktempdir()
+    runs = map((nothing, dir)) do resume
+      p, pb = mk()
+      resume === nothing ||
+        solve!(pb, DensityMethod(OC()); maxiter = 6, verbose = 0, stop = nothing, checkpoint = Checkpoint(filepath = dir, every = 6))
+      p, pb = mk()
+      solve!(pb, DensityMethod(OC()); maxiter = 12, verbose = 0, stop = nothing, resume)
+    end
+    @test runs[1].history.objective == runs[2].history.objective
+    @test runs[1].history.multipliers.boundary == runs[2].history.multipliers.boundary
+    @test get_values(runs[1].z) == get_values(runs[2].z)
+    ck = load_checkpoint(dir)
+    @test ck.handled == Dict(:volume => :native, :boundary => :lagrangian) && ck.lagrangian.updates == 6
+    # the split of the checkpoint must be the one of the run (both ways)
+    p, pb = mk()
+    pc = mktempdir()
+    solve!(pb, DensityMethod(SiMPL(); metric = LumpedMass(p.dΩ), lagrangian = AugmentedLagrangian(native = ()));
+           maxiter = 2, verbose = 0, stop = nothing, checkpoint = Checkpoint(filepath = pc, every = 2))
+    p, pb = mk()
+    @test_throws ArgumentError solve!(pb, DensityMethod(SiMPL(); metric = LumpedMass(p.dΩ)); maxiter = 4, verbose = 0, resume = pc)
+    # a monitor that throws: the checkpoint has the update of that iteration
+    p, pb = mk()
+    pf = mktempdir()
+    @test_throws OptimizationFailure solve!(pb, DensityMethod(OC()); maxiter = 6, verbose = 0, stop = nothing,
+                                            monitors = (b = _BadMonitor(3, Ref(0)),), checkpoint = Checkpoint(filepath = pf, every = 10))
+    @test load_checkpoint(pf).lagrangian.updates == load_checkpoint(pf).iteration == 3
+    # a run that ends with a constraint violated says so
+    p, _ = mk()
+    pv = Optimization(objective = p.compliance(scale = :initial),
+                      constraints = (far = Constraint(p.boundary(scale = :bound); min = 3 * functional_value(p.boundary(scale = 1.0), nothing)),))
+    buf = IOBuffer()
+    solve!(pv, DensityMethod(SiMPL(); metric = LumpedMass(p.dΩ)); maxiter = 1, verbose = 1, io = buf, stop = nothing)
+    @test occursin("constraints not met to their tolerance", String(take!(buf)))
+    p, pb = mk()
+    @test_throws ArgumentError solve!(pb, DensityMethod(SiMPL(); metric = LumpedMass(p.dΩ),
+                                      lagrangian = AugmentedLagrangian(native = ())); maxiter = 12, verbose = 0, resume = dir)
+    # a checkpoint of another version says which
+    tfile = joinpath(dir, "checkpoint.toml")
+    write(tfile, replace(read(tfile, String), "hypershape_checkpoint = 2" => "hypershape_checkpoint = 1"))
+    err = try load_checkpoint(dir); nothing catch e; e end
+    @test err isa ArgumentError && occursin("version 1", err.msg)
   end
 
   @testset "Constraint(F; max = 0) is the functional alone (bit for bit)" begin
@@ -694,7 +771,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
                 resume = dir, stop = nothing)
     @test r1.iterations == 4 && r1.history.multipliers.volume[1:2] == rb.history.multipliers.volume
     tfile = joinpath(dir, "checkpoint.toml")
-    write(tfile, replace(read(tfile, String), "hypershape_checkpoint = 1" => "format = 5"))
+    write(tfile, replace(read(tfile, String), "hypershape_checkpoint = 2" => "format = 5"))
     @test_throws ArgumentError load_checkpoint(dir)
     @test_throws ArgumentError load_checkpoint(mktempdir())
     # the scaled start leaves the entries the constraint does not act on

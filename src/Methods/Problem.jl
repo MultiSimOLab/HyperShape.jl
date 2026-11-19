@@ -17,8 +17,8 @@ when given they are checked) subject to the bounds of `z` and the named `constra
 (`history.constraints.volume`), the banner and the checkpoint. Constraints may read states.
 
 The optimiser treats some constraints itself (OC and SiMPL: one inequality that solves no state, typically the volume;
-see `handles`); the others need the augmented Lagrangian, which comes in the next version: until then `solve!` stops
-with an error that names them.
+see `handles`); the others enter its objective through the augmented Lagrangian of the method
+(`DensityMethod(…; lagrangian = AugmentedLagrangian(…))`, used by default and shown in the banner).
 
 A constraint built as linear (`Volume` over identity or filter maps, or a `Functional(…; linear = true)`) is checked
 to be linear when the optimisation starts, and costs nothing in the loop (its vector is computed once). A nonlinear
@@ -87,7 +87,7 @@ end
 const Metric = Union{Euclidean,LumpedMass}
 
 """
-    DensityMethod(optimizer; metric = default_metric(optimizer))
+    DensityMethod(optimizer; metric = default_metric(optimizer), lagrangian = AugmentedLagrangian())
 
 Density method (SIMP, RAMP or any interpolation written by the user in the weak forms): the step is `optimizer` (any
 `Optimizer`: `OC(…)`, `SiMPL(…)`). `metric`: [`LumpedMass`](@ref)`(dΩ)`, [`Euclidean`](@ref)`()`, a vector of
@@ -96,18 +96,30 @@ positive weights (one per entry of z: `inner(x, y) = Σ mᵢ xᵢ yᵢ`), an obj
 per block of z. SiMPL uses
 it in its step and its optimality measure, and needs it (no default). OC uses it only for the stationarity measure
 (see [`StopCriteria`](@ref)); its default is `Euclidean()`, which makes that measure depend on the mesh.
+
+`lagrangian`: how the constraints the optimiser does not treat itself are handled, an
+[`AugmentedLagrangian`](@ref HyperShape.Optimizers.AugmentedLagrangian) (default `AugmentedLagrangian()`:
+[`Bertsekas`](@ref HyperShape.Optimizers.Bertsekas) with a fixed penalty `μ = 1`, multipliers updated after every
+accepted iteration, the first constraints the optimiser handles kept native). It is used only when there is such a
+constraint, or when its `native` names fewer than the optimiser would take.
 """
-struct DensityMethod{O<:Optimizer,M}
+struct DensityMethod{O<:Optimizer,M,L<:AugmentedLagrangian}
   optimizer::O
   metric::M
   default_metric::Bool   # the metric was not given (shown in the banner)
-  function DensityMethod(optimizer::Optimizer; metric = nothing)
+  lagrangian::L
+  default_lagrangian::Bool
+  function DensityMethod(optimizer::Optimizer; metric = nothing, lagrangian = nothing)
+    lgiven = lagrangian !== nothing
+    lgiven || (lagrangian = AugmentedLagrangian())
+    lagrangian isa AugmentedLagrangian ||
+      throw(ArgumentError("DensityMethod: lagrangian must be an AugmentedLagrangian, for example AugmentedLagrangian(Bertsekas(μ0 = 0.1))"))
     given = metric !== nothing
     given || (metric = default_metric(optimizer))
     ok = _valid_metric(metric) || (metric isa NamedTuple && all(_valid_metric, values(metric)))
     ok || throw(ArgumentError("DensityMethod: metric must be LumpedMass(dΩ), Euclidean(), a vector of positive weights, " *
                               "an object with a metric_weights(m, z) method, or a named tuple of them per block"))
-    new{typeof(optimizer),typeof(metric)}(optimizer, metric, !given)
+    new{typeof(optimizer),typeof(metric),typeof(lagrangian)}(optimizer, metric, !given, lagrangian, !lgiven)
   end
 end
 
@@ -182,6 +194,7 @@ mutable struct FunctionalOracle{J,C<:Tuple,Z,M,V<:AbstractVector{Float64},FS<:Tu
   cons::C                       # the constraints (Constraint objects)
   Fs::FS                        # (objective, functional of each constraint): one tuple type for weighted_gradient!
   wbuf::Vector{Float64}         # its weights
+  infos::Vector{Union{Nothing,ConstraintInfo}}   # constraint_info, kept once the scale is set
   z::Z
   ctx::OptContext
   zk::V                         # the loop's current design (shared with the loop)
@@ -204,7 +217,8 @@ function FunctionalOracle(problem::Optimization, metric)
   v = get_values(z)
   cons = Tuple(values(problem.constraints))
   Fs = (problem.objective, map(c -> c.F, cons)...)
-  FunctionalOracle(problem.objective, cons, Fs, zeros(length(Fs)), z, problem.ctx, copy(v), copyto!(similar(v), lb), copyto!(similar(v), ub),
+  FunctionalOracle(problem.objective, cons, Fs, zeros(length(Fs)), Union{Nothing,ConstraintInfo}[nothing for _ in cons], z,
+                   problem.ctx, copy(v), copyto!(similar(v), lb), copyto!(similar(v), ub),
                    Union{Nothing,typeof(v)}[nothing for _ in cons], zeros(length(cons)), m,
                    zero(v), zero(v), NaN, false)
 end
@@ -281,10 +295,12 @@ function _constraint_scale(o::FunctionalOracle, i)
 end
 
 function constraint_info(o::FunctionalOracle, i)
+  info = o.infos[i]
+  info === nothing || return info
   c = o.cons[i]
   r = _reference(c)
   s = _constraint_scale(o, i)
-  ConstraintInfo((c.lo - r) / s, (c.hi - r) / s; linear = is_linear(c.F), design_only = is_design_only(c.F))
+  o.infos[i] = ConstraintInfo((c.lo - r) / s, (c.hi - r) / s; linear = is_linear(c.F), design_only = is_design_only(c.F))
 end
 
 linear_constraint(o::FunctionalOracle, i) = (a = o.a[i]; a === nothing ? nothing : (a, o.V[i]))

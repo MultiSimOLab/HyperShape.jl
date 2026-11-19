@@ -23,6 +23,9 @@ end
 @_export Functionals Functional
 @_export Functionals Volume
 @_export Functionals Constraint
+@_export Functionals LinearInState
+@_export Optimizers AugmentedLagrangian
+@_export Optimizers Bertsekas
 @_export Functionals functional_value
 @_export Functionals functional_gradient!
 @_export Checks check_consistency
@@ -80,3 +83,8 @@ end
 @_public PostProcess FieldWriter
 @_public PostProcess write_fields
 @_public Functionals AbstractFunctional
+@_public Optimizers MultiplierUpdate
+@_public Optimizers end_iteration!
+@_public Optimizers objective_changed!
+@_public Optimizers handles
+@_public Optimizers max_native
