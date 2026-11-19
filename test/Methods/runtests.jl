@@ -22,6 +22,38 @@ _NS.reset!(::NoStatOpt, state) = _NS.reset!(SiMPL(), state)
 _NS.constraint_tol(::NoStatOpt) = _NS.constraint_tol(SiMPL())
 _NS.handles(::NoStatOpt, c::_NS.ConstraintInfo) = _NS.handles(SiMPL(), c)     # a third-party optimiser declares them
 _NS.max_native(::NoStatOpt) = 1
+# a method of the user: a projected gradient step with the volume as a native linear constraint (by bisection)
+struct _GradStep <: HyperShape.Optimizers.Optimizer end
+_NS.handles(::_GradStep, c::_NS.ConstraintInfo) = c.linear && c.hi == 0 && _NS.is_upper(c)
+_NS.max_native(::_GradStep) = 1
+_NS.init(::_GradStep, z, oracle) = (dF = similar(z), z0 = similar(z))
+_NS.reset!(::_GradStep, s) = s
+_NS.shrink!(::_GradStep, s, f) = s
+_NS.computes_kkt(::_GradStep) = false
+function _NS.step!(::_GradStep, s, z, oracle, ctx)
+  f = _NS.objective(oracle, z)
+  _NS.gradient!(s.dF, oracle, z)
+  lb, ub = _NS.bounds(oracle)
+  a, V = _NS.linear_constraint(oracle, 1)
+  copyto!(s.z0, z)
+  α = 0.05 / maximum(abs, s.dF)
+  zc(λ) = clamp.(s.z0 .- α .* (s.dF .+ λ .* a), lb, ub)
+  lo, hi = 0.0, 1e6
+  for _ in 1:200
+    mid = (lo + hi) / 2
+    dot(a, zc(mid)) > V ? (lo = mid) : (hi = mid)
+  end
+  z .= zc(hi)
+  _NS.StepInfo(true, f, NaN, NaN, maximum(abs, z .- s.z0), α, 0.0, 1, hi, NaN)
+end
+Base.@kwdef struct _GradMethod <: HyperShape.Methods.AbstractMethod
+  bad::Bool = false
+end
+HyperShape.Methods.stepper(::_GradMethod) = _GradStep()
+HyperShape.Methods.build_oracle(::_GradMethod, problem) = FunctionalOracle(problem, Euclidean())
+HyperShape.Methods.augmented_lagrangian(::_GradMethod) = AugmentedLagrangian()
+HyperShape.Methods.check_problem(m::_GradMethod, problem) = m.bad ? throw(ArgumentError("bad problem")) : nothing
+
 # an optimiser of the user that does not declare handles/max_native
 struct PlainOpt <: HyperShape.Optimizers.Optimizer end
 _NS.init(::PlainOpt, z, oracle) = _NS.init(SiMPL(), z, oracle)
@@ -231,7 +263,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
                                       lagrangian = AugmentedLagrangian(native = ())); maxiter = 12, verbose = 0, resume = dir)
     # a checkpoint of another version says which
     tfile = joinpath(dir, "checkpoint.toml")
-    write(tfile, replace(read(tfile, String), "hypershape_checkpoint = 2" => "hypershape_checkpoint = 1"))
+    write(tfile, replace(read(tfile, String), "hypershape_checkpoint = 3" => "hypershape_checkpoint = 1"))
     err = try load_checkpoint(dir); nothing catch e; e end
     @test err isa ArgumentError && occursin("version 1", err.msg)
   end
@@ -567,12 +599,13 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test isfile(joinpath(dir, "checkpoint.toml")) && isfile(joinpath(dir, "z_4.bin")) && isfile(joinpath(dir, "history_4.csv"))
     @test !isfile(joinpath(dir, "z_2.bin")) && !isfile(joinpath(dir, "memory_2.bin"))   # older files deleted
     ck = load_checkpoint(dir)
-    @test ck.optimizer == "OC" && length(ck.memory) == 3length(ck.z) + 2   # adaptive move limits saved
+    @test ck.optimizer == "OC" && keys(ck.memory) == (:started, :shift, :m, :dprev, :z_old)   # adaptive move limits saved
+    @test ck isa OptState && ck.method == "DensityMethod(OC)" && haskey(ck.linear_offsets, :volume)
     @test ck.iteration == 4 && ck.z == get_values(qb.z) && length(ck.history.objective) == 4
     qc = compliance_problem()
     rc = run(qc, 8; resume = ck)
-    @test get_values(qc.z) ≈ get_values(qa.z) rtol = 1e-12   # OC with adaptive limits resumes exactly (up to threaded sums)
-    @test isapprox(rc.history.objective, ra.history.objective; rtol = 1e-12) && rc.history.iteration == 1:8
+    @test get_values(qc.z) == get_values(qa.z)            # OC with adaptive limits resumes exactly
+    @test rc.history.objective == ra.history.objective && rc.history.iteration == 1:8
     @test qc.C.scale[] == qa.C.scale[]                    # the scale fixed in the first run
     # SiMPL resumes (not bit-identical) and the checks on the checkpoint
     qd = compliance_problem()
@@ -582,6 +615,41 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     qe = compliance_problem(; design = :P1)
     @test_throws ArgumentError run(qe, 8; resume = ck)
     @test_throws ArgumentError run(compliance_problem(), 4; resume = ck)   # already at maxiter
+  end
+
+  @testset "SiMPL resumes exactly; problem.state; LumpedMass(); multipliers of the result" begin
+    hcols(h) = (h.objective, h.kkt, h.stationarity, h.change, h.step, h.constraints.volume, h.multipliers.volume)
+    for (design, kind) in ((:P0, :linear), (:P1, :projected))
+      mk() = (q = compliance_problem(; design);
+              V = kind === :linear ? q.Vol : Volume(q.θ, q.dΩ; max_fraction = 0.4);
+              (q, Optimization(q.z; objective = q.C, constraints = (volume = V,))))
+      run(q, pb, maxiter; kw...) = solve!(pb, DensityMethod(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter, verbose = 0, stop = nothing, kw...)
+      qa, pa = mk(); ra = run(qa, pa, 10)
+      dir = mktempdir()
+      qb, pb = mk(); run(qb, pb, 5; checkpoint = Checkpoint(filepath = dir, every = 5))
+      ck = load_checkpoint(dir)
+      @test keys(ck.memory) == (:k, :μ, :α_prev, :shift, :ψ, :ψ_prev, :z_prev, :g_prev)
+      qc, pc = mk(); rc = run(qc, pc, 10; resume = ck)
+      @test hcols(rc.history) == hcols(ra.history) && get_values(qc.z) == get_values(qa.z)
+      # without files: the state the problem keeps
+      @test pb.state[] isa OptState && pb.state[].iteration == 5
+      qd, pd = mk(); rd = run(qd, pd, 10; resume = pb.state[])
+      @test hcols(rd.history) == hcols(ra.history)
+      @test ra.multipliers.volume == ra.history.multipliers.volume[end]
+    end
+    q = compliance_problem(; design = :P1)
+    @test HyperShape.Methods._metric_vector(LumpedMass(), q.z) ≈ HyperShape.Methods._metric_vector(LumpedMass(q.dΩ), q.z) rtol = 1e-14
+  end
+
+  @testset "A method of the user runs in the common loop" begin
+    q = compliance_problem()
+    r = solve!(q.problem, _GradMethod(); maxiter = 15, verbose = 0, stop = nothing)
+    @test r.iterations == 15 && r.history.objective[end] < r.history.objective[1]
+    @test all(v -> v <= 1e-8, r.history.violations.volume)          # the volume in the augmented Lagrangian... or met
+    buf = IOBuffer()
+    solve!(compliance_problem().problem, _GradMethod(); maxiter = 1, verbose = 1, io = buf, stop = nothing)
+    @test occursin("_GradMethod", String(take!(buf)))
+    @test_throws ArgumentError solve!(compliance_problem().problem, _GradMethod(bad = true); maxiter = 1, verbose = 0)
   end
 
   @testset "3D ($(design))" for design in (:P0, :P1)
@@ -658,7 +726,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     ck = load_checkpoint(dir)
     @test ck.stage == 2 && ck.stage_iterations == 2
     qc = compliance_problem(); rc = run(qc, 9; resume = ck)
-    @test get_values(qc.z) ≈ get_values(qa.z) rtol = 1e-12
+    @test get_values(qc.z) == get_values(qa.z)
     @test rc.history.continuation == ra.history.continuation
     qd = compliance_problem()
     @test_throws ArgumentError solve!(qd.problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 9, resume = ck,
@@ -796,7 +864,7 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
                 resume = dir, stop = nothing)
     @test r1.iterations == 4 && r1.history.multipliers.volume[1:2] == rb.history.multipliers.volume
     tfile = joinpath(dir, "checkpoint.toml")
-    write(tfile, replace(read(tfile, String), "hypershape_checkpoint = 2" => "format = 5"))
+    write(tfile, replace(read(tfile, String), "hypershape_checkpoint = 3" => "format = 5"))
     @test_throws ArgumentError load_checkpoint(dir)
     @test_throws ArgumentError load_checkpoint(mktempdir())
     # the scaled start leaves the entries the constraint does not act on
@@ -856,8 +924,8 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     rc = run(qc, 8; resume = load_checkpoint(dir))
     @test rc.history.iteration == 1:8 && rc.history.objective[1:4] == ra.history.objective[1:4]
     @test abs(rc.history.constraints.volume[end]) <= 1e-4
-    # move limits and correction shift are saved: the resumed run is the uninterrupted one (up to threaded sums)
-    @test rc.history.objective ≈ ra.history.objective rtol = 1e-10
+    # move limits and correction shift are saved: the resumed run is the uninterrupted one
+    @test rc.history.objective == ra.history.objective
   end
 
   @testset "Volume of the projected density: Taylor test (P1)" begin

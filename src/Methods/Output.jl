@@ -78,9 +78,10 @@ _bounds_label(c) = (c.lo == -Inf && c.hi == 0) ? "" : c.lo == c.hi ? " = $(_sig(
                    " in [$(_sig(c.lo)), $(_sig(c.hi))]"
 _sig(x) = string(round(x; sigdigits = 4))
 _g_or_e(x) = isfinite(x) ? @sprintf("%.0e", x) : "—"
-_metric_label(method) = _metric_name(method.metric) * (method.default_metric ? " (default)" : "") *
-                        (method.optimizer isa OC ? " (OC: only for the stationarity measure)" : "")
+metric_label(method::DensityMethod) = _metric_name(method.metric) * (method.default_metric ? " (default)" : "") *
+                                      (method.optimizer isa OC ? " (OC: only for the stationarity measure)" : "")
 _metric_name(m::LumpedMass) = "lumped mass"
+_metric_name(m::LumpedMass{Nothing}) = "lumped mass of the design space"
 _metric_name(m::AbstractVector) = "weights of the user"
 _metric_name(m) = string(nameof(typeof(m)))
 _metric_name(m::NamedTuple) = join(("$k: $(_metric_name(v))" for (k, v) in pairs(m)), ", ")
@@ -88,19 +89,20 @@ _metric_name(m::NamedTuple) = join(("$k: $(_metric_name(v))" for (k, v) in pairs
 function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, defaults, schedule, resume,
                        native = 1:length(problem.constraints))
   p.level >= 1 || return
-  opt = method.optimizer
+  opt = stepper(method)
   z = problem.z
-  title = " HyperShape · DensityMethod($(nameof(typeof(opt)))) "
+  title = " HyperShape · $(method_label(method)) "
   W = textwidth(_header(p, ntuple(_ -> "", length(p.widths))))   # as wide as the table
   _styled(p, "━━" * title * "━"^max(3, W - 2 - textwidth(title)) * "\n", :cyan; bold = true)
   blocks = join(("$n ($(length(r))" * (b.zone === nothing ? "" : ", $(b.zone.ncells) frozen cells") * ")"
                  for (n, r, b) in zip(z.names, z.ranges, z.blocks)), ", ")
   nc = length(problem.constraints)
-  lag = method.lagrangian
+  lag = augmented_lagrangian(method)
+  ml = metric_label(method)
   println(p.io, "  design variables $(length(z)): $blocks · constraint", nc > 1 ? "s" : "", ": ",
-          nc == 0 ? "none" : _constraint_label(problem, opt, native, lag.constraint_tol), " · metric: ", _metric_label(method))
+          nc == 0 ? "none" : _constraint_label(problem, opt, native, lag.constraint_tol), ml === nothing ? "" : " · metric: " * ml)
   if length(native) < nc
-    println(p.io, "  augmented Lagrangian: ", lag.update, method.default_lagrangian ? " (default)" : "",
+    println(p.io, "  augmented Lagrangian: ", lag.update, (method isa DensityMethod && method.default_lagrangian) ? " (default)" : "",
             ", multipliers updated every iteration")
     opt isa OC && _styled(p, "  OC is heuristic for an augmented Lagrangian (an objective of mixed sign): SiMPL is the safe choice\n", :yellow)
   end

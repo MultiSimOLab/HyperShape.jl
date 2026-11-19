@@ -24,7 +24,7 @@ module Optimizers
 
 using LinearAlgebra
 
-export Optimizer, StepInfo, ConstraintInfo, violation, handles, max_native
+export Optimizer, StepInfo, ConstraintInfo, violation, handles, max_native, requires_native
 export AbstractOracle, FunctionOracle
 export objective, gradient!, bounds, num_constraints, constraint_info, linear_constraint, constraint, constraint_gradient!,
        constraints!, weighted_gradient!, riesz!

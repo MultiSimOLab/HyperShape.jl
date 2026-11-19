@@ -695,7 +695,9 @@ HyperShape.Optimizers.update!(::_QuadPenalty, al) = false
     za, zb = copy(z), copy(z)
     step!(opt, s, za, o3, nothing); step!(opt, s2, zb, o3, nothing)
     @test za == zb && s.m == s2.m && s.dprev == s2.dprev
-    @test_throws ArgumentError restore_memory!(opt, s2, z, v[1:end-1])
+    @test keys(v) == (:started, :shift, :m, :dprev, :z_old)
+    @test_throws ArgumentError restore_memory!(opt, s2, z, (; v..., m = v.m[1:end-1]))
+    @test_throws ArgumentError restore_memory!(opt, s2, z, Base.structdiff(v, (shift = 0,)))
     # no allocations with adaptive limits and a nonlinear constraint
     W = 1.0
     onl = FunctionOracle(z -> sum(x -> abs2(x - 0.9), z) / 2, (d, z) -> (d .= z .- 0.9);

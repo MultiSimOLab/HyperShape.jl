@@ -90,3 +90,11 @@ end
 @_public Optimizers objective_changed!
 @_public Optimizers handles
 @_public Optimizers max_native
+@_export Methods OptState
+@_public Methods AbstractMethod
+@_public Methods stepper
+@_public Methods build_oracle
+@_public Methods augmented_lagrangian
+@_public Methods check_problem
+@_public Methods method_label
+@_public Methods metric_label

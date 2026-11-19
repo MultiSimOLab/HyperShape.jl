@@ -25,14 +25,17 @@ to be linear when the optimisation starts, and costs nothing in the loop (its ve
 one is linearised at every step by the optimiser, which then corrects it with evaluations of the true constraint
 (one filter solve each, no forward solve): see `OC` and `SiMPL`.
 
-The problem owns the context `ctx` ([`OptContext`](@ref)) that reaches the solve functions of the user.
+The problem owns the context `ctx` ([`OptContext`](@ref)) that reaches the solve functions of the user, and
+`problem.state[]`, the [`OptState`](@ref) of its last `solve!` (also after a failure or an interruption): pass it as
+`resume` to continue without files.
 """
 struct Optimization{Z<:OptVariables,J<:AbstractFunctional,C<:NamedTuple}
   z::Z
   objective::J
   constraints::C
   ctx::OptContext
-  Optimization(::_Validated, z, J, cs) = new{typeof(z),typeof(J),typeof(cs)}(z, J, cs, OptContext(:optimization))
+  state::Base.RefValue{Any}     # the OptState of the last solve! (nothing before)
+  Optimization(::_Validated, z, J, cs) = new{typeof(z),typeof(J),typeof(cs)}(z, J, cs, OptContext(:optimization), Ref{Any}(nothing))
 end
 
 Optimization(z::OptVariables; objective, constraints = (;)) = _optimization(z, objective, constraints)
@@ -79,12 +82,43 @@ struct Euclidean end
 
 Diagonal metric `m = ∫ v dΩ` assembled on each design space: the cell volumes for a P0 design, the lumped mass (row
 sums of the mass matrix) for a P1 design. `inner(x, y) = Σ mᵢ xᵢ yᵢ`, `riesz!(g, dF) = dF ./ m`.
+
+    LumpedMass()
+
+The same on the triangulation of each design space, with a quadrature of degree 2 (exact for designs of order up to
+2): no measure to give, and it follows the design spaces if the mesh changes.
 """
 struct LumpedMass{M}
   measure::M
 end
+LumpedMass() = LumpedMass(nothing)
 
 const Metric = Union{Euclidean,LumpedMass}
+
+"""
+    AbstractMethod
+
+Supertype of the methods (`DensityMethod`; reaction–diffusion and level set later). All methods share the loop of
+[`solve!`](@ref) (evaluation, acceptance, continuation, augmented Lagrangian, stopping, checkpoint, output); a method
+only gives its step and what the step sees of the problem, through four functions (public, not exported):
+
+- `stepper(m)`: the step, an `Optimizer` (`init`, `step!`, `reset!`, `shrink!`, `memory`, `restore_memory!`,
+  `objective_changed!`; see `HyperShape.Optimizers`);
+- `build_oracle(m, problem)`: the oracle the step sees (objective, gradient, constraints, bounds, metric);
+- `augmented_lagrangian(m)`: the [`AugmentedLagrangian`](@ref HyperShape.Optimizers.AugmentedLagrangian) of the constraints
+  the step does not treat;
+- `check_problem(m, problem)`: errors when the run starts (default: none).
+
+`method_label(m)` (default: the name of the type) and `metric_label(m)` (default: none) go to the banner.
+"""
+abstract type AbstractMethod end
+
+function stepper end
+function build_oracle end
+function augmented_lagrangian end
+check_problem(::AbstractMethod, problem) = nothing
+method_label(m::AbstractMethod) = string(nameof(typeof(m)))
+metric_label(::AbstractMethod) = nothing
 
 """
     DensityMethod(optimizer; metric = default_metric(optimizer), lagrangian = AugmentedLagrangian())
@@ -103,7 +137,7 @@ it in its step and its optimality measure, and needs it (no default). OC uses it
 accepted iteration, the first constraints the optimiser handles kept native). It is used only when there is such a
 constraint, or when its `native` names fewer than the optimiser would take.
 """
-struct DensityMethod{O<:Optimizer,M,L<:AugmentedLagrangian}
+struct DensityMethod{O<:Optimizer,M,L<:AugmentedLagrangian} <: AbstractMethod
   optimizer::O
   metric::M
   default_metric::Bool   # the metric was not given (shown in the banner)
@@ -122,6 +156,16 @@ struct DensityMethod{O<:Optimizer,M,L<:AugmentedLagrangian}
     new{typeof(optimizer),typeof(metric),typeof(lagrangian)}(optimizer, metric, !given, lagrangian, !lgiven)
   end
 end
+
+stepper(m::DensityMethod) = m.optimizer
+build_oracle(m::DensityMethod, problem) = FunctionalOracle(problem, m.metric)
+augmented_lagrangian(m::DensityMethod) = m.lagrangian
+function check_problem(::DensityMethod, problem)
+  lb, ub = get_bounds(problem.z)
+  (all(isfinite, lb) && all(isfinite, ub)) || throw(ArgumentError("DensityMethod: the bounds of z must be finite"))
+  nothing
+end
+method_label(m::DensityMethod) = "DensityMethod($(nameof(typeof(m.optimizer))))"
 
 """
     default_metric(optimizer)
@@ -161,6 +205,7 @@ function _checked_weights(w, n)
   collect(Float64, w)
 end
 _block_metric(m::LumpedMass, V) = collect(assemble_vector(v -> ∫(v)m.measure, V))
+_block_metric(::LumpedMass{Nothing}, V) = (dΩ = Measure(get_triangulation(V), 2); collect(assemble_vector(v -> ∫(v)dΩ, V)))
 
 _metric_vector(::Euclidean, z::OptVariables) = nothing
 _metric_vector(m::LumpedMass, z::OptVariables) = reduce(vcat, [_block_metric(m, b.space) for b in z.blocks])
