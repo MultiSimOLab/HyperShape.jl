@@ -194,6 +194,7 @@ mutable struct FunctionalOracle{J,C<:Tuple,Z,M,V<:AbstractVector{Float64},FS<:Tu
   cons::C                       # the constraints (Constraint objects)
   Fs::FS                        # (objective, functional of each constraint): one tuple type for weighted_gradient!
   wbuf::Vector{Float64}         # its weights
+  infos::Vector{Union{Nothing,ConstraintInfo}}   # constraint_info, kept once the scale is set
   z::Z
   ctx::OptContext
   zk::V                         # the loop's current design (shared with the loop)
@@ -216,7 +217,8 @@ function FunctionalOracle(problem::Optimization, metric)
   v = get_values(z)
   cons = Tuple(values(problem.constraints))
   Fs = (problem.objective, map(c -> c.F, cons)...)
-  FunctionalOracle(problem.objective, cons, Fs, zeros(length(Fs)), z, problem.ctx, copy(v), copyto!(similar(v), lb), copyto!(similar(v), ub),
+  FunctionalOracle(problem.objective, cons, Fs, zeros(length(Fs)), Union{Nothing,ConstraintInfo}[nothing for _ in cons], z,
+                   problem.ctx, copy(v), copyto!(similar(v), lb), copyto!(similar(v), ub),
                    Union{Nothing,typeof(v)}[nothing for _ in cons], zeros(length(cons)), m,
                    zero(v), zero(v), NaN, false)
 end
@@ -293,10 +295,12 @@ function _constraint_scale(o::FunctionalOracle, i)
 end
 
 function constraint_info(o::FunctionalOracle, i)
+  info = o.infos[i]
+  info === nothing || return info
   c = o.cons[i]
   r = _reference(c)
   s = _constraint_scale(o, i)
-  ConstraintInfo((c.lo - r) / s, (c.hi - r) / s; linear = is_linear(c.F), design_only = is_design_only(c.F))
+  o.infos[i] = ConstraintInfo((c.lo - r) / s, (c.hi - r) / s; linear = is_linear(c.F), design_only = is_design_only(c.F))
 end
 
 linear_constraint(o::FunctionalOracle, i) = (a = o.a[i]; a === nothing ? nothing : (a, o.V[i]))

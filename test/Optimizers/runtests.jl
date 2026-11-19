@@ -155,6 +155,13 @@ function al_run(p; μ0 = 1.0, maxit = 20000, tol = 1e-6, x0 = p.x0)
   (; k = maxit, ok = false, z, f = p.f(z), λ = copy(al.λ), al)
 end
 
+# a rule of the user, as the docstring of MultiplierUpdate describes it (a quadratic penalty, λ = 0)
+struct _QuadPenalty <: HyperShape.Optimizers.MultiplierUpdate end
+HyperShape.Optimizers.term(::_QuadPenalty, g, λ, μ, c) = μ / 2 * violation(c, g)^2
+HyperShape.Optimizers.weight(::_QuadPenalty, g, λ, μ, c) = μ * (g > c.hi ? g - c.hi : g < c.lo ? g - c.lo : 0.0)
+HyperShape.Optimizers.initial_penalty(::_QuadPenalty) = 10.0
+HyperShape.Optimizers.update!(::_QuadPenalty, al) = (al.updates += 1; false)
+
 @testset "Optimizers" begin
 
   n = 40
@@ -493,6 +500,32 @@ end
       for _ in 1:200; mid = (lo + hi) / 2; sum(zs(mid)) > 2 ? (lo = mid) : (hi = mid); end
       @test maximum(abs, r.z .- zs(hi)) < 1e-5
     end
+  end
+
+  @testset "Augmented Lagrangian: growth of the penalty, guards, a rule of the user" begin
+    p = HS["HS35"]
+    inner = FunctionOracle(p.f, p.df!; lb = p.lb, ub = p.ub, constraints = p.cons)
+    z = fill(3.0, 3)                                   # g = 9 > 0: violated, constant
+    μs(u, n) = (al = AugmentedLagrangianOracle(inner, AugmentedLagrangian(u), (), z);
+                [(end_iteration!(al, z); al.μ[1]) for _ in 1:n])
+    m = μs(Bertsekas(growth = 2.0, window = 3, μmax = 100.0), 12)
+    @test m == [1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16]   # every window iterations while violated, from the first check
+    @test μs(Bertsekas(growth = 2.0, window = 1, μmax = 4.0), 5)[end] == 4.0
+    @test μs(Bertsekas(μ0 = 0.2, growth = 1.025, window = 1, progress = Inf, μmax = 2.0), 12)[end] ≈ 0.2 * 1.025^12  # Kim et al.
+    @test all(==(1.0), μs(Bertsekas(), 20))           # the default: fixed
+    al = AugmentedLagrangianOracle(inner, AugmentedLagrangian(), (), z)
+    objective(al, z)
+    @test_throws ArgumentError gradient!(similar(z), al, z .+ 0.1)   # not the design of the last objective
+    @test_throws ArgumentError AugmentedLagrangianOracle(inner, AugmentedLagrangian(), (1, 1), z)
+    # a rule of the user: the four functions of the docstring are enough
+    q = HS["HS43"]
+    alq = AugmentedLagrangianOracle(FunctionOracle(q.f, q.df!; lb = q.lb, ub = q.ub, constraints = q.cons),
+                                    AugmentedLagrangian(_QuadPenalty()), (), copy(q.x0))
+    zq = copy(q.x0); sq = init(SiMPL(), zq, alq)
+    for _ in 1:50
+      step!(SiMPL(), sq, zq, alq, nothing); end_iteration!(alq, zq)
+    end
+    @test alq.updates == 50 && all(==(10.0), alq.μ) && q.f(zq) < q.f(q.x0)
   end
 
   @testset "Augmented Lagrangian: objective_changed! keeps the step size of SiMPL" begin

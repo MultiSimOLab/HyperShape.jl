@@ -206,7 +206,26 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test get_values(runs[1].z) == get_values(runs[2].z)
     ck = load_checkpoint(dir)
     @test ck.handled == Dict(:volume => :native, :boundary => :lagrangian) && ck.lagrangian.updates == 6
-    # the split of the checkpoint must be the one of the run
+    # the split of the checkpoint must be the one of the run (both ways)
+    p, pb = mk()
+    pc = mktempdir()
+    solve!(pb, DensityMethod(SiMPL(); metric = LumpedMass(p.dΩ), lagrangian = AugmentedLagrangian(native = ()));
+           maxiter = 2, verbose = 0, stop = nothing, checkpoint = Checkpoint(filepath = pc, every = 2))
+    p, pb = mk()
+    @test_throws ArgumentError solve!(pb, DensityMethod(SiMPL(); metric = LumpedMass(p.dΩ)); maxiter = 4, verbose = 0, resume = pc)
+    # a monitor that throws: the checkpoint has the update of that iteration
+    p, pb = mk()
+    pf = mktempdir()
+    @test_throws OptimizationFailure solve!(pb, DensityMethod(OC()); maxiter = 6, verbose = 0, stop = nothing,
+                                            monitors = (b = _BadMonitor(3, Ref(0)),), checkpoint = Checkpoint(filepath = pf, every = 10))
+    @test load_checkpoint(pf).lagrangian.updates == load_checkpoint(pf).iteration == 3
+    # a run that ends with a constraint violated says so
+    p, _ = mk()
+    pv = Optimization(objective = p.compliance(scale = :initial),
+                      constraints = (far = Constraint(p.boundary(scale = :bound); min = 3 * functional_value(p.boundary(scale = 1.0), nothing)),))
+    buf = IOBuffer()
+    solve!(pv, DensityMethod(SiMPL(); metric = LumpedMass(p.dΩ)); maxiter = 1, verbose = 1, io = buf, stop = nothing)
+    @test occursin("constraints not met to their tolerance", String(take!(buf)))
     p, pb = mk()
     @test_throws ArgumentError solve!(pb, DensityMethod(SiMPL(); metric = LumpedMass(p.dΩ),
                                       lagrangian = AugmentedLagrangian(native = ())); maxiter = 12, verbose = 0, resume = dir)

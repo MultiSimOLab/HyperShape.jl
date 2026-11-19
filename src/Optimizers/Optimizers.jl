@@ -31,6 +31,7 @@ export objective, gradient!, bounds, num_constraints, constraint_info, linear_co
 export OC, SiMPL, constraint_tol, computes_kkt, set_move!, memory, restore_memory!, stationarity!
 export AugmentedLagrangian, Bertsekas, MultiplierUpdate, AugmentedLagrangianOracle, end_iteration!, objective_changed!,
        multipliers, penalties
+public term, weight, initial_penalty, update!
 
 include("Oracle.jl")
 include("Interface.jl")

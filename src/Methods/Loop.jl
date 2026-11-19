@@ -158,8 +158,9 @@ end
     Checkpoint(; filepath, every)
 
 Writes the state of the optimisation to the folder `filepath` every `every` accepted iterations, and also when the
-optimisation stops or fails: `checkpoint.toml` (iteration, continuation stage, scales of the functionals by name,
-sizes and the names of the other files), `z_<iteration>.bin` (the design, raw `Float64`), `history_<iteration>.csv`
+optimisation stops or fails: `checkpoint.toml` (format version 2: iteration, continuation stage, scales of the
+functionals by name, who treats each constraint and the multipliers and penalties of the augmented Lagrangian by
+name, sizes and the names of the other files), `z_<iteration>.bin` (the design, raw `Float64`), `history_<iteration>.csv`
 and, for optimisers that save one, `memory_<iteration>.bin` (see [`memory`](@ref HyperShape.Optimizers.memory)).
 The data files are written first and `checkpoint.toml` last, under a temporary name and then renamed, so they always
 belong to the same iteration; older files are then deleted. Resume with `solve!(…; resume = filepath)` (or the
@@ -385,22 +386,22 @@ function _atomic_write(f, file)
   mv(tmp, file; force = true)
 end
 
-# the history as CSV: the base columns, then `constraint:<name>`, `multiplier:<name>`, `violation:<name>`,
-# `penalty:<name>`, `monitor:<name>` and one column per continued parameter
+# the history as CSV: the base columns, then `constraint:<name>`, `multiplier:<name>`, `monitor:<name>`, one column per
+# continued parameter, `violation:<name>` and `penalty:<name>`
 function _write_history(io, hist::OptHistory)
   cn = hist.constraint_names
   head = vcat(String[String(c) for c in HISTORY_COLUMNS], ["constraint:$c" for c in cn], ["multiplier:$c" for c in cn],
-              ["violation:$c" for c in cn], ["penalty:$c" for c in cn], ["monitor:$m" for m in hist.monitor_names],
-              String[String(c) for c in hist.continuation_names])
+              ["monitor:$m" for m in hist.monitor_names], String[String(c) for c in hist.continuation_names],
+              ["violation:$c" for c in cn], ["penalty:$c" for c in cn])
   println(io, join(head, ","))
   for j in 1:hist.n
     row = Any[getfield(hist, f)[j] for f in HISTORY_COLUMNS]
     append!(row, view(hist.constraint_values, :, j))
     append!(row, view(hist.multiplier_values, :, j))
-    append!(row, view(hist.violation_values, :, j))
-    append!(row, view(hist.penalty_values, :, j))
     append!(row, view(hist.monitor_values, :, j))
     append!(row, view(hist.continuation_values, :, j))
+    append!(row, view(hist.violation_values, :, j))
+    append!(row, view(hist.penalty_values, :, j))
     println(io, join(string.(row), ","))
   end
 end
@@ -485,8 +486,10 @@ const _CHECKPOINT_VERSION = 2
 
 Reads a checkpoint written by [`Checkpoint`](@ref): `z`, `iteration`, `stage`, `stage_iterations`, `scales` (named
 tuple: `objective` and one per constraint), `blocks`, `continuation` (names), `history` ([`OptHistory`](@ref)),
-`optimizer` (its name) and `memory` (the memory of the optimiser, see
-[`memory`](@ref HyperShape.Optimizers.memory), or `nothing`). `solve!(…; resume = filepath)` calls it. OC saves its
+`optimizer` (its name), `memory` (the memory of the optimiser, see
+[`memory`](@ref HyperShape.Optimizers.memory), or `nothing`), `handled` (for each constraint, `:native` or
+`:lagrangian`) and `lagrangian` (`nothing`, or the multipliers, penalties, penalty references and number of updates
+of the augmented Lagrangian, by name). `solve!(…; resume = filepath)` calls it. OC saves its
 adaptive move limits and correction shift and resumes exactly; SiMPL does not save its memory and restarts its step
 size. A checkpoint written after a failure does not save the memory.
 """
@@ -636,6 +639,15 @@ one adjoint and one transposed filter; one more forward after each continuation 
 nothing in the loop (its vector is computed once at the start); a nonlinear one costs, per step, one transposed filter
 for its derivative and one filter per correction (see `OC` and `SiMPL`), and no forward solve. With a nonlinear
 constraint the run only converges when the constraint also holds to the `constraint_tol` of the optimiser.
+
+With several constraints, or one the optimiser does not treat itself, the method's augmented Lagrangian
+([`DensityMethod`](@ref)`(…; lagrangian)`) takes the others: the banner says who treats each one, the table shows the
+largest violation and the largest `|λ|`, the multipliers are updated after every accepted iteration (no solve: the
+values at the accepted design are cached) and the run converges only when every constraint holds to its tolerance (a
+run that ends otherwise says which constraints do not). The scaled start acts on the native constraint only. A
+`stop` function receives the `StepInfo` of the optimiser, whose `f` is then the augmented objective; the history
+keeps the objective of the problem. Per iteration, the constraints of the augmented Lagrangian add no forward solve
+and, with their states, one adjoint solve per state in the same reverse sweep as the objective.
 """
 function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, on_failure = _DefaultFailure(),
                 stop = _DefaultStop(), continuation = nothing, checkpoint = nothing, post = nothing, monitors = (;),
@@ -674,8 +686,7 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
   native = _native_split(problem, opt, method.lagrangian)
   pr = _Printer(io, verbose, schedule, keys(monitors), length(problem.constraints) > 1)
   # a nonlinear constraint is met to the tolerance of the optimiser: above it, the value is shown in red
-  any(c -> !is_linear(c.F), problem.constraints) &&
-    (pr.red = min(_RED_CONSTRAINT, constraint_tol(opt), length(native) < length(problem.constraints) ? method.lagrangian.constraint_tol : Inf))
+  # a constraint violated beyond its tolerance is shown in red (set once the split is known; see below)
   lb, ub = get_bounds(z)
   (all(isfinite, lb) && all(isfinite, ub)) || throw(ArgumentError("DensityMethod: the bounds of z must be finite"))
   cont_names = schedule === nothing ? () : schedule.names
@@ -726,8 +737,7 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
   set_context!(ctx, :phase, :optimization)
   zk = fo.zk
   copyto!(zk, get_values(z))
-  oracle = length(native) == num_constraints(fo) ? fo : AugmentedLagrangianOracle(fo, method.lagrangian, native, zk)
-  oracle isa AugmentedLagrangianOracle && resume !== nothing && _restore_lagrangian!(oracle, resume, cnames)
+  resume === nothing || _check_handled(native, resume, cnames)
   t_start = nothing
   if resume === nothing                       # a resumed design is the one the run left
     t_start = isempty(native) ? nothing : _make_feasible!(fo, zk, native[1])
@@ -735,6 +745,11 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
     (t_start === nothing || t_start > 1 - 1e-6) || _print_event(pr, "· the starting design violated the constraint; it was scaled " *
                                             "towards the lower bound by $(round(t_start, sigdigits = 4)) to meet it", :yellow)
   end
+  # after the feasible start: a scale = :initial of a constraint is taken at the design the run starts from
+  oracle = length(native) == num_constraints(fo) ? fo : AugmentedLagrangianOracle(fo, method.lagrangian, native, zk)
+  oracle isa AugmentedLagrangianOracle && resume !== nothing && _restore_lagrangian!(oracle, resume, cnames)
+  pr.tols = [i in native ? (is_linear(problem.constraints[i].F) ? _RED_CONSTRAINT : min(_RED_CONSTRAINT, constraint_tol(opt))) :
+             method.lagrangian.constraint_tol for i in 1:length(problem.constraints)]
   zprev = similar(zk)
   state = init(opt, zk, oracle)
   if resume !== nothing && get(resume, :memory, nothing) !== nothing
@@ -782,6 +797,7 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
   end
 
   f_final = _sync!(oracle)                     # fields and forward state at the final design
+  _warn_unmet(pr, hist, cnames)
   _print_end(pr, status, reason, run.k, f_final, _last_monitors(hist, monitors))
   _print_summary(pr, map(_count, ops) .- cstart, run.k - k0)
   checkpoint === nothing ||
@@ -815,6 +831,7 @@ function _native_split(problem, opt, lag)
       length(native) < max_native(opt) && handles(opt, info) && push!(native, i)
     end
   else
+    allunique(lag.native) || throw(ArgumentError("AugmentedLagrangian: native repeats a name"))
     for n in lag.native
       i = findfirst(==(n), names)
       i === nothing && throw(ArgumentError("AugmentedLagrangian: native names $n, which is not a constraint of the problem"))
@@ -829,6 +846,14 @@ function _native_split(problem, opt, lag)
     throw(ArgumentError("solve!: OC needs one constraint F ≤ max that solves no state (the volume) of its own; " *
                         "use SiMPL, or keep that constraint native"))
   native
+end
+
+# a run that ends (maxiter, stall) with a constraint violated beyond its tolerance says which
+function _warn_unmet(pr, hist, cnames)
+  (hist.n == 0 || isempty(pr.tols)) && return nothing
+  bad = [string(n) for (j, n) in enumerate(cnames) if hist.violation_values[j, hist.n] > pr.tols[j]]
+  isempty(bad) || _print_event(pr, "⚠ constraints not met to their tolerance at the last design: " * join(bad, ", "), :yellow)
+  nothing
 end
 
 # The augmented Lagrangian over the FunctionalOracle: what the loop asks of the oracle of the problem
@@ -861,13 +886,16 @@ function _constraints_met(al::AugmentedLagrangianOracle, info, opt, viols)
 end
 
 # multipliers and penalties of a checkpoint, by name; the split native/augmented Lagrangian must be the same
-function _restore_lagrangian!(al::AugmentedLagrangianOracle, resume, cnames)
+function _check_handled(native, resume, cnames)
   handled = get(resume, :handled, Dict{Symbol,Symbol}())
   for (i, n) in enumerate(cnames)
-    want = i in al.native ? :native : :lagrangian
+    want = i in native ? :native : :lagrangian
     get(handled, n, want) == want || throw(ArgumentError("solve!: the checkpoint treats the constraint $n as " *
       "$(handled[n]); now it would be $want (change native in AugmentedLagrangian to match)"))
   end
+end
+
+function _restore_lagrangian!(al::AugmentedLagrangianOracle, resume, cnames)
   r = resume.lagrangian
   r === nothing && return al
   for i in al.absorbed
@@ -1055,24 +1083,23 @@ function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_
            c1[3] - c0[3])
     cvals = _constraint_values(oracle, zk)
     viols = _violations(oracle, cvals)
+    mults, pens = _multipliers(oracle, info), _penalties(oracle)      # those of the step, before the update
+    # the multipliers of the augmented Lagrangian, from the accepted design (before anything of the user can throw,
+    # so that a checkpoint written after a failure has them); the optimiser keeps its step size
+    end_iteration!(oracle, zk) && objective_changed!(opt, state)
     mvals = try
       map(_monitor, keys(monitors), values(monitors))
     catch e
       e isa InterruptException && rethrow()
-      _record!(hist, row, cvals, _multipliers(oracle, info), map(_ -> NaN, values(monitors)), cont_buf, viols,
-               _penalties(oracle))
+      _record!(hist, row, cvals, mults, map(_ -> NaN, values(monitors)), cont_buf, viols, pens)
       fail("a monitor threw at iteration $k: " * first(sprint(showerror, e), 300))
     end
-    _record!(hist, row, cvals, _multipliers(oracle, info), mvals, cont_buf, viols, _penalties(oracle))
+    _record!(hist, row, cvals, mults, mvals, cont_buf, viols, pens)
     copyto!(run.zacc, zk)
     _print_row(pr, hist)
     r = _stop_reason(stop, info, hist, run.stage_start, ctx)
     # convergence also needs the constraints met to their tolerances
     (r !== nothing && !_constraints_met(oracle, info, opt, viols)) && (r = nothing)
-    # the multipliers of the augmented Lagrangian, from the accepted design; the optimiser keeps its step size
-    if end_iteration!(oracle, zk)
-      objective_changed!(opt, state)
-    end
     done = false
     if r !== nothing
       if schedule === nothing || run.stage == schedule.nstages

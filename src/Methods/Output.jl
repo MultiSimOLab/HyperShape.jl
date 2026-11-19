@@ -13,6 +13,7 @@ mutable struct _Printer{IO_}
   red::Float64          # a constraint value above this is shown in red
   monitors::Vector{Symbol}   # one column per monitor
   multi::Bool           # several constraints: the largest violation and multiplier
+  tols::Vector{Float64} # a constraint violated beyond its tolerance is shown in red
 end
 
 _verbose_level(v::Bool) = v ? 2 : 0
@@ -22,7 +23,8 @@ _verbose_level(v) = throw(ArgumentError("solve!: verbose must be 0, 1, 2 or a Bo
 function _Printer(io, verbose, schedule, monitors = (), multi = false)
   widths = schedule === nothing ? Int[] :
            [max(6, textwidth(string(n)), maximum(x -> textwidth(_g(x)), v)) for (n, v) in zip(schedule.names, schedule.values)]
-  _Printer(io, _verbose_level(verbose), time(), time(), false, widths, _RED_CONSTRAINT, collect(Symbol, monitors), multi)
+  _Printer(io, _verbose_level(verbose), time(), time(), false, widths, _RED_CONSTRAINT, collect(Symbol, monitors), multi,
+           Float64[])
 end
 
 _mwidth(n) = max(7, textwidth(string(n)))
@@ -145,8 +147,11 @@ function _print_row(p::_Printer, hist::OptHistory)
     μ = size(hist.multiplier_values, 1) == 0 ? NaN : hist.multiplier_values[1, k]
   end
   @printf(p.io, "  %5d  %13.6e  %9s  ", hist.iteration[k], f, isfinite(df) ? @sprintf("%+9.1e", df) : "        —")
+  # red: a constraint violated beyond its tolerance (its violation, so a lower bound that holds is not red)
+  bad = isempty(p.tols) ? g > p.red :
+        any(j -> hist.violation_values[j, k] > p.tols[j], eachindex(p.tols))
   if isfinite(g)
-    _styled(p, @sprintf("%10.2e", g), g > p.red ? :red : :normal)
+    _styled(p, @sprintf("%10.2e", g), bad ? :red : :normal)
   else
     print(p.io, "         —")
   end
