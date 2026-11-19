@@ -8,6 +8,10 @@ sensitivities are added). Every design field must be used. The constructor bring
 calling the solve functions of the operators with `ctx = OptContext(:setup)`. Read a field as `θ.ρ`: a fixed object (an
 `FEFunction` or a `CellField`) updated in place, so the weak forms can capture it.
 
+A frozen zone of the design field (see [`FieldVariable`](@ref)) is imposed at the end of every chain: on its cells
+θ is the image of the frozen value by the pointwise maps of the chain (`ρ = 1` gives `θ = 1` through a projection),
+whatever the filters, and its derivative vanishes there. It costs no solve and keeps a linear chain linear.
+
 `backend` (a reserved name: no physical field can be called `backend`) selects who assembles the sensitivities on
 the design spaces: `:compiled` (default, HyperFEMKernels) or `:lazy` (Gridap).
 """
@@ -46,6 +50,15 @@ function PhysicalFields(x::DesignFields; backend = :compiled, kwargs...)
       s = _stage(m, input)
       push!(stages, s)
       input = output(s)
+    end
+    # a frozen zone of the design field: θ takes the image of the frozen value there (the zone is real material)
+    zone = get_optvariables(x).blocks[i].zone
+    if zone !== nothing
+      value = zone.value
+      for m in _maps(map)
+        _pointwise(m) && (value = output(_stage(m, value)))
+      end
+      push!(stages, _mask_stage(input, zone, value))
     end
     push!(chains, Tuple(stages))
   end
@@ -268,3 +281,17 @@ function is_linear_field(θ::PhysicalFields, name::Symbol)
 end
 
 Base.show(io::IO, θ::PhysicalFields) = print(io, "PhysicalFields(", join(getfield(θ, :names), ", "), ")")
+
+# for check_consistency: (number of frozen cells, RMS of θ − frozen image over them) of the physical field name, or
+# nothing without a frozen zone
+function _frozen_check(θ::PhysicalFields, name::Symbol)
+  j = findfirst(==(name), getfield(θ, :names))
+  s = last(getfield(θ, :chains)[j])
+  s isa MaskStage || return nothing
+  f = getproperty(θ, name)
+  dΩ = Measure(get_triangulation(s.χ), 4)
+  area = sum(∫(s.χ)dΩ)
+  e = sum(∫(s.χ * (f - s.value) * (f - s.value))dΩ)
+  zone = get_optvariables(getfield(θ, :x)).blocks[getfield(θ, :sources)[j]].zone
+  zone.ncells, sqrt(max(e, 0.0) / area)
+end

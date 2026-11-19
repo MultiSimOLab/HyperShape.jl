@@ -59,7 +59,32 @@ Sf = LinearOperator(StaticLinearModel(af, Uf, Vf, NothingBC(); ls = LUSolver()))
   element. Codes such as top88 use one value per element, the cell mean of the filtered field:
   `CellMean(dΩ) ∘ F` gives that formulation (see the [Validation](validation.md) page).
 
-Planned: global parameters as blocks (applied voltage, fibre angle), frozen regions and scaling in the map `z → x`,
+**Frozen zones** (solid or void the optimisation cannot change: the material under a load, at a support, a skin)
+are declared once, on the design space, as Dirichlet tags with their values:
+
+```julia
+add_tag_from_vertex_filter!(labels, "solid", model, x -> (x[1] <= 2 && x[2] >= ny - 2) || (x[1] >= nx - 2 && x[2] <= 2))
+Vρ = TestFESpace(model, ReferenceFE(lagrangian, Float64, 0); conformity = :L2, dirichlet_tags = "solid")
+z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = 0.5, frozen = 1.0, map = proj ∘ filter)
+```
+
+- Their values are not variables: `z` holds the free values only (the space with Dirichlet values is the affine map
+  `x = P z + x₀`), and `x` has the frozen values in the zones.
+- The zone is real material in the physical field: at the end of every chain `x → θ`, on the cells of the zones, `θ`
+  is the image of the frozen value by the pointwise maps (projection, `PointwiseMap`), whatever the filter (which
+  would otherwise dilute it: with a filter alone `θ` was 0.73–0.98 in small zones). The derivative vanishes there; the
+  mask costs no solve and keeps a linear chain linear, so `Volume` over filters stays a linear constraint. The filter
+  still sees the zone as solid, so the free material next to it attaches smoothly.
+- A zone is made of whole cells (every Dirichlet value belongs to a cell whose values are all frozen); a line of nodes
+  is an error: tag the cells next to it. A vertex tag (`add_tag_from_vertex_filter!`) serves P0 and P1 alike.
+- `frozen` is a number, one number per tag, or a function of the coordinates; inside the bounds. Several zones with
+  different values (solid and void) are fine. Periodic spaces work; spaces with other linear constraints (symmetries)
+  are not supported yet.
+- `max_fraction` of `Volume` is a fraction of the whole domain, the zones included. `frozen_indicator(x, :ρ)` gives
+  the zones as a P0 field (to write them); `check_consistency` checks that θ equals the frozen value there; the banner
+  shows the frozen cells of each block, and the checkpoint keeps their number.
+
+Planned: global parameters as blocks (applied voltage, fibre angle), scaling and symmetries in the map `z → x`,
 physical fields that depend on several design fields, material interpolation in the map `x → θ`.
 
 ## Constitutive wrappers (planned, phase 1)

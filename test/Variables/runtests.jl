@@ -606,4 +606,82 @@ end
     end
   end
 
+
+  @testset "Frozen zones: z, x and θ (P$order, $backend)" for order in (0, 1), backend in (:compiled, :lazy)
+    n = 8
+    model = CartesianDiscreteModel((0, 1, 0, 1), (n, n))
+    labels = get_face_labeling(model)
+    add_tag_from_vertex_filter!(labels, "solid", model, x -> x[1] <= 0.25 + 1e-9 && x[2] >= 0.75 - 1e-9)   # 2×2 cells
+    add_tag_from_vertex_filter!(labels, "void", model, x -> x[1] >= 0.75 - 1e-9 && x[2] <= 0.25 + 1e-9)    # 2×2 cells
+    add_tag_from_vertex_filter!(labels, "edge", model, x -> x[2] ≈ 0)                                      # a line of nodes
+    Ω = Triangulation(model)
+    dΩ = Measure(Ω, 2)
+    reffe = ReferenceFE(lagrangian, Float64, order)
+    conf = order == 0 ? :L2 : :H1
+    V = TestFESpace(model, reffe; conformity = conf, dirichlet_tags = ["solid", "void"])
+    Vf = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
+    Sf = LinearOperator(StaticLinearModel((u, v) -> ∫(0.005 * ∇(u) ⋅ ∇(v) + u * v)dΩ, TrialFESpace(Vf), Vf, NothingBC();
+                                          ls = LUSolver()); depends = ())
+    H = TanhProjection(β = 4.0, η = 0.5)
+    nfree = num_free_dofs(V)
+    init = [0.3 + 0.4 * abs(sin(1.7i)) for i in 1:nfree]
+    z, x, θ = single_field_design(:ρ, V; bounds = (0.0, 1.0), init, frozen = [1.0, 0.0], backend,
+                                  map = H ∘ HelmholtzFilter(Sf, dΩ; backend))
+    @test length(z) == nfree == num_free_dofs(TestFESpace(model, reffe; conformity = conf)) - (order == 0 ? 8 : 18)
+    χ = frozen_indicator(x, :ρ)
+    @test sum(∫(χ)dΩ) ≈ 8 / n^2
+    zone = z.blocks[1].zone
+    @test zone.ncells == 8 && zone.ndofs == (order == 0 ? 8 : 18)
+    solid = CellField(x -> (x[1] < 0.25 && x[2] > 0.75) ? 1.0 : 0.0, Ω)
+    void = CellField(x -> (x[1] > 0.75 && x[2] < 0.25) ? 1.0 : 0.0, Ω)
+    err(f) = sum(∫(solid * (f - 1.0) * (f - 1.0) + void * f * f)dΩ)
+    @test err(x.ρ) < 1e-28 && err(θ.ρ) == 0           # exact: the image of 1 and 0 by the projection
+    # after a change of z and of β, still exact; the derivative vanishes in the zone
+    set_values!(z, [0.2 + 0.6 * abs(cos(0.9i)) for i in 1:nfree])
+    set_beta!(H, 8.0)
+    update_fields!(θ, nothing)
+    @test err(θ.ρ) == 0
+    c = CellField(x -> 1 + x[1] * x[2], Ω)
+    J() = (update_fields!(θ, nothing); sum(∫(c * θ.ρ * θ.ρ)dΩ))
+    g = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(2 * c * θ.ρ * δ)dΩ,), nothing)
+    @test all(r -> 1.9 < r < 2.1, taylor_rates(J, g, z, [sin(0.7i) for i in 1:length(z)]))
+    gz = design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫((solid + void) * δ)dΩ,), nothing)
+    @test maximum(abs, gz) <= 1e-14                    # θ does not move in the zones
+    # a linear chain stays linear (the mask is affine): the volume of the filtered density is a linear constraint
+    z2, x2, θ2 = single_field_design(:ρ, V; bounds = (0.0, 1.0), init, frozen = [1.0, 0.0], backend,
+                                     map = HelmholtzFilter(Sf, dΩ; backend))
+    @test HyperShape.Variables.is_linear_field(θ2, :ρ)
+    @test sum(∫(solid * (θ2.ρ - 1.0) * (θ2.ρ - 1.0) + void * θ2.ρ * θ2.ρ)dΩ) == 0
+    # a chain of pointwise maps (as reaction–diffusion): φ ∈ [−1, 1] frozen at +1 and −1, θ = (1 + φ)/2
+    hstep = PointwiseMap(φ -> (1 + φ) / 2, φ -> 0.5)
+    z3, x3, θ3 = single_field_design(:φ, V; bounds = (-1.0, 1.0), init = 0.0, frozen = [1.0, -1.0], map = hstep, backend)
+    @test sum(∫(solid * (θ3.φ - 1.0) * (θ3.φ - 1.0) + void * θ3.φ * θ3.φ)dΩ) == 0
+    # errors when building
+    Vplain = TestFESpace(model, reffe; conformity = conf)
+    @test_throws ArgumentError FieldVariable(Vplain; bounds = (0.0, 1.0), init = 0.5, frozen = 1.0)
+    @test_throws ArgumentError FieldVariable(V; bounds = (0.0, 1.0), init = 0.5)                     # no values
+    @test_throws ArgumentError FieldVariable(V; bounds = (0.0, 1.0), init = 0.5, frozen = 2.0)       # outside the bounds
+    @test_throws ArgumentError FieldVariable(TrialFESpace(V, 1.0); bounds = (0.0, 1.0), init = 0.5, frozen = 1.0)
+    if order == 1                                       # a line of nodes is not a zone of cells
+      Ve = TestFESpace(model, reffe; conformity = conf, dirichlet_tags = "edge")
+      @test_throws ArgumentError FieldVariable(Ve; bounds = (0.0, 1.0), init = 0.5, frozen = 1.0)
+    else                                                # in P0 a tag of a boundary freezes no cell: no Dirichlet value
+      Ve = TestFESpace(model, reffe; conformity = conf, dirichlet_tags = "edge")
+      @test num_dirichlet_dofs(Ve) == 0
+    end
+    @test_throws ArgumentError frozen_indicator(DesignFields(OptVariables(ρ = FieldVariable(Vplain; bounds = (0.0, 1.0), init = 0.5)); ρ = Identity()), :ρ)
+    @test occursin("8 frozen cells", sprint(show, z.blocks[1]))
+  end
+
+  @testset "Frozen zones with a periodic design space" begin
+    model = CartesianDiscreteModel((0, 1, 0, 1), (8, 8); isperiodic = (true, false))
+    labels = get_face_labeling(model)
+    add_tag_from_vertex_filter!(labels, "solid", model, x -> x[2] >= 0.75 - 1e-9)
+    Ω = Triangulation(model)
+    V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity = :H1, dirichlet_tags = "solid")
+    z, x, θ = single_field_design(:ρ, V; bounds = (0.0, 1.0), init = 0.5, frozen = 1.0, map = Identity())
+    @test z.blocks[1].zone.ncells == 16
+    @test sum(∫(frozen_indicator(x, :ρ) * (θ.ρ - 1.0) * (θ.ρ - 1.0))Measure(Ω, 2)) == 0
+  end
+
 end

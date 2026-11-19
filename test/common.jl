@@ -63,3 +63,38 @@ function state_problem(; n = 8, dim = 2, design = :P0, backend = :lazy, gD = 0.0
      adj, model_p, compliance, boundary)
 end
 
+
+# Half MBB beam with frozen solid zones of 2×2 cells under the load and at the support (frozen-zones)
+function frozen_mbb(; nx = 16, ny = 6, order = 0, frozen = true, backend = :compiled)
+  model  = CartesianDiscreteModel((0, nx, 0, ny), (nx, ny))
+  labels = get_face_labeling(model)
+  add_tag_from_vertex_filter!(labels, "sym", model, x -> x[1] ≈ 0)
+  add_tag_from_vertex_filter!(labels, "roller", model, x -> x[1] ≈ nx && x[2] ≈ 0)
+  add_tag_from_vertex_filter!(labels, "load", model, x -> x[2] ≈ ny && x[1] <= 1)
+  add_tag_from_vertex_filter!(labels, "solid", model,
+    x -> (x[1] <= 2 + 1e-9 && x[2] >= ny - 2 - 1e-9) || (x[1] >= nx - 2 - 1e-9 && x[2] <= 2 + 1e-9))
+  Ω, Γ   = Triangulation(model), BoundaryTriangulation(model; tags = "load")
+  dΩ, dΓ = Measure(Ω, 2), Measure(Γ, 2)
+  bc = BoundaryConditions(BoundaryCondition("sym", VectorValue(0.0, 0.0); mask = (true, false)),
+                          BoundaryCondition("roller", VectorValue(0.0, 0.0); mask = (false, true)))
+  V  = TestFESpace(Ω, ReferenceFE(lagrangian, VectorValue{2,Float64}, 1), bc; conformity = :H1)
+  U  = TrialFESpace(V, bc, 1.0)
+  reffe = ReferenceFE(lagrangian, Float64, order)
+  conf = order == 0 ? :L2 : :H1
+  Vρ = frozen ? TestFESpace(model, reffe; conformity = conf, dirichlet_tags = "solid") : TestFESpace(model, reffe; conformity = conf)
+  proj = TanhProjection(β = 2.0, η = 0.5)
+  z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = 0.5, backend, frozen = frozen ? 1.0 : nothing,
+                                map = proj ∘ HelmholtzFilter(dΩ; rmin = 1.5, ls = LUSolver(), backend))
+  ν, Emin = 0.3, 1e-9
+  λ, μ = ν / (1 - ν^2), 1 / (2(1 + ν))
+  _, _, ∂²Ψ, _, _, ∂²Ψ_∂ρ = EnergyInterpolationScheme(LinearElasticity2D(λ = λ, μ = μ),
+                                                       LinearElasticity2D(λ = Emin * λ, μ = Emin * μ); p = 3.0)()
+  F, _, _ = get_Kinematics(Kinematics(Mechano, Solid))
+  t(x) = VectorValue(0.0, -(4 - 6x[1]))
+  a(u, v) = ∫(∇(v)' ⊙ ((∂²Ψ ∘ (θ.ρ, F ∘ ∇(u)')) ⊙ ∇(u)'))dΩ
+  S = StateOperator(StaticLinearModel(v -> ∫(t ⋅ v)dΓ, a, U, V, bc; ls = LUSolver(), backend), θ;
+        adjoint = AdjointProblem(sensitivity = (u, p) -> (δ -> ∫((∇(p)' ⊙ ((∂²Ψ_∂ρ ∘ (θ.ρ, F ∘ ∇(u)')) ⊙ ∇(u)')) * δ)dΩ)))
+  C = Functional((u, θ) -> ∫(t ⋅ u)dΓ, S; dJdu = SelfAdjoint(), scale = :initial)
+  Vol = Volume(θ, dΩ; max_fraction = 0.5)
+  (; z, x, θ, S, C, Vol, dΩ, proj, problem = Optimization(objective = C, constraints = (volume = Vol,)))
+end

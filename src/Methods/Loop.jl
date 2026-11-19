@@ -455,6 +455,8 @@ function _write_checkpoint(c::Checkpoint, problem, opt, state, zk, hist, k, stag
     "stage_iterations" => stage_iters,
     "length" => length(zk),
     "blocks" => String.(collect(problem.z.names)),
+    "frozen_cells" => Dict{String,Any}(String(n) => (b.zone === nothing ? 0 : b.zone.ncells)
+                                       for (n, b) in zip(problem.z.names, problem.z.blocks)),
     "continuation" => String.(collect(cont_names)),
     "scales" => Dict{String,Any}("objective" => problem.objective.scale[],
                                  (String(n) => get_scale(c.F) for (n, c) in pairs(problem.constraints))...),
@@ -485,7 +487,7 @@ const _CHECKPOINT_VERSION = 2
     load_checkpoint(filepath) -> NamedTuple
 
 Reads a checkpoint written by [`Checkpoint`](@ref): `z`, `iteration`, `stage`, `stage_iterations`, `scales` (named
-tuple: `objective` and one per constraint), `blocks`, `continuation` (names), `history` ([`OptHistory`](@ref)),
+tuple: `objective` and one per constraint), `blocks`, `frozen_cells` (by block), `continuation` (names), `history` ([`OptHistory`](@ref)),
 `optimizer` (its name), `memory` (the memory of the optimiser, see
 [`memory`](@ref HyperShape.Optimizers.memory), or `nothing`), `handled` (for each constraint, `:native` or
 `:lagrangian`) and `lagrangian` (`nothing`, or the multipliers, penalties, penalty references and number of updates
@@ -515,6 +517,7 @@ function load_checkpoint(filepath::AbstractString)
   (z = z, iteration = Int(meta["iteration"]), stage = Int(meta["stage"]),
    stage_iterations = Int(meta["stage_iterations"]), scales = scales,
    blocks = Symbol.(meta["blocks"]), continuation = Symbol.(meta["continuation"]),
+   frozen_cells = Dict(Symbol(k) => Int(v) for (k, v) in get(meta, "frozen_cells", Dict())),
    history = _read_history(joinpath(filepath, meta["history_file"])), optimizer = get(meta, "optimizer", ""),
    memory = mem, handled = Dict(Symbol(k) => Symbol(v) for (k, v) in get(meta, "handled", Dict())),
    lagrangian = haskey(meta, "multipliers") ?
@@ -698,6 +701,11 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
   if resume !== nothing
     length(resume.z) == length(z) || throw(ArgumentError("solve!: the checkpoint has $(length(resume.z)) values, z has $(length(z))"))
     resume.blocks == collect(z.names) || throw(ArgumentError("solve!: the checkpoint has blocks $(resume.blocks), z has $(collect(z.names))"))
+    for (n, b) in zip(z.names, z.blocks)
+      nc = b.zone === nothing ? 0 : b.zone.ncells
+      get(resume.frozen_cells, n, nc) == nc || throw(ArgumentError("solve!: the checkpoint has $(resume.frozen_cells[n]) " *
+                                                                  "frozen cells in $n, z has $nc"))
+    end
     resume.continuation == collect(cont_names) ||
       throw(ArgumentError("solve!: the checkpoint continues $(resume.continuation), the continuation $(collect(cont_names))"))
     nst = schedule === nothing ? 0 : schedule.nstages

@@ -12,7 +12,7 @@ using Gridap.FESpaces
 using HyperFEM: get_state, get_spaces
 using ..Operators: AbstractOperator, LinearOperator, StateOperator, apply!, solve_linear!, invalidate!, OptContext
 using ..Variables: PhysicalFields, update_fields!, design_gradient!, get_designfields, get_optvariables,
-                   get_values, get_bounds, set_values!, filter_operators
+                   get_values, get_bounds, set_values!, filter_operators, _frozen_check
 using ..Functionals: Functional, functional_value, functional_gradient!
 
 export check_consistency
@@ -136,6 +136,13 @@ function check_consistency(Fs::NamedTuple; ctx = OptContext(:check), direction =
     append!(results, _check_gradients(Fs, z, z0, d, hs, ctx, min_rate))
     for (k, θ) in enumerate(θs)
       append!(results, _check_chains(θ, k, length(θs), z, z0, d, hs, ctx, min_rate))
+      for n in propertynames(θ)
+        fc = _frozen_check(θ, n)
+        fc === nothing && continue
+        label = "frozen zone of θ.$n" * (length(θs) > 1 ? " (physical fields $k)" : "")
+        push!(results, CheckResult(label, fc[2] <= 1e-12, "$(fc[1]) cells, θ equals the frozen value " *
+                                   "(RMS difference $(_fmt(fc[2])))"))
+      end
     end
     filters = _unique(Iterators.flatten(filter_operators(θ) for θ in θs))
     for (k, op) in enumerate(filters)

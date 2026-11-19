@@ -48,6 +48,26 @@ parameter_version(s) = 0
 # whether the stage is linear in its input (a nonlinear stage makes a volume a nonlinear constraint)
 is_linear_stage(s) = false
 
+# The frozen zone of a design field, imposed at the end of every chain built from it: on the frozen cells the output
+# is the image of the frozen value (θ = χ ? value : chain(x)); its derivative vanishes there. Affine, lazy, no solve.
+struct MaskStage{I,O,F,C,V}
+  input::I
+  out::O
+  free::F
+  χ::C
+  value::V
+end
+_select_frozen(c, χ, v) = χ > 0.5 ? v : c
+_mask_stage(input, zone, value) =
+  MaskStage(input, Operation(_select_frozen)(input, zone.χ, value), zone.free, zone.χ, value)
+output(s::MaskStage) = s.out
+update_stage!(s::MaskStage, ctx) = s
+pullback(s::MaskStage, L, ctx, key) = (free = s.free; δ -> L(free * δ))
+is_linear_stage(::MaskStage) = true
+
+# maps evaluated point by point (they carry the frozen value into θ); filters and cell means leave it as it is
+_pointwise(m) = false
+
 """
     HelmholtzFilter(dΩ; rmin, order = 1, backend = :compiled, model_backend = <default>, solve = <default>, kwargs...)
     HelmholtzFilter(op::LinearOperator, dΩ; backend = :compiled)
@@ -356,3 +376,7 @@ Base.show(io::IO, h::TanhProjection) = print(io, "TanhProjection(β = ", h.β, "
 Base.show(io::IO, c::CellMean) = print(io, "CellMean(", c.backend, ")")
 Base.show(io::IO, c::ComposedMap) = join(io, reverse(c.maps), " ∘ ")
 Base.show(io::IO, m::PointwiseMap) = print(io, "PointwiseMap(", length(m.parameters), " parameters)")
+
+_pointwise(::Identity) = true
+_pointwise(::TanhProjection) = true
+_pointwise(::PointwiseMap) = true
