@@ -19,7 +19,9 @@ jobs:
   test:
     name: Tests
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
+    env:
+      JULIA_NUM_THREADS: 4   # the tests use the threaded kernels; ubuntu-latest has 4 cores
     strategy:
       fail-fast: false
       matrix:
@@ -36,3 +38,5 @@ jobs:
       - uses: julia-actions/cache@v3
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
+        with:
+          coverage: false   # not uploaded anywhere; with it the suite is about three times slower
