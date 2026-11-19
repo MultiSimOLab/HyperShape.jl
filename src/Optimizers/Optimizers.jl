@@ -1,8 +1,9 @@
 """
     HyperShape.Optimizers
 
-Optimisers for problems with a box-bounded design vector `z` and at most one constraint `g(z) ≤ 0`, linear or not
-(for example the volume of a projected density).
+Optimisers for problems with a box-bounded design vector `z` and constraints `lo ≤ g(z) ≤ hi`, linear or not (for
+example the volume of a projected density). OC and SiMPL treat one inequality themselves (see `handles`); the others
+go to the augmented Lagrangian.
 
 The module is independent of finite elements: an optimiser sees vectors, bounds and an oracle (see
 [`AbstractOracle`](@ref)). A new optimiser is a subtype of [`Optimizer`](@ref) that implements the four functions of
@@ -14,14 +15,19 @@ info  = step!(opt, state, z, oracle, ctx) # overwrites z with the next design, r
 reset!(opt, state)                      # forget the history (continuation jump, remeshing)
 shrink!(opt, state, factor)             # roll back the last step and reduce the next one
 ```
+
+An optimiser that treats constraints itself also declares which ones, with [`handles`](@ref) and
+[`max_native`](@ref) (by default none: `solve!` then refuses every constraint until the augmented Lagrangian
+comes).
 """
 module Optimizers
 
 using LinearAlgebra
 
-export Optimizer, StepInfo
+export Optimizer, StepInfo, ConstraintInfo, violation, handles, max_native
 export AbstractOracle, FunctionOracle
-export objective, gradient!, bounds, linear_constraint, has_constraint, constraint, constraint_gradient!, riesz!
+export objective, gradient!, bounds, num_constraints, constraint_info, linear_constraint, constraint, constraint_gradient!,
+       constraints!, weighted_gradient!, riesz!
 export OC, SiMPL, constraint_tol, computes_kkt, set_move!, memory, restore_memory!, stationarity!
 
 include("Oracle.jl")

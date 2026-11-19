@@ -65,8 +65,13 @@ _stage_rule(stop, schedule) = (stop === nothing || schedule === nothing || !_act
                               schedule.close_early ? " · every stage (close_early)" : " · last stage only"
 
 _metric_name(m::Euclidean) = "Euclidean"
-_constraint_label(problem, opt) = string(only(keys(problem.constraints))) * ", " *
-                                  (only(problem.constraints).linear ? "linear" : "nonlinear (tol $(_g_or_e(constraint_tol(opt))))")
+_constraint_label(problem, opt) =
+  join((string(n) * _bounds_label(c) * ", " * (is_linear(c.F) ? "linear" : "nonlinear (tol $(_g_or_e(constraint_tol(opt))))")
+        for (n, c) in pairs(problem.constraints)), "; ")
+_bounds_label(c) = (c.lo == -Inf && c.hi == 0) ? "" : c.lo == c.hi ? " = $(_sig(c.hi))" :
+                   c.lo == -Inf ? " ≤ $(_sig(c.hi))" : c.hi == Inf ? " ≥ $(_sig(c.lo))" :
+                   " in [$(_sig(c.lo)), $(_sig(c.hi))]"
+_sig(x) = string(round(x; sigdigits = 4))
 _g_or_e(x) = isfinite(x) ? @sprintf("%.0e", x) : "—"
 _metric_label(method) = _metric_name(method.metric) * (method.default_metric ? " (default)" : "") *
                         (method.optimizer isa OC ? " (OC: only for the stationarity measure)" : "")

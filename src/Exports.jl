@@ -22,6 +22,7 @@ end
 @_export Operators OptContext
 @_export Functionals Functional
 @_export Functionals Volume
+@_export Functionals Constraint
 @_export Functionals functional_value
 @_export Functionals functional_gradient!
 @_export Checks check_consistency
@@ -78,3 +79,4 @@ end
 @_public Optimizers StepInfo
 @_public PostProcess FieldWriter
 @_public PostProcess write_fields
+@_public Functionals AbstractFunctional

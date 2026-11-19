@@ -1,4 +1,34 @@
 """
+    ConstraintInfo(lo, hi; linear = false, design_only = false, field = false)
+
+What an optimiser knows about one constraint `lo ≤ g(z) ≤ hi` (values already scaled): `lo = -Inf` for `g ≤ hi`
+(the usual `g ≤ 0`), `lo = hi` for an equality, both finite for an interval. `linear`: `g` is affine in z (the
+oracle then gives `(a, V)`, [`linear_constraint`](@ref)); `design_only`: evaluating it solves no state; `field`: a
+constraint per point (reserved; always `false`).
+"""
+struct ConstraintInfo
+  lo::Float64
+  hi::Float64
+  linear::Bool
+  design_only::Bool
+  field::Bool
+  function ConstraintInfo(lo::Real, hi::Real; linear::Bool = false, design_only::Bool = false, field::Bool = false)
+    (isnan(lo) || isnan(hi) || lo > hi || lo == Inf || hi == -Inf) &&
+      throw(ArgumentError("ConstraintInfo: need lo ≤ hi, got lo = $lo, hi = $hi"))
+    new(Float64(lo), Float64(hi), linear, design_only, field)
+  end
+end
+
+"""
+    violation(c::ConstraintInfo, g) -> Float64
+
+How far `g` is from `[lo, hi]` (`0` inside).
+"""
+violation(c::ConstraintInfo, g) = max(g - c.hi, c.lo - g, 0.0)
+is_upper(c::ConstraintInfo) = c.lo == -Inf
+is_equality(c::ConstraintInfo) = c.lo == c.hi
+
+"""
     AbstractOracle
 
 What an optimiser may ask about the problem. Methods to implement for a subtype `O`:
@@ -9,13 +39,15 @@ What an optimiser may ask about the problem. Methods to implement for a subtype 
   only call it for the `z` of their last call to `objective` on this oracle, so an implementation can reuse the
   forward state of that call and only pay for the adjoint.
 - `bounds(o::O)`: `(lb, ub)`, the bounds of `z` (scalars or vectors of the length of `z`), with `lb < ub`.
-- The constraint `g(z) ≤ 0`, if there is one (at most one), in either of two ways:
-  - linear: `linear_constraint(o::O)` returns `(a, V)` for `aᵀz ≤ V` (`a ≥ 0` is a dual vector, for example the
-    derivative of the volume); the optimisers then use `a` and `V` exactly;
-  - nonlinear: `linear_constraint(o::O)` returns `nothing` and the oracle implements `has_constraint(o::O) = true`,
-    `constraint(o::O, z)` (the value of `g`, scaled, `≤ 0` when feasible; `NaN` or `Inf` if it cannot be computed)
-    and `constraint_gradient!(dG, o::O, z)` (`∂g/∂z` at the `z` of the last call to `constraint`).
-  For a linear constraint the last three have defaults built from `(a, V)`.
+- The constraints `loᵢ ≤ gᵢ(z) ≤ hiᵢ`, `i = 1, …, num_constraints(o)` (default none):
+  - `num_constraints(o::O)` and `constraint_info(o::O, i)` (a [`ConstraintInfo`](@ref));
+  - linear ones: `linear_constraint(o::O, i)` returns `(a, V)` with `gᵢ(z) = aᵀz − V`; the optimisers then use `a`
+    and `V` exactly, and `constraint` and `constraint_gradient!` have defaults built from them;
+  - the others: `linear_constraint(o, i)` returns `nothing` and the oracle implements `constraint(o::O, i, z)` (the
+    scaled value; `NaN` or `Inf` if it cannot be computed) and `constraint_gradient!(dG, o::O, i, z)` (`∂gᵢ/∂z` at the
+    `z` of the last call to `constraint(o, i, ·)`).
+  `constraints!(g, o, z)` (all at once, at a trial design) and `weighted_gradient!` (the derivative of
+  `w₀ f + Σ wᵢ gᵢ`) have defaults built from those.
 
 Methods with a default (Euclidean metric); they are not exported, extend them as `Optimizers.inner`:
 
@@ -23,7 +55,7 @@ Methods with a default (Euclidean metric); they are not exported, extend them as
 - `riesz!(g, o::O, dF)`: primal representative `g = M⁻¹ dF` of a dual vector; default `copyto!(g, dF)`.
 
 Optimisers only use these functions, broadcasting and global reductions (`dot`, `maximum`) on the vectors. If the
-bounds, the constraint or the objective change (continuation), call [`reset!`](@ref) on the optimiser.
+bounds, the constraints or the objective change (continuation), call [`reset!`](@ref) on the optimiser.
 """
 abstract type AbstractOracle end
 
@@ -49,41 +81,79 @@ Bounds of the design vector. See [`AbstractOracle`](@ref).
 function bounds end
 
 """
-    linear_constraint(oracle) -> (a, V) or nothing
+    num_constraints(oracle) -> Int
 
-Linear constraint `aᵀz ≤ V`. See [`AbstractOracle`](@ref).
+Number of constraints. Default `0`. See [`AbstractOracle`](@ref).
 """
-function linear_constraint end
-
-"""
-    has_constraint(oracle) -> Bool
-
-Whether the problem has a constraint. Default: `linear_constraint(oracle) !== nothing`. See [`AbstractOracle`](@ref).
-"""
-has_constraint(o::AbstractOracle) = linear_constraint(o) !== nothing
+num_constraints(::AbstractOracle) = 0
 
 """
-    constraint(oracle, z) -> Float64
+    constraint_info(oracle, i) -> ConstraintInfo
 
-Value of the constraint `g(z)` (`≤ 0` when feasible). Default, for a linear constraint: `aᵀz - V`. See
-[`AbstractOracle`](@ref).
+Description of the constraint `i`. See [`AbstractOracle`](@ref).
 """
-function constraint(o::AbstractOracle, z)
-  c = linear_constraint(o)
-  c === nothing && throw(ArgumentError("constraint: the oracle has no linear constraint; implement constraint for it"))
+function constraint_info end
+
+"""
+    linear_constraint(oracle, i) -> (a, V) or nothing
+
+The constraint `i` as `aᵀz − V` when it is linear. Default `nothing`. See [`AbstractOracle`](@ref).
+"""
+linear_constraint(::AbstractOracle, i) = nothing
+
+"""
+    constraint(oracle, i, z) -> Float64
+
+Value of the constraint `i` at `z`. Default, for a linear constraint: `aᵀz − V`. See [`AbstractOracle`](@ref).
+"""
+function constraint(o::AbstractOracle, i::Integer, z)
+  c = linear_constraint(o, i)
+  c === nothing && throw(ArgumentError("constraint: the constraint $i is not linear; implement constraint for it"))
   dot(c[1], z) - c[2]
 end
 
 """
-    constraint_gradient!(dG, oracle, z) -> dG
+    constraint_gradient!(dG, oracle, i, z) -> dG
 
-Writes `∂g/∂z` into `dG`, for the `z` of the last call to [`constraint`](@ref). Default, for a linear constraint:
-`a`. See [`AbstractOracle`](@ref).
+Writes `∂gᵢ/∂z` into `dG`, for the `z` of the last call to `constraint(oracle, i, ·)`. Default, for a linear
+constraint: `a`. See [`AbstractOracle`](@ref).
 """
-function constraint_gradient!(dG, o::AbstractOracle, z)
-  c = linear_constraint(o)
-  c === nothing && throw(ArgumentError("constraint_gradient!: the oracle has no linear constraint; implement it"))
+function constraint_gradient!(dG, o::AbstractOracle, i::Integer, z)
+  c = linear_constraint(o, i)
+  c === nothing && throw(ArgumentError("constraint_gradient!: the constraint $i is not linear; implement it"))
   copyto!(dG, c[1])
+end
+
+"""
+    constraints!(g, oracle, z) -> g
+
+Values of all the constraints at `z` (forward solves only, no derivatives): what a method that checks a trial design
+needs (GCMMA). Default: `constraint(oracle, i, z)` for each `i`.
+"""
+function constraints!(g, o::AbstractOracle, z)
+  for i in 1:num_constraints(o)
+    g[i] = constraint(o, i, z)
+  end
+  g
+end
+
+"""
+    weighted_gradient!(dL, oracle, w0, w, z) -> dL
+
+Derivative of `w0 ⋅ f + Σᵢ wᵢ gᵢ` at the `z` of the last calls to `objective` and `constraint`. Default: the separate
+derivatives, added (an implementation can do it in one reverse sweep). Zero weights cost nothing.
+"""
+function weighted_gradient!(dL, o::AbstractOracle, w0, w, z)
+  gradient!(dL, o, z)
+  dL .*= w0
+  any(!iszero, w) || return dL
+  work = similar(dL)
+  for i in eachindex(w)
+    iszero(w[i]) && continue
+    constraint_gradient!(work, o, i, z)
+    dL .+= w[i] .* work
+  end
+  dL
 end
 
 """
@@ -144,14 +214,21 @@ function gradient!(dF, o::FunctionOracle, z)
 end
 
 bounds(o::FunctionOracle) = (o.lb, o.ub)
-linear_constraint(o::FunctionOracle) = o.constraint isa Tuple{AbstractVector,Real} ? o.constraint : nothing
-has_constraint(o::FunctionOracle) = o.constraint !== nothing
-constraint(o::FunctionOracle{F,G,L,U,<:Tuple{Function,Function}}, z) where {F,G,L,U} = o.constraint[1](z)
-constraint_gradient!(dG, o::FunctionOracle{F,G,L,U,<:Tuple{Function,Function}}, z) where {F,G,L,U} =
+num_constraints(o::FunctionOracle) = o.constraint === nothing ? 0 : 1
+function constraint_info(o::FunctionOracle, i)
+  (o.constraint !== nothing && i == 1) || throw(BoundsError(o, i))
+  ConstraintInfo(-Inf, 0.0; linear = o.constraint isa Tuple{AbstractVector,Real}, design_only = true)
+end
+linear_constraint(o::FunctionOracle, i) = o.constraint isa Tuple{AbstractVector,Real} ? o.constraint : nothing
+constraint(o::FunctionOracle{F,G,L,U,<:Tuple{Function,Function}}, i::Integer, z) where {F,G,L,U} = o.constraint[1](z)
+constraint_gradient!(dG, o::FunctionOracle{F,G,L,U,<:Tuple{Function,Function}}, i::Integer, z) where {F,G,L,U} =
   (o.constraint[2](dG, z); dG)
 
 inner(o::FunctionOracle{F,G,L,U,C,Nothing}, x, y) where {F,G,L,U,C} = dot(x, y)
-inner(o::FunctionOracle, x, y) = sum(i -> o.metric[i] * x[i] * y[i], eachindex(x, y, o.metric))
+inner(o::FunctionOracle{F,G,L,U,C,<:Vector{Float64}}, x::Vector{Float64}, y::Vector{Float64}) where {F,G,L,U,C} =
+  sum(i -> o.metric[i] * x[i] * y[i], eachindex(x, y, o.metric))
+# any other vector type: a lazy broadcast reduced without indexing (no allocation)
+inner(o::FunctionOracle, x, y) = sum(Broadcast.instantiate(Broadcast.broadcasted(*, o.metric, x, y)))
 
 riesz!(g, o::FunctionOracle{F,G,L,U,C,Nothing}, dF) where {F,G,L,U,C} = copyto!(g, dF)
 riesz!(g, o::FunctionOracle, dF) = (g .= dF ./ o.metric)

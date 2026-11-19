@@ -50,6 +50,36 @@ function run!(opt, z, oracle; iterations, tol = 0.0)
   state, info
 end
 
+# a vector that refuses scalar indexing outside broadcasting (as a GPU array)
+struct NoScalarVector <: AbstractVector{Float64}; v::Vector{Float64}; end
+const ALLOW_SCALAR = Ref(false)
+Base.size(x::NoScalarVector) = size(x.v)
+Base.getindex(x::NoScalarVector, i::Int) = (ALLOW_SCALAR[] || error("scalar getindex"); x.v[i])
+Base.setindex!(x::NoScalarVector, a, i::Int) = (ALLOW_SCALAR[] || error("scalar setindex!"); x.v[i] = a)
+Base.similar(x::NoScalarVector, ::Type{Float64}, d::Dims{1}) = NoScalarVector(similar(x.v, d))
+Base.BroadcastStyle(::Type{NoScalarVector}) = Broadcast.ArrayStyle{NoScalarVector}()
+Base.similar(bc::Broadcast.Broadcasted{Broadcast.ArrayStyle{NoScalarVector}}, ::Type{T}) where T = NoScalarVector(Vector{T}(undef, length(bc)))
+function Base.copyto!(d::NoScalarVector, bc::Broadcast.Broadcasted{Nothing})
+  ALLOW_SCALAR[] = true; try copyto!(d.v, bc) finally ALLOW_SCALAR[] = false end; d
+end
+Base.copyto!(d::NoScalarVector, s::NoScalarVector) = (copyto!(d.v, s.v); d)
+Base.copyto!(d::Vector{Float64}, s::NoScalarVector) = copyto!(d, s.v)
+Base.copyto!(d::NoScalarVector, s::AbstractVector) = (copyto!(d.v, s); d)
+Base.mapreduce(f, op, x::NoScalarVector; kw...) = mapreduce(f, op, x.v; kw...)
+Base.mapreduce(f, op, x::NoScalarVector, y::NoScalarVector; kw...) = mapreduce(f, op, x.v, y.v; kw...)
+LinearAlgebra.dot(x::NoScalarVector, y::NoScalarVector) = dot(x.v, y.v)
+Base.sum(x::NoScalarVector) = sum(x.v)
+Base.fill!(x::NoScalarVector, a) = (fill!(x.v, a); x)
+# reductions of lazy broadcasts, as GPU arrays do them (materialised here)
+Base.mapreduce(f, op, bc::Broadcast.Broadcasted{Broadcast.ArrayStyle{NoScalarVector}}; kw...) = mapreduce(f, op, copy(bc).v; kw...)
+Base.sum(f, x::NoScalarVector) = sum(f, x.v)
+Base.copy(x::NoScalarVector) = NoScalarVector(copy(x.v))
+Base.maximum(x::NoScalarVector) = maximum(x.v)
+Base.maximum(f, x::NoScalarVector) = maximum(f, x.v)
+Base.minimum(x::NoScalarVector) = minimum(x.v)
+Base.any(f::Function, x::NoScalarVector) = any(f, x.v)
+Base.all(f::Function, x::NoScalarVector) = all(f, x.v)
+
 @testset "Optimizers" begin
 
   n = 40
@@ -146,7 +176,7 @@ end
     info = step!(opt, state, z, oracle, nothing)
     @test info.accepted && isnan(info.f_new) && isnan(info.kkt)
     @test info.change <= 0.2 * (1 - lb) + 1e-12
-    @test info.violation <= 1e-2 * V
+    @test violation(info) <= 1e-2 * V
     @test all(lb .<= z .<= 1)
     shrink!(opt, state, 0.5)
     z0 = copy(z)
@@ -166,8 +196,8 @@ end
     opt = OC()
     info = step!(opt, init(opt, z, oracle), z, oracle, nothing)
     @test info.accepted
-    @test info.violation ≈ sum(z) - V
-    @test info.violation > 0.1 * V
+    @test violation(info) ≈ sum(z) - V
+    @test violation(info) > 0.1 * V
   end
 
   quadratic(V = 0.3n) = FunctionOracle(z -> sum(abs2, z .- t) / 2, (dF, z) -> (dF .= z .- t); constraint = (a, V))
@@ -255,7 +285,7 @@ end
     @test all(i -> isfinite(i.kkt), infos)
     @test infos[end].kkt < 1e-6                              # function values resolve the design up to ~sqrt(eps)
     @test maximum(i -> i.evaluations, infos) < 31            # no exhausted line search (31 trials)
-    @test maximum(i -> i.violation, infos) <= 1e-10 * V
+    @test maximum(violation, infos) <= 1e-10 * V
     @test maximum(abs, z .- reciprocal_solution(c, V, lb)) < 1e-6
   end
 
@@ -329,6 +359,22 @@ end
     end
   end
 
+  @testset "Vectors without scalar indexing (GPU arrays): OC and SiMPL" begin
+    W = 0.1n
+    lin() = FunctionOracle(z -> 0.5 * sum(abs2, z.v .- t), (dF, z) -> (dF .= z .- NoScalarVector(t)); constraint = (NoScalarVector(copy(a)), 0.3n))
+    nonlin() = FunctionOracle(z -> 0.5 * sum(abs2, z.v .- t), (dF, z) -> (dF .= z .- NoScalarVector(t));
+                              constraint = (z -> sum(abs2, z) / W - 1, (dG, z) -> (dG .= 2 .* z ./ W)),
+                              metric = NoScalarVector([1.0 + 0.1 * cos(i) for i in 1:n]))
+    for opt in (OC(), SiMPL()), (mk, g) in ((lin, z -> sum(z) / (0.3n) - 1), (nonlin, z -> sum(abs2, z) / W - 1))
+      z = NoScalarVector(fill(0.3, n))
+      o = mk()
+      s = init(opt, z, o)
+      infos = [step!(opt, s, z, o, nothing) for _ in 1:30]
+      @test all(i -> i.accepted, infos)
+      @test g(z) <= 1e-3 && infos[end].f < infos[1].f
+    end
+  end
+
   @testset "Constructor checks and names" begin
     @test_throws ArgumentError SiMPL(max_growth = 0.5)
     @test_throws ArgumentError SiMPL(linesearch = :wolfe)
@@ -347,13 +393,13 @@ end
     mk() = FunctionOracle(F, (dF, z) -> (dF .= -c ./ z .^ 2); lb, ub = 1.0,
                           constraint = (g, (dG, z) -> (dG .= 2 .* z ./ W)))
     exact = nonlinear_solution(c, W, lb)
-    @test !has_constraint(FunctionOracle(F, (dF, z) -> dF)) && has_constraint(mk())
-    @test linear_constraint(mk()) === nothing
+    @test num_constraints(FunctionOracle(F, (dF, z) -> dF)) == 0 && num_constraints(mk()) == 1
+    @test linear_constraint(mk(), 1) === nothing
     @test_throws ArgumentError FunctionOracle(F, (dF, z) -> dF; constraint = (1.0, 2.0))
     # OC: linearised constraint corrected to |g| ≤ constraint_tol
     z = fill(0.3, n)
     s, info = run!(OC(), z, mk(); iterations = 300)
-    @test abs(g(z)) <= 1e-4 && info.violation <= 1e-4
+    @test abs(g(z)) <= 1e-4 && violation(info) <= 1e-4
     @test maximum(abs, z .- exact) < 1e-2
     # SiMPL: every accepted iterate feasible, -tol ≤ g ≤ 0
     for z0 in (0.3, 0.6)   # 0.6: infeasible start, restoration steps first

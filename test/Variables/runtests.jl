@@ -411,11 +411,30 @@ end
     @test out[1][1][6] ≈ out[1][1][2]
     θc = out[1][2]
     assems = getfield(θc, :assems)
-    @test length(assems[1].ops) <= HyperShape.Operators.MAX_COMPILED_FORMS
+    @test length(assems[1].ops) <= assems[1].capacity[]
     filter_stage = getfield(θc, :chains)[1][1]
-    @test length(filter_stage.assem.ops) <= HyperShape.Operators.MAX_COMPILED_FORMS
+    fa = filter_stage.assem
+    @test length(fa.ops) <= fa.capacity[] == HyperShape.Operators.MAX_COMPILED_FORMS + 1   # key 1 came back once
+    @test any(k -> isequal(k, :forward), filter_stage.assem.keys)   # the load vector of the filter is never dropped
     # every cached operator shares the tables of the first one
     @test all(op -> op.fields === assems[1].ops[1].fields && op.colors === assems[1].ops[1].colors, assems[1].ops)
+  end
+
+  @testset "Compiled forms: more quantities than slots stop recompiling" begin
+    dΩ = p.dΩ
+    z, x, θ = single_field_design(:ρ, p.V0; bounds = (0.0, 1.0), init = ρ0, map = HelmholtzFilter(p.Sf, dΩ))
+    a = getfield(θ, :chains)[1][1].assem                    # the forms are accumulated at the filter
+    nk = HyperShape.Operators.MAX_COMPILED_FORMS + 4
+    for _ in 1:2, k in 1:nk                                 # a cycle longer than the cache: every key comes back
+      design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(k * θ.ρ * δ)dΩ,), nothing; key = k)
+    end
+    nev = length(a.evicted)
+    for k in 1:nk
+      design_gradient!(zeros(length(z)), θ, (ρ = δ -> ∫(k * θ.ρ * δ)dΩ,), nothing; key = k)
+    end
+    @test a.capacity[] >= nk && length(a.ops) == length(Set(a.keys))
+    @test length(a.evicted) == nev                          # nothing dropped in the third cycle
+    @test all(k -> any(isequal((k, 1)), a.keys), 1:nk)   # (key, physical field)
   end
 
   @testset "Taylor test with the lazy backend ($(name))" for (name, V, ρ) in (("P0", p.V0, ρ0), ("P1", p.V1, ρ1))
