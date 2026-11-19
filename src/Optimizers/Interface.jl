@@ -110,8 +110,10 @@ _gather(x) = copyto!(Vector{Float64}(undef, length(x)), x)
 
 Memory of the optimiser after an accepted step to `z`, saved in a checkpoint (and carried across a rebuild of the
 problem) so that a resumed run continues as the uninterrupted one: a named tuple whose entries are real numbers or
-vectors with one entry per entry of `z` (fields of the design space, which a change of mesh can transfer). Default
-`nothing`: not saved, the resumed run starts from `init`.
+vectors with one entry per entry of `z` (fields of the design space, which a change of mesh can transfer). The
+vectors may be those of `state`: the loop copies them (as `Vector{Float64}`) and checks their length; numbers come
+back as `Float64`, and the order of the entries is kept. Default `nothing`: not saved, the resumed run starts from
+`init`.
 """
 memory(::Optimizer, state, z) = nothing
 

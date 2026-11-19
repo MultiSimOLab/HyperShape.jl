@@ -119,8 +119,7 @@ function reset!(opt::OC, s::OCState)
   s
 end
 # memory for a checkpoint: adaptive limits, last steps and correction shift
-memory(::OC, s::OCState, z) = (started = Float64(s.k > 0), shift = s.shift, m = copy(s.m), dprev = copy(s.dprev),
-                               z_old = copy(s.z_old))
+memory(::OC, s::OCState, z) = (started = Float64(s.k > 0), shift = s.shift, m = s.m, dprev = s.dprev, z_old = s.z_old)
 
 function restore_memory!(::OC, s::OCState, z, v::NamedTuple)
   _check_memory(v, (:started, :shift, :m, :dprev, :z_old), length(z), "OC")

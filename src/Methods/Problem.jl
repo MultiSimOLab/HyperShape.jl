@@ -26,15 +26,16 @@ one is linearised at every step by the optimiser, which then corrects it with ev
 (one filter solve each, no forward solve): see `OC` and `SiMPL`.
 
 The problem owns the context `ctx` ([`OptContext`](@ref)) that reaches the solve functions of the user, and
-`problem.state[]`, the [`OptState`](@ref) of its last `solve!` (also after a failure or an interruption): pass it as
-`resume` to continue without files.
+`problem.state[]`, the last [`OptState`](@ref) captured by `solve!` (at the end of a run, after a failure or an
+interruption; a `solve!` that throws before its first iteration leaves the previous one): pass it as `resume` to
+continue without files.
 """
 struct Optimization{Z<:OptVariables,J<:AbstractFunctional,C<:NamedTuple}
   z::Z
   objective::J
   constraints::C
   ctx::OptContext
-  state::Base.RefValue{Any}     # the OptState of the last solve! (nothing before)
+  state::Base.RefValue{Any}     # the last OptState captured by solve! (nothing before)
   Optimization(::_Validated, z, J, cs) = new{typeof(z),typeof(J),typeof(cs)}(z, J, cs, OptContext(:optimization), Ref{Any}(nothing))
 end
 
@@ -103,8 +104,10 @@ Supertype of the methods (`DensityMethod`; reaction–diffusion and level set la
 only gives its step and what the step sees of the problem, through four functions (public, not exported):
 
 - `stepper(m)`: the step, an `Optimizer` (`init`, `step!`, `reset!`, `shrink!`, `memory`, `restore_memory!`,
-  `objective_changed!`; see `HyperShape.Optimizers`);
-- `build_oracle(m, problem)`: the oracle the step sees (objective, gradient, constraints, bounds, metric);
+  `objective_changed!`; see `HyperShape.Optimizers`); the same object at every call (a continuation compares it);
+- `build_oracle(m, problem)`: the oracle the step sees (objective, gradient, constraints, bounds, metric); for now it
+  must be a `HyperShape.Methods.FunctionalOracle` (internal: its interface may change), built for example with
+  `FunctionalOracle(problem, metric)`;
 - `augmented_lagrangian(m)`: the [`AugmentedLagrangian`](@ref HyperShape.Optimizers.AugmentedLagrangian) of the constraints
   the step does not treat;
 - `check_problem(m, problem)`: errors when the run starts (default: none).
@@ -151,7 +154,7 @@ struct DensityMethod{O<:Optimizer,M,L<:AugmentedLagrangian} <: AbstractMethod
     given = metric !== nothing
     given || (metric = default_metric(optimizer))
     ok = _valid_metric(metric) || (metric isa NamedTuple && all(_valid_metric, values(metric)))
-    ok || throw(ArgumentError("DensityMethod: metric must be LumpedMass(dΩ), Euclidean(), a vector of positive weights, " *
+    ok || throw(ArgumentError("DensityMethod: metric must be LumpedMass(), LumpedMass(dΩ), Euclidean(), a vector of positive weights, " *
                               "an object with a metric_weights(m, z) method, or a named tuple of them per block"))
     new{typeof(optimizer),typeof(metric),typeof(lagrangian)}(optimizer, metric, !given, lagrangian, !lgiven)
   end
@@ -175,7 +178,7 @@ optimiser, which must be given one.
 """
 default_metric(::OC) = Euclidean()
 default_metric(opt::Optimizer) =
-  throw(ArgumentError("DensityMethod: $(nameof(typeof(opt))) needs a metric: DensityMethod(opt; metric = LumpedMass(dΩ)) or Euclidean()"))
+  throw(ArgumentError("DensityMethod: $(nameof(typeof(opt))) needs a metric: DensityMethod(opt; metric = LumpedMass()) or Euclidean()"))
 
 # an object of the user is checked when the weights are asked for (its metric_weights may restrict the type of z)
 _valid_metric(m) = !(m isa Union{Nothing,Symbol,AbstractString,Number,Tuple,AbstractVector}) ||

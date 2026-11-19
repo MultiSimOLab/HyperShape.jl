@@ -30,7 +30,7 @@ using ..PostProcess: OptPostProcessor, _post_start!, _post_due, _post_call!, _po
 
 export Optimization, DensityMethod, LumpedMass, Euclidean
 export Continuation, StopCriteria, RejectStep, Checkpoint, load_checkpoint, Grey
-export OptHistory, OptResult, OptimizationFailure, OptState, AbstractMethod
+export OptHistory, OptResult, OptimizationFailure, OptState
 export solve!
 
 include("Problem.jl")

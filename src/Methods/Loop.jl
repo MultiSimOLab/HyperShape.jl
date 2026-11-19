@@ -41,9 +41,9 @@ it was built with `close_early = true` (then a criterion met in an earlier stage
 - `stationarity_tol`: the stationarity measure of the paper of SiMPL, `S = ‖z − P(z − g)‖_M`
   ([`stationarity!`](@ref HyperShape.Optimizers.stationarity!), computed by OC and SiMPL at the design before the step,
   so the run stops one iteration after it is met), below this value (absolute: it depends on `scale` and on the
-  metric; with `Euclidean()` it depends on the mesh, use `LumpedMass(dΩ)`). `stationarity_rtol`: relative to the first
+  metric; with `Euclidean()` it depends on the mesh, use `LumpedMass()`). `stationarity_rtol`: relative to the first
   finite value of the run. With a nonlinear constraint the projection uses the constraint linearised at `z`. OC
-  computes it with the metric of [`DensityMethod`](@ref) (its step does not use it): give `LumpedMass(dΩ)` for a value
+  computes it with the metric of [`DensityMethod`](@ref) (its step does not use it): give `LumpedMass()` for a value
   independent of the mesh, comparable with SiMPL.
 - `change_tol`: `maximum(abs, Δz)` of the step below this value. With a tanh projection it is rarely reached.
 
@@ -158,10 +158,12 @@ end
     Checkpoint(; filepath, every)
 
 Writes the state of the optimisation to the folder `filepath` every `every` accepted iterations, and also when the
-optimisation stops or fails: `checkpoint.toml` (format version 2: iteration, continuation stage, scales of the
+optimisation stops or fails: `checkpoint.toml` (format version 3: iteration, continuation stage, scales of the
 functionals by name, who treats each constraint and the multipliers and penalties of the augmented Lagrangian by
-name, sizes and the names of the other files), `z_<iteration>.bin` (the design, raw `Float64`), `history_<iteration>.csv`
-and, for optimisers that save one, `memory_<iteration>.bin` (see [`memory`](@ref HyperShape.Optimizers.memory)).
+name, the offsets of the linear constraints, the method and the optimiser, sizes and the names of the other files;
+a `discretization` entry is reserved for later versions and not read), `z_<iteration>.bin` (the design, raw `Float64`), `history_<iteration>.csv`
+and, for optimisers that save one, `memory_<iteration>.bin` (see [`memory`](@ref HyperShape.Optimizers.memory): its numbers and then its vectors, raw
+`Float64`). These are the fields of an [`OptState`](@ref).
 The data files are written first and `checkpoint.toml` last, under a temporary name and then renamed, so they always
 belong to the same iteration; older files are then deleted. Resume with `solve!(…; resume = filepath)` (or the
 result of [`load_checkpoint`](@ref)).
@@ -319,6 +321,13 @@ function _record!(h::OptHistory, row, cons, mults, mons, cont, viols = (), pens 
   h
 end
 
+# a copy of the first h.n iterations (the capacity is not copied)
+function _history_copy(h::OptHistory)
+  n = h.n
+  OptHistory((f === :n ? n : f in HISTORY_COLUMNS ? getfield(h, f)[1:n] :
+              getfield(h, f) isa Matrix ? getfield(h, f)[:, 1:n] : copy(getfield(h, f)) for f in fieldnames(OptHistory))...)
+end
+
 function _trim!(h::OptHistory)
   n = h.n
   for f in HISTORY_COLUMNS
@@ -450,7 +459,8 @@ The state of an optimisation by name, what a [`Checkpoint`](@ref) writes and `re
 `problem.state[]` by `solve!`, so `resume = problem.state[]` continues without files): `iteration`, `stage`,
 `stage_iterations`, `z` (the last accepted design), `blocks` and `frozen_cells` (by block), `continuation` (names),
 `scales` (named tuple: `objective` and one per constraint), `history` ([`OptHistory`](@ref)), `method` and `optimizer`
-(names), `memory` (of the step, see [`memory`](@ref HyperShape.Optimizers.memory); `nothing` after a failure),
+(names), `memory` (of the step, see [`memory`](@ref HyperShape.Optimizers.memory); `nothing` after a failure or an
+exception: a run resumed from such a state starts the optimiser again from `init` and is not the uninterrupted one),
 `handled` (for each constraint, `:native` or `:lagrangian`), `lagrangian` (`nothing`, or the multipliers, penalties,
 penalty references and number of updates of the augmented Lagrangian, by name) and `linear_offsets` (the offset `V`
 of each linear constraint, kept so that a resumed run uses the same bits). Nothing in it is tied to the mesh except
@@ -487,8 +497,8 @@ function _capture(problem, method, opt, opt_state, zk, hist, k, stage, stage_ite
   scales = NamedTuple{scn}((get_scale(problem.objective), (get_scale(c.F) for c in problem.constraints)...))
   OptState(k, stage, stage_iters, _gather_vec(zk), collect(problem.z.names),
            Dict{Symbol,Int}(n => (b.zone === nothing ? 0 : b.zone.ncells) for (n, b) in zip(problem.z.names, problem.z.blocks)),
-           collect(Symbol, cont_names), scales, _trim!(deepcopy(hist)), method_label(method), string(nameof(typeof(opt))),
-           mem === nothing ? nothing : map(x -> x isa Real ? Float64(x) : _gather_vec(x), mem),
+           collect(Symbol, cont_names), scales, _history_copy(hist), method_label(method), string(nameof(typeof(opt))),
+           _capture_memory(mem, length(zk), opt),
            Dict{Symbol,Symbol}(n => (al === nothing || i in al.native ? :native : :lagrangian) for (i, n) in enumerate(names)),
            al === nothing ? nothing :
              (multipliers = Dict{Symbol,Float64}(n => al.λ[i] for (i, n) in enumerate(names)),
@@ -498,6 +508,19 @@ function _capture(problem, method, opt, opt_state, zk, hist, k, stage, stage_ite
            Dict{Symbol,Float64}(n => fo.V[i] for (i, n) in enumerate(names) if fo.a[i] !== nothing))
 end
 _gather_vec(x) = copyto!(Vector{Float64}(undef, length(x)), x)
+
+# the memory of the optimiser copied, in its order: numbers as Float64, vectors of length(z) as Vector{Float64}
+_capture_memory(::Nothing, n, opt) = nothing
+_capture_memory(mem::NamedTuple, n, opt) =
+  NamedTuple{keys(mem)}(Tuple(_memory_entry(k, v, n, opt) for (k, v) in pairs(mem)))
+_capture_memory(mem, n, opt) =
+  throw(ArgumentError("memory($(nameof(typeof(opt))), …) must return a named tuple or nothing, got a $(typeof(mem))"))
+_memory_entry(k, v::Real, n, opt) = Float64(v)
+_memory_entry(k, v::AbstractVector{<:Real}, n, opt) = length(v) == n ? _gather_vec(v) :
+  throw(ArgumentError("memory($(nameof(typeof(opt))), …): the entry $k has $(length(v)) values, z has $n"))
+_memory_entry(k, v, n, opt) =
+  throw(ArgumentError("memory($(nameof(typeof(opt))), …): the entry $k is a $(typeof(v)); it must be a real number " *
+                      "or a vector with one value per entry of z"))
 
 function _write_checkpoint(c::Checkpoint, st::OptState)
   mkpath(c.filepath)
@@ -515,6 +538,7 @@ function _write_checkpoint(c::Checkpoint, st::OptState)
     "frozen_cells" => Dict{String,Any}(String(n) => v for (n, v) in st.frozen_cells),
     "continuation" => String.(st.continuation),
     "scales" => Dict{String,Any}(String(n) => v for (n, v) in pairs(st.scales)),
+    "scale_names" => [String(n) for n in keys(st.scales)],
     "z_file" => zfile,
     "history_file" => hfile,
     "method" => st.method,
@@ -529,7 +553,8 @@ function _write_checkpoint(c::Checkpoint, st::OptState)
       for n in sc; write(io, Float64(st.memory[Symbol(n)])); end
       for n in vs; write(io, st.memory[Symbol(n)]); end
     end
-    meta["memory"] = Dict{String,Any}("file" => mfile, "scalars" => sc, "vectors" => vs)
+    meta["memory"] = Dict{String,Any}("file" => mfile, "scalars" => sc, "vectors" => vs,
+                                      "names" => [String(n) for n in keys(st.memory)])
   end
   if st.lagrangian !== nothing
     meta["multipliers"] = Dict{String,Any}(String(n) => v for (n, v) in st.lagrangian.multipliers)
@@ -546,6 +571,7 @@ function _write_checkpoint(c::Checkpoint, st::OptState)
 end
 
 const _CHECKPOINT_VERSION = 3
+const _OFFSET_RTOL = 1e-9    # saved and recomputed offsets of a linear constraint closer than this are the same
 
 # the state of the run into problem.state[] and, with a checkpoint, to its files
 function _save_state!(checkpoint, problem, method, opt, opt_state, zk, hist, k, stage, stage_iters, cont_names, oracle)
@@ -578,13 +604,19 @@ function load_checkpoint(filepath::AbstractString)
   if haskey(meta, "memory")
     m = meta["memory"]
     sc, vs = Symbol.(m["scalars"]), Symbol.(m["vectors"])
-    vals = open(joinpath(filepath, m["file"])) do io
+    mpath = joinpath(filepath, m["file"])
+    filesize(mpath) == 8 * (length(sc) + n * length(vs)) ||
+      throw(ArgumentError("load_checkpoint: $mpath has $(filesize(mpath)) bytes, expected " *
+                          "$(8 * (length(sc) + n * length(vs))) ($(length(sc)) numbers and $(length(vs)) vectors of $n values)"))
+    vals = open(mpath) do io
       (Tuple(read(io, Float64) for _ in sc)..., Tuple(read!(io, Vector{Float64}(undef, n)) for _ in vs)...)
     end
     mem = NamedTuple{(sc..., vs...)}(vals)
+    order = Tuple(Symbol.(m["names"]))
+    mem = NamedTuple{order}(Tuple(mem[x] for x in order))
   end
   sc = meta["scales"]
-  names = (:objective, (Symbol(k) for k in sort!(collect(keys(sc))) if k != "objective")...)
+  names = Tuple(Symbol.(meta["scale_names"]))
   scales = NamedTuple{names}(Tuple(Float64(sc[String(k)]) for k in names))
   OptState(Int(meta["iteration"]), Int(meta["stage"]), Int(meta["stage_iterations"]), z, Symbol.(meta["blocks"]),
            Dict{Symbol,Int}(Symbol(k) => Int(v) for (k, v) in get(meta, "frozen_cells", Dict())),
@@ -659,14 +691,14 @@ _stop_reason(::Nothing, info, hist, stage_start) = nothing
 # a function of the user: (info, history, ctx) -> Bool, checked after every accepted iteration (also the first of a
 # stage; with a continuation, only in the last stage unless close_early); the reason is :custom
 function _stop_reason(stop, info, hist, stage_start, ctx)
-  r = stop(info, _trim!(deepcopy(hist)), ctx)        # the history up to this iteration (a copy: O(iterations))
+  r = stop(info, _history_copy(hist), ctx)        # the history up to this iteration (a copy: O(iterations))
   r isa Bool || throw(ArgumentError("solve!: the stop function must return true or false, got $(repr(r))"))
   r ? :custom : nothing
 end
 _stop_reason(stop::Union{Nothing,StopCriteria}, info, hist, stage_start, ctx) = _stop_reason(stop, info, hist, stage_start)
 
 """
-    solve!(problem::Optimization, method::DensityMethod; maxiter, on_failure = RejectStep(),
+    solve!(problem::Optimization, method::AbstractMethod; maxiter, on_failure = RejectStep(),
            stop = default_stop(optimizer), continuation = nothing, checkpoint = nothing, post = nothing,
            monitors = (;), resume = nothing, verbose = 2, io = stdout) -> OptResult
 
@@ -684,8 +716,8 @@ constraint, only when it holds to the tolerance of the optimiser)), `continuatio
 accepted iterations that are multiples of `every`, at the end and after a failure, with the fields and the forward state at the accepted
 design) and
 `monitors` (a named tuple of monitors, such as `(grey = Grey(θ, dΩ),)`: their values, see `monitor_value`, go to the
-history, the table and the closing line), `resume` (the folder of a [`Checkpoint`](@ref) or the result of
-[`load_checkpoint`](@ref)), `verbose` and `io`. An `OC` whose `move` is continued by `continuation` gets its own
+history, the table and the closing line), `resume` (the folder of a [`Checkpoint`](@ref), the result of
+[`load_checkpoint`](@ref) or `problem.state[]`, an [`OptState`](@ref)), `verbose` and `io`. An `OC` whose `move` is continued by `continuation` gets its own
 `move` back when `solve!` returns or throws; the other continued parameters keep the values of the last stage.
 
 Screen output (`verbose`, default `2`, printed to `io`): `0` nothing; `1` a banner (variables, constraint, metric,
@@ -813,10 +845,13 @@ function solve!(problem::Optimization, method::AbstractMethod; maxiter::Integer,
   for i in 1:num_constraints(fo)
     _is_linear(fo, i) && _setup_constraint!(fo, i, ctx)
   end
-  # the offsets of the linear constraints of the run that is resumed (computed again they could differ in the last bit)
+  # the offsets of the linear constraints of the run that is resumed: computed again they could differ in the last
+  # bits; a bound or scale changed by the user changes V beyond rounding, and then the new one is kept
   if resume !== nothing
     for (i, n) in enumerate(keys(problem.constraints))
-      fo.a[i] === nothing || (fo.V[i] = get(resume.linear_offsets, n, fo.V[i]))
+      (fo.a[i] === nothing || !haskey(resume.linear_offsets, n)) && continue
+      Vs = resume.linear_offsets[n]
+      abs(fo.V[i] - Vs) <= _OFFSET_RTOL * max(abs(fo.V[i]), abs(Vs), 1.0) && (fo.V[i] = Vs)
     end
   end
   set_context!(ctx, :phase, :optimization)
@@ -876,7 +911,9 @@ function solve!(problem::Optimization, method::AbstractMethod; maxiter::Integer,
           _print_event(pr, "✗ $(nameof(typeof(e))) after $(run.k) accepted iterations: checkpoint written at iteration " *
                            "$(run.k) in $(checkpoint.filepath)", :red)
       catch e2
-        e2 isa InterruptException || _print_event(pr, "✗ the checkpoint could not be written after the exception", :red)
+        e2 isa InterruptException || _print_event(pr, checkpoint === nothing ?
+          "✗ the state could not be captured after the exception" :
+          "✗ the checkpoint could not be written after the exception", :red)
       end
     end
     rethrow()
@@ -935,7 +972,7 @@ function _native_split(problem, opt, lag)
       throw(ArgumentError("AugmentedLagrangian: $(nameof(typeof(opt))) treats at most $(max_native(opt)) constraint(s) itself"))
   end
   requires_native(opt) && !isempty(names) && isempty(native) &&
-    throw(ArgumentError("solve!: OC needs one constraint F ≤ max that solves no state (the volume) of its own; " *
+    throw(ArgumentError("solve!: $(nameof(typeof(opt))) needs one constraint F ≤ max that solves no state (the volume) of its own; " *
                         "use SiMPL, or keep that constraint native"))
   native
 end
@@ -1094,7 +1131,7 @@ function _fail(msg, problem, method, opt, oracle, zk, hist, run, cont_names, che
       _print_event(pr, "✗ the post-processing of the last accepted design threw: " * first(sprint(showerror, e), 300), :red)
     end
   end
-  throw(OptimizationFailure(msg, _trim!(deepcopy(hist)), run.k))
+  throw(OptimizationFailure(msg, _history_copy(hist), run.k))
 end
 
 function _iterate!(problem, method, opt, oracle, state, zk, zprev, hist, run, ctx, cont_buf, cont_names, maxiter, on_failure,

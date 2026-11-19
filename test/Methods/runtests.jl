@@ -1172,4 +1172,80 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test_throws ArgumentError solve!(compliance_problem().problem, DensityMethod(OC(); metric = Euclidean()); maxiter = 2,
                                       verbose = 5, on_failure = RejectStep(shrink = 0.5, max_attempts = 3), stop = nothing)
   end
+
+  @testset "Resume: changed bound, memory of the step, state after an exception, SiMPL with AL" begin
+    # a linear constraint whose bound is changed on resume follows the new bound (the saved offset is not used)
+    mk(frac) = begin
+      q = compliance_problem()
+      dΩ = q.dΩ
+      q = (; q..., vol = sum(∫(1.0)dΩ))
+      Vraw = Functional(θ -> sum(∫(θ.ρ)dΩ), q.θv; dJdθ = θ -> (δ -> ∫(δ)dΩ), scale = 1.0, linear = true)
+      (q, Optimization(q.z; objective = q.C, constraints = (volume = Constraint(Vraw; max = frac * q.vol),)), Vraw)
+    end
+    dir = mktempdir()
+    q, pb, _ = mk(0.4)
+    solve!(pb, DensityMethod(OC()); maxiter = 4, verbose = 0, stop = nothing, checkpoint = Checkpoint(filepath = dir, every = 4))
+    q, pb, Vraw = mk(0.3)
+    solve!(pb, DensityMethod(OC()); maxiter = 30, verbose = 0, stop = nothing, resume = dir)
+    @test functional_value(Vraw, nothing) / q.vol <= 0.3 + 1e-3
+
+    # the memory of the step: copied in its order, numbers as Float64; wrong entries fail when captured
+    cm = HyperShape.Methods._capture_memory
+    v = Float32[1, 2, 3, 4]
+    m = cm((v = v, k = 3, flag = true), 4, OC())
+    @test keys(m) == (:v, :k, :flag) && m.v isa Vector{Float64} && m.v == v && m.k === 3.0 && m.flag === 1.0
+    v[1] = 9
+    @test m.v[1] == 1.0
+    @test_throws ArgumentError cm((w = [1.0, 2.0],), 4, OC())
+    @test_throws ArgumentError cm((t = (1.0, 2.0),), 4, OC())
+    @test_throws ArgumentError cm((n = nothing,), 4, OC())
+    @test_throws ArgumentError cm([1.0], 4, OC())
+    st = OptState(1, 0, 1, collect(1.0:4), [:ρ], Dict(:ρ => 0), Symbol[], (objective = 1.0,), OptHistory(2), "M", "X",
+                  (v = [1.0, 2, 3, 4], k = 3.0, w = [4.0, 3, 2, 1]), Dict{Symbol,Symbol}(), nothing, Dict{Symbol,Float64}())
+    d2 = mktempdir()
+    HyperShape.Methods._write_checkpoint(Checkpoint(filepath = d2, every = 1), st)
+    @test isequal(load_checkpoint(d2).memory, st.memory)
+    write(joinpath(d2, "memory_1.bin"), zeros(3))
+    @test_throws ArgumentError load_checkpoint(d2)
+
+    # SiMPL with an augmented Lagrangian (μ growing): resumed from a file, twice, and from problem.state[]
+    mkal() = begin
+      p = state_problem(; n = 16, init = fill(0.4, 256))
+      B0 = functional_value(p.boundary(scale = 1.0), nothing)
+      pb = Optimization(objective = p.compliance(scale = :initial),
+                        constraints = (volume = Volume(p.θ, p.dΩ; max_fraction = 0.4),
+                                       boundary = Constraint(p.boundary(scale = :bound); min = 0.5B0)))
+      p, pb
+    end
+    lag = AugmentedLagrangian(Bertsekas(μ0 = 0.5, growth = 1.5, window = 3, progress = Inf, μmax = 50.0))
+    run(p, pb, maxiter; kw...) = solve!(pb, DensityMethod(SiMPL(); metric = LumpedMass(), lagrangian = lag); maxiter,
+                                        verbose = 0, stop = nothing, kw...)
+    p, pb = mkal(); ra = run(p, pb, 12); za = copy(get_values(pb.z))
+    d3 = mktempdir()
+    p, pb = mkal(); run(p, pb, 4; checkpoint = Checkpoint(filepath = d3, every = 4)); st4 = pb.state[]
+    # the state in memory and the one read from the file are the same, field by field
+    ck = load_checkpoint(d3)
+    for f in fieldnames(OptState)
+      f === :history || @test isequal(getfield(ck, f), getfield(st4, f))
+    end
+    @test isequal(ck.history.objective, st4.history.objective) && isequal(ck.history.penalty_values, st4.history.penalty_values)
+    p, pb = mkal(); rb = run(p, pb, 12; resume = d3)
+    @test get_values(pb.z) == za && rb.history.objective == ra.history.objective
+    @test isequal(rb.history.multipliers.boundary, ra.history.multipliers.boundary) && rb.multipliers == ra.multipliers
+    p, pb = mkal(); run(p, pb, 8; resume = st4, checkpoint = Checkpoint(filepath = d3, every = 4))
+    p, pb = mkal(); run(p, pb, 12; resume = d3)
+    @test get_values(pb.z) == za
+
+    # after an exception: the state of the last accepted iteration, without the memory of the step, and no
+    # message about a checkpoint when there is none; it can be resumed
+    q = compliance_problem()
+    buf = IOBuffer()
+    @test_throws ErrorException solve!(q.problem, DensityMethod(SiMPL(); metric = LumpedMass()); maxiter = 8, verbose = 1,
+                                       io = buf, stop = (info, h, ctx) -> h.n >= 4 ? error("boom") : false)
+    st = q.problem.state[]
+    @test st isa OptState && st.memory === nothing && st.iteration == length(st.history) && st.iteration in (3, 4)
+    @test !occursin("checkpoint", String(take!(buf)))
+    r = solve!(q.problem, DensityMethod(SiMPL(); metric = LumpedMass()); maxiter = 8, verbose = 0, stop = nothing, resume = st)
+    @test length(r.history) == 8
+  end
 end

@@ -394,7 +394,7 @@ requires_native(::OC) = true
 # the previous iterate and gradient of Barzilai–Borwein, the step, the multiplier and the correction shift. The value
 # and gradient at z are evaluated again after a restore.
 memory(::SiMPL, s::SiMPLState, z) = (k = Float64(s.k), μ = s.μ, α_prev = s.α_prev, shift = s.shift,
-                                     ψ = copy(s.ψ), ψ_prev = copy(s.ψ_prev), z_prev = copy(s.z_prev), g_prev = copy(s.g_prev))
+                                     ψ = s.ψ, ψ_prev = s.ψ_prev, z_prev = s.z_prev, g_prev = s.g_prev)
 
 function restore_memory!(::SiMPL, s::SiMPLState, z, v::NamedTuple)
   _check_memory(v, (:k, :μ, :α_prev, :shift, :ψ, :ψ_prev, :z_prev, :g_prev), length(z), "SiMPL")
