@@ -33,9 +33,10 @@ import ..Operators: state_version, refresh!, invalidate!
 
 export FieldVariable, OptVariables, DesignFields, PhysicalFields
 export Identity, HelmholtzFilter, TanhProjection, CellMean, PointwiseMap
-export single_field_design, frozen_indicator
+export single_field_design, frozen_indicator, tag_adjacent_cells!
 
 include("OptVariables.jl")
+include("Zones.jl")
 include("DesignFields.jl")
 include("Maps.jl")
 include("PhysicalFields.jl")

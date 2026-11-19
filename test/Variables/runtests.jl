@@ -614,6 +614,7 @@ end
     add_tag_from_vertex_filter!(labels, "solid", model, x -> x[1] <= 0.25 + 1e-9 && x[2] >= 0.75 - 1e-9)   # 2×2 cells
     add_tag_from_vertex_filter!(labels, "void", model, x -> x[1] >= 0.75 - 1e-9 && x[2] <= 0.25 + 1e-9)    # 2×2 cells
     add_tag_from_vertex_filter!(labels, "edge", model, x -> x[2] ≈ 0)                                      # a line of nodes
+    add_tag_from_vertex_filter!(labels, "next", model, x -> 0.25 - 1e-9 <= x[1] <= 0.5 + 1e-9 && x[2] >= 0.75 - 1e-9) # touches "solid"
     Ω = Triangulation(model)
     dΩ = Measure(Ω, 2)
     reffe = ReferenceFE(lagrangian, Float64, order)
@@ -670,7 +671,50 @@ end
       @test num_dirichlet_dofs(Ve) == 0
     end
     @test_throws ArgumentError frozen_indicator(DesignFields(OptVariables(ρ = FieldVariable(Vplain; bounds = (0.0, 1.0), init = 0.5)); ρ = Identity()), :ρ)
-    @test occursin("8 frozen cells", sprint(show, z.blocks[1]))
+    @test occursin("8 frozen cells", sprint(show, z.blocks[1])) && occursin("frozen zone", sprint(show, θ))
+    @test_throws ArgumentError FieldVariable(V; bounds = (0.0, 1.0), init = 0.5, frozen = [1.0, 0.0, 0.5])  # 3 values, 2 tags
+    # a value that is not dyadic stays exact (one value per cell); a value that follows a Parameter
+    p = Parameter(2.0)
+    pw = PointwiseMap(r -> r^p[], r -> p[] * r^(p[] - 1); parameters = (p,))
+    z4, x4, θ4 = single_field_design(:ρ, V; bounds = (0.0, 1.0), init = 0.5, frozen = [0.7, 0.3], map = pw ∘ HelmholtzFilter(Sf, dΩ; backend), backend)
+    zerr(f, a, b) = sum(∫(solid * (f - a) * (f - a) + void * (f - b) * (f - b))dΩ)
+    @test zerr(θ4.ρ, 0.7^2, 0.3^2) == 0
+    p[] = 3.0
+    update_fields!(θ4, nothing)
+    @test zerr(θ4.ρ, 0.7^3, 0.3^3) == 0
+    if order == 1
+      # a function of x must be constant on each frozen cell; zones with different values must not touch
+      @test_throws ArgumentError FieldVariable(V; bounds = (0.0, 1.0), init = 0.5, frozen = x -> 0.2 + 0.5x[1])
+      Vt = TestFESpace(model, reffe; conformity = conf, dirichlet_tags = ["solid", "next"])
+      @test_throws ArgumentError FieldVariable(Vt; bounds = (0.0, 1.0), init = 0.5, frozen = [1.0, 0.0])
+    end
+  end
+
+  @testset "tag_adjacent_cells!: a boundary tag into a zone of cells (2D and 3D)" begin
+    for (dim, n) in ((2, 6), (3, 4))
+      model = CartesianDiscreteModel(dim == 2 ? (0, 1, 0, 1) : (0, 1, 0, 1, 0, 1), ntuple(_ -> n, dim))
+      labels = get_face_labeling(model)
+      top(x) = x[dim] ≈ 1
+      add_tag_from_vertex_filter!(labels, "face", model, top)                                     # a face
+      add_tag_from_vertex_filter!(labels, "edge", model, x -> top(x) && x[1] ≈ 0)                 # an edge (a corner in 2D)
+      add_tag_from_vertex_filter!(labels, "corner", model, x -> top(x) && all(xi -> xi ≈ 0, x[1:dim-1]))   # a vertex
+      tag_adjacent_cells!(labels, model, "face", "face_zone")
+      tag_adjacent_cells!(labels, model, "face", "face_zone2"; layers = 2)
+      tag_adjacent_cells!(labels, model, "edge", "edge_zone")
+      tag_adjacent_cells!(labels, model, "corner", "corner_zone"; layers = 2)
+      ncells(t) = count(Gridap.Geometry.get_face_mask(labels, t, dim))
+      @test ncells("face_zone") == n^(dim - 1) && ncells("face_zone2") == 2n^(dim - 1)
+      @test ncells("edge_zone") == (dim == 2 ? 1 : n) && ncells("corner_zone") == 2^dim
+      for order in (0, 1), t in ("face_zone", "edge_zone", "corner_zone")
+        V = TestFESpace(model, ReferenceFE(lagrangian, Float64, order); conformity = order == 0 ? :L2 : :H1, dirichlet_tags = t)
+        fv = FieldVariable(V; bounds = (0.0, 1.0), init = 0.5, frozen = 1.0)
+        @test fv.zone.ncells == ncells(t)
+      end
+      # the original tags are kept
+      @test count(Gridap.Geometry.get_face_mask(labels, "face", dim - 1)) == n^(dim - 1)
+      @test_throws ArgumentError tag_adjacent_cells!(labels, model, "face", "face_zone")      # exists
+      @test_throws ArgumentError tag_adjacent_cells!(labels, model, "face", "x"; layers = 0)
+    end
   end
 
   @testset "Frozen zones with a periodic design space" begin

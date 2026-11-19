@@ -21,8 +21,12 @@ there, and every physical field built from it takes, on the cells of the zones, 
 pointwise maps of its chain (projection and pointwise maps; filters and cell means leave it as it is): the zone is
 real material whatever the filter (see [`PhysicalFields`](@ref)). A zone is made of whole cells: every Dirichlet
 value must belong to a cell all of whose values are frozen (a tag of vertices made with `add_tag_from_vertex_filter!`
-gives that for P0 and P1; a line of nodes on a boundary does not, and is an error). Spaces with periodic conditions
-are fine; spaces with other linear constraints (symmetries) are not supported yet.
+gives that for P0 and P1; a line of nodes on a boundary does not, and is an error: turn a boundary tag into the cells
+next to it with [`tag_adjacent_cells!`](@ref)), and its value is one number per
+cell (zones with different values must not touch; a function of the coordinates must be constant on each frozen
+cell). Spaces with periodic conditions are fine; spaces with other linear constraints (symmetries) are not supported
+yet. With a frozen zone the space of the block is the `TrialFESpace` with the frozen values (what `metric_weights`
+of a metric of the user receives).
 """
 struct FieldVariable{S,Z}
   space::S
@@ -56,7 +60,13 @@ function FieldVariable(V; bounds, init, frozen = nothing)
       throw(ArgumentError("FieldVariable: give the test space (with dirichlet_tags) and the values in frozen"))
     frozen === nothing && throw(ArgumentError("FieldVariable: the design space has Dirichlet tags (frozen zones); " *
                                               "give their values: frozen = 1.0 (or one per tag, or a function of x)"))
-    U = TrialFESpace(V, frozen)
+    U = try
+      TrialFESpace(V, frozen)
+    catch e
+      e isa AssertionError || rethrow()
+      throw(ArgumentError("FieldVariable: frozen must be a number, a function of x or one value per Dirichlet tag " *
+                          "(in the order of dirichlet_tags)"))
+    end
     dv = get_dirichlet_dof_values(U)
     all(v -> lb <= v <= ub, dv) || throw(ArgumentError("FieldVariable: frozen values outside the bounds $bounds"))
     zone = _frozen_zone(U, dv)
@@ -79,15 +89,18 @@ function _frozen_zone(U, dv)
     all(<(0), cell) || continue
     k = ids0[c][1]
     χv[k] = 1.0
-    s = 0.0
+    v1 = dv[-first(cell)]
     for d in cell
       covered[-d] = true
-      s += dv[-d]
+      abs(dv[-d] - v1) <= 1e-12 * max(1.0, abs(v1)) || throw(ArgumentError("FieldVariable: a frozen cell has " *
+        "different frozen values ($v1 and $(dv[-d])): the value of a zone is one number per cell (zones with different " *
+        "values must not touch; a function of x must be constant on each cell)"))
     end
-    gv[k] = s / length(cell)
+    gv[k] = v1
   end
   all(covered) || throw(ArgumentError("FieldVariable: $(count(!, covered)) frozen values do not belong to a frozen cell: " *
-    "a frozen zone must be made of whole cells (a line of nodes on a boundary is not a zone; tag the cells next to it)"))
+    "a frozen zone must be made of whole cells (a line of nodes on a boundary is not a zone; tag the cells next to it " *
+    "with tag_adjacent_cells!(labels, model, tag, newtag))"))
   FrozenZone(FEFunction(V0, χv), FEFunction(V0, 1 .- χv), FEFunction(V0, gv), Int(sum(χv)), length(dv))
 end
 

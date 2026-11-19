@@ -517,7 +517,7 @@ function load_checkpoint(filepath::AbstractString)
   (z = z, iteration = Int(meta["iteration"]), stage = Int(meta["stage"]),
    stage_iterations = Int(meta["stage_iterations"]), scales = scales,
    blocks = Symbol.(meta["blocks"]), continuation = Symbol.(meta["continuation"]),
-   frozen_cells = Dict(Symbol(k) => Int(v) for (k, v) in get(meta, "frozen_cells", Dict())),
+   frozen_cells = Dict{Symbol,Int}(Symbol(k) => Int(v) for (k, v) in get(meta, "frozen_cells", Dict())),
    history = _read_history(joinpath(filepath, meta["history_file"])), optimizer = get(meta, "optimizer", ""),
    memory = mem, handled = Dict(Symbol(k) => Symbol(v) for (k, v) in get(meta, "handled", Dict())),
    lagrangian = haskey(meta, "multipliers") ?
@@ -928,7 +928,8 @@ function _make_feasible!(o, zk, i = 1)
   az - V <= 1e-12 * max(abs(V), 1.0) && return nothing
   alb = dot(a, o.lb)
   (all(>=(0), a) && alb < V) ||
-    throw(ArgumentError("Optimization: the linear constraint cannot be met within the bounds (aᵀlb ≥ V or a has negative entries)"))
+    throw(ArgumentError("Optimization: the linear constraint cannot be met within the bounds (aᵀlb ≥ V or a has negative entries)" *
+                        _zone_hint(o)))
   t = (V - alb) / (az - alb)
   @. zk = ifelse(a > 0, o.lb + t * (zk - o.lb), zk)     # entries outside the constraint are left as they are
   set_values!(o.z, zk)
@@ -953,7 +954,8 @@ function _make_feasible_nonlinear!(o, zk, i = 1; tol = 1e-6, maxit = 60)
   gt(t) = (@. zt = ifelse(acts, o.lb + t * (z0 - o.lb), z0); constraint(o, i, zt) + tol / 2)
   t0, t1 = 0.0, 1.0
   h0, h1 = gt(t0), g1 + tol / 2
-  h0 < 0 || throw(ArgumentError("Optimization: the constraint cannot be met within the bounds (it is violated at the lower bound)"))
+  h0 < 0 || throw(ArgumentError("Optimization: the constraint cannot be met within the bounds (it is violated at the lower bound)" *
+                                _zone_hint(o)))
   t, side = t0, 0
   for _ in 1:maxit
     t = (t0 * h1 - t1 * h0) / (h1 - h0)
@@ -974,6 +976,9 @@ function _make_feasible_nonlinear!(o, zk, i = 1; tol = 1e-6, maxit = 60)
   set_values!(o.z, zk)
   t
 end
+
+_zone_hint(o) = any(b -> b.zone !== nothing, o.z.blocks) ?
+  "; the frozen zones count as material: is their volume above the bound?" : ""
 
 mutable struct _LoopState
   k::Int

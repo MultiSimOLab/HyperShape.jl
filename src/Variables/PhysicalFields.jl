@@ -10,7 +10,8 @@ calling the solve functions of the operators with `ctx = OptContext(:setup)`. Re
 
 A frozen zone of the design field (see [`FieldVariable`](@ref)) is imposed at the end of every chain: on its cells
 θ is the image of the frozen value by the pointwise maps of the chain (`ρ = 1` gives `θ = 1` through a projection),
-whatever the filters, and its derivative vanishes there. It costs no solve and keeps a linear chain linear.
+whatever the filters, and its derivative vanishes there. It costs no solve and keeps a linear chain linear. With a
+frozen zone, `θ.ρ` is an operation on fields (not the `FEFunction` of the last map), so read it as a `CellField`.
 
 `backend` (a reserved name: no physical field can be called `backend`) selects who assembles the sensitivities on
 the design spaces: `:compiled` (default, HyperFEMKernels) or `:lazy` (Gridap).
@@ -55,10 +56,13 @@ function PhysicalFields(x::DesignFields; backend = :compiled, kwargs...)
     zone = get_optvariables(x).blocks[i].zone
     if zone !== nothing
       value = zone.value
+      reference = getfield(getfield(x, :fields), src)
       for m in _maps(map)
-        _pointwise(m) && (value = output(_stage(m, value)))
+        _pointwise(m) || continue
+        value = output(_stage(m, value))
+        reference = output(_stage(m, reference))
       end
-      push!(stages, _mask_stage(input, zone, value))
+      push!(stages, _mask_stage(input, zone, value, reference))
     end
     push!(chains, Tuple(stages))
   end
@@ -114,6 +118,8 @@ function update_fields!(θ::PhysicalFields, ctx)
     if xchanged || (pchanged && _needs_update_after_parameters(chain))
       _update_chain!(chain, ctx)
     end
+    s = last(chain)
+    s isa MaskStage && _refresh_mask!(s, params)        # the image of the frozen value follows β
     seen_params[j] = params
     changed |= pchanged
   end
@@ -280,7 +286,9 @@ function is_linear_field(θ::PhysicalFields, name::Symbol)
   all(is_linear_stage, getfield(θ, :chains)[j])
 end
 
-Base.show(io::IO, θ::PhysicalFields) = print(io, "PhysicalFields(", join(getfield(θ, :names), ", "), ")")
+Base.show(io::IO, θ::PhysicalFields) =
+  print(io, "PhysicalFields(", join((string(n) * (last(c) isa MaskStage ? " (frozen zone)" : "")
+                                     for (n, c) in zip(getfield(θ, :names), getfield(θ, :chains))), ", "), ")")
 
 # for check_consistency: (number of frozen cells, RMS of θ − frozen image over them) of the physical field name, or
 # nothing without a frozen zone
@@ -291,7 +299,8 @@ function _frozen_check(θ::PhysicalFields, name::Symbol)
   f = getproperty(θ, name)
   dΩ = Measure(get_triangulation(s.χ), 4)
   area = sum(∫(s.χ)dΩ)
-  e = sum(∫(s.χ * (f - s.value) * (f - s.value))dΩ)
+  # θ against the pointwise image of the design field itself (not against the value the mask selects)
+  e = sum(∫(s.χ * (f - s.reference) * (f - s.reference))dΩ)
   zone = get_optvariables(getfield(θ, :x)).blocks[getfield(θ, :sources)[j]].zone
   zone.ncells, sqrt(max(e, 0.0) / area)
 end

@@ -50,22 +50,37 @@ is_linear_stage(s) = false
 
 # The frozen zone of a design field, imposed at the end of every chain built from it: on the frozen cells the output
 # is the image of the frozen value (θ = χ ? value : chain(x)); its derivative vanishes there. Affine, lazy, no solve.
-struct MaskStage{I,O,F,C,V}
+# The image of the frozen value is kept as one value per cell (`img`, P0), recomputed from its lazy form only when a
+# parameter of the chain changes (`_refresh_mask!`), so θ costs one selection per point and not a second projection.
+struct MaskStage{I,O,F,C,V,L,R}
   input::I
   out::O
   free::F
   χ::C
-  value::V
+  img::V            # P0: image of the frozen value on the frozen cells
+  img_lazy::L       # its lazy form (the pointwise maps applied to the frozen value)
+  reference::R      # the pointwise maps applied to the design field x (for check_consistency)
+  seen::Base.RefValue{Int}   # parameter version of the chain at the last refresh
 end
 _select_frozen(c, χ, v) = χ > 0.5 ? v : c
-_mask_stage(input, zone, value) =
-  MaskStage(input, Operation(_select_frozen)(input, zone.χ, value), zone.free, zone.χ, value)
+function _mask_stage(input, zone, img_lazy, reference)
+  img = FEFunction(get_fe_space(zone.value), zeros(num_free_dofs(get_fe_space(zone.value))))
+  s = MaskStage(input, Operation(_select_frozen)(input, zone.χ, img), zone.free, zone.χ, img, img_lazy, reference, Ref(-1))
+  _refresh_mask!(s, 0)
+end
+function _refresh_mask!(s::MaskStage, version)
+  s.seen[] == version && return s
+  interpolate!(s.img_lazy, get_free_dof_values(s.img), get_fe_space(s.img))   # exact: the value is constant per cell
+  s.seen[] = version
+  s
+end
 output(s::MaskStage) = s.out
 update_stage!(s::MaskStage, ctx) = s
 pullback(s::MaskStage, L, ctx, key) = (free = s.free; δ -> L(free * δ))
 is_linear_stage(::MaskStage) = true
 
-# maps evaluated point by point (they carry the frozen value into θ); filters and cell means leave it as it is
+# maps evaluated point by point (they carry the frozen value into θ); filters and cell means leave it as it is. A new
+# kind of FieldMap that acts point by point must declare `_pointwise(::MyMap) = true`.
 _pointwise(m) = false
 
 """
