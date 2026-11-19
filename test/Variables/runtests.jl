@@ -698,10 +698,10 @@ end
       add_tag_from_vertex_filter!(labels, "face", model, top)                                     # a face
       add_tag_from_vertex_filter!(labels, "edge", model, x -> top(x) && x[1] ≈ 0)                 # an edge (a corner in 2D)
       add_tag_from_vertex_filter!(labels, "corner", model, x -> top(x) && all(xi -> xi ≈ 0, x[1:dim-1]))   # a vertex
-      tag_adjacent_cells!(labels, model, "face", "face_zone")
-      tag_adjacent_cells!(labels, model, "face", "face_zone2"; layers = 2)
-      tag_adjacent_cells!(labels, model, "edge", "edge_zone")
-      tag_adjacent_cells!(labels, model, "corner", "corner_zone"; layers = 2)
+      tag_adjacent_cells!(labels, "face_zone", model, "face")
+      tag_adjacent_cells!(labels, "face_zone2", model, "face"; layers = 2)
+      tag_adjacent_cells!(labels, "edge_zone", model, "edge")
+      tag_adjacent_cells!(labels, "corner_zone", model, "corner"; layers = 2)
       ncells(t) = count(Gridap.Geometry.get_face_mask(labels, t, dim))
       @test ncells("face_zone") == n^(dim - 1) && ncells("face_zone2") == 2n^(dim - 1)
       @test ncells("edge_zone") == (dim == 2 ? 1 : n) && ncells("corner_zone") == 2^dim
@@ -712,8 +712,14 @@ end
       end
       # the original tags are kept
       @test count(Gridap.Geometry.get_face_mask(labels, "face", dim - 1)) == n^(dim - 1)
-      @test_throws ArgumentError tag_adjacent_cells!(labels, model, "face", "face_zone")      # exists
-      @test_throws ArgumentError tag_adjacent_cells!(labels, model, "face", "x"; layers = 0)
+      @test_throws ArgumentError tag_adjacent_cells!(labels, "face_zone", model, "face")      # exists
+      @test_throws ArgumentError tag_adjacent_cells!(labels, "x", model, "face"; layers = 0)
+      @test_throws ArgumentError tag_adjacent_cells!(labels, "x", model, "nope")
+      # a tag with cells starts from its cells: one more layer each time
+      tag_adjacent_cells!(labels, "face_zone3", model, "face_zone2")
+      @test ncells("face_zone3") == 2n^(dim - 1)
+      tag_adjacent_cells!(labels, "face_zone4", model, "face_zone2"; layers = 2)
+      @test ncells("face_zone4") == 3n^(dim - 1)
     end
   end
 

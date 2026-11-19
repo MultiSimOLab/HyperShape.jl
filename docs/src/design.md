@@ -78,7 +78,7 @@ z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = 0.5, frozen
 - A zone is made of whole cells (every Dirichlet value belongs to a cell whose values are all frozen); a line of nodes
   is an error. A vertex tag (`add_tag_from_vertex_filter!`) serves P0 and P1 alike. To freeze the material under a
   load or at a support given as a boundary tag (a face, an edge, a vertex), in any mesh and in 3D,
-  `tag_adjacent_cells!(labels, model, "load", "load_zone"; layers = 1)` tags the cells that contain it (and more
+  `tag_adjacent_cells!(labels, "load_zone", model, "load"; layers = 1)` tags the cells that contain it (and more
   layers around them); use `"load_zone"` in `dirichlet_tags`.
 - `frozen` is a number, one number per tag, or a function of the coordinates (constant on each frozen cell); inside
   the bounds. Several zones with different values (solid and void) are fine if they do not touch: the value of a zone

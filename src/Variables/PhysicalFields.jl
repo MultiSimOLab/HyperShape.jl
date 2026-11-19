@@ -84,7 +84,7 @@ end
 
 Counter of changes of the physical fields. It grows in [`update_fields!`](@ref) when z or a parameter of a map
 changed (`set_beta!`, a `Parameter` of a `PointwiseMap` or of a filter's operator). Note that the fields themselves
-read β lazily: forms assembled after `set_beta!` already see
+read β lazily (except a frozen zone, whose value is refreshed by `update_fields!`): forms assembled after `set_beta!` already see
 the new value, but operators that depend on θ only notice the change after `update_fields!`. Two `PhysicalFields`
 built on the same `DesignFields` are independent: each one is brought up to date by its own `update_fields!`.
 """

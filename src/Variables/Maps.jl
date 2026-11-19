@@ -263,7 +263,7 @@ end
 Map applied point by point at the quadrature points, `θ = f(input)`, with its derivative `df` written by the user
 (no automatic differentiation; check it with `check_consistency`): for example a projection or a threshold of the
 user's own. `f` and `df` are functions of one number. If they read [`Parameter`](@ref HyperShape.Operators.Parameter)s (or other objects with a
-`state_version`), list them in `parameters`, so the physical fields count as changed when they change (continuation).
+`state_version`), list them in `parameters`, so the physical fields count as changed when they change (continuation). The value of a frozen zone through the map is also recomputed only then.
 Lazy, like [`TanhProjection`](@ref): nothing is recomputed, the forms evaluate `f` and `df` when they are assembled.
 
 ```julia

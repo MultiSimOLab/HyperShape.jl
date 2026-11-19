@@ -22,7 +22,8 @@ pointwise maps of its chain (projection and pointwise maps; filters and cell mea
 real material whatever the filter (see [`PhysicalFields`](@ref)). A zone is made of whole cells: every Dirichlet
 value must belong to a cell all of whose values are frozen (a tag of vertices made with `add_tag_from_vertex_filter!`
 gives that for P0 and P1; a line of nodes on a boundary does not, and is an error: turn a boundary tag into the cells
-next to it with [`tag_adjacent_cells!`](@ref)), and its value is one number per
+next to it with [`tag_adjacent_cells!`](@ref); in P1 a cell outside the tags whose nodes are all frozen, such as a hole
+of one cell inside a zone, belongs to the zone too), and its value is one number per
 cell (zones with different values must not touch; a function of the coordinates must be constant on each frozen
 cell). Spaces with periodic conditions are fine; spaces with other linear constraints (symmetries) are not supported
 yet. With a frozen zone the space of the block is the `TrialFESpace` with the frozen values (what `metric_weights`
@@ -63,7 +64,7 @@ function FieldVariable(V; bounds, init, frozen = nothing)
     U = try
       TrialFESpace(V, frozen)
     catch e
-      e isa AssertionError || rethrow()
+      (e isa AssertionError && occursin("dirichlet tags", e.msg)) || rethrow()
       throw(ArgumentError("FieldVariable: frozen must be a number, a function of x or one value per Dirichlet tag " *
                           "(in the order of dirichlet_tags)"))
     end
@@ -100,7 +101,7 @@ function _frozen_zone(U, dv)
   end
   all(covered) || throw(ArgumentError("FieldVariable: $(count(!, covered)) frozen values do not belong to a frozen cell: " *
     "a frozen zone must be made of whole cells (a line of nodes on a boundary is not a zone; tag the cells next to it " *
-    "with tag_adjacent_cells!(labels, model, tag, newtag))"))
+    "with tag_adjacent_cells!(labels, newtag, model, tag))"))
   FrozenZone(FEFunction(V0, χv), FEFunction(V0, 1 .- χv), FEFunction(V0, gv), Int(sum(χv)), length(dv))
 end
 
