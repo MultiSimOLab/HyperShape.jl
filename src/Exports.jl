@@ -23,6 +23,9 @@ end
 @_export Functionals Functional
 @_export Functionals Volume
 @_export Functionals Constraint
+@_export Functionals LinearInState
+@_export Optimizers AugmentedLagrangian
+@_export Optimizers Bertsekas
 @_export Functionals functional_value
 @_export Functionals functional_gradient!
 @_export Checks check_consistency

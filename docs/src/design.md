@@ -202,7 +202,7 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
   The banner shows the bounds in the units of `F`; the history and the table, the scaled value `(F − r)/s` (`r` the
   upper bound, or the lower one if there is none).
   Each optimiser declares which constraints it treats itself (`handles`, `max_native`): OC and SiMPL treat one
-  `g ≤ 0` that solves no state; `solve!` names the others and stops (the augmented Lagrangian comes next). The
+  `g ≤ 0` that solves no state; the others go to the augmented Lagrangian (below). The
   oracle gives the optimiser, for each constraint `i`, its bounds and kind (`constraint_info`), its value and
   derivative, and `weighted_gradient!`, the derivative of `w₀ f + Σ wᵢ gᵢ` in one reverse sweep (one adjoint solve
   per state). For the constraint that OC or SiMPL treats, a linear one (`Volume` over identity or filter maps, or `linear = true`) is checked to be linear at
@@ -211,6 +211,19 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
   SiMPL keeps every iterate feasible; at an infeasible design, after a continuation jump, it first takes restoration
   steps that must reduce the violation, which can take several steps or end the stage as stalled). Cost per step: one
   transposed filter for its derivative and one filter per correction (about 1.5–3), no forward solve.
+- **Augmented Lagrangian:** `DensityMethod(SiMPL(); metric, lagrangian = AugmentedLagrangian(Bertsekas(μ0 = 1.0)))`,
+  the default whenever a constraint is not native (a lower bound, an equality, an interval, one that reads a state, or
+  more than the optimiser takes). The optimiser sees `f + Σ term(gᵢ)` over those constraints (Bertsekas' rule:
+  `term = μ/2 (y − Π(y))² − λ²/(2μ)` with `y = g + λ/μ` and `Π` the projection onto the bounds), whose gradient is
+  one weighted reverse sweep; the multipliers `λ ← μ (y − Π(y))` are updated after every accepted iteration and the
+  optimiser keeps its step size (`objective_changed!`: SiMPL keeps Barzilai–Borwein, which the bench needs). The
+  penalty is fixed by default (`growth = 1`): a growing penalty makes the subproblem ill-conditioned for first-order
+  optimisers (5 of 7 Hock–Schittkowski problems fail with SiMPL). `native = (:volume,)` or `()` chooses the split;
+  OC needs one native constraint and is heuristic with an objective of mixed sign. The run converges only with every
+  constraint met to its tolerance (`constraint_tol` of the optimiser for the native, of the augmented Lagrangian for
+  the others). History: `constraints`, `violations`, `multipliers` (`λ` for the augmented Lagrangian) and
+  `penalties`; the checkpoint (format 2) keeps the split, `λ`, `μ` and the counters, so a resumed run continues the
+  same multipliers.
 - **Metric:** `LumpedMass(dΩ)` (cell volumes for P0, lumped mass for P1) or `Euclidean()`; mandatory for SiMPL, OC
   uses it only for the stationarity measure (default `Euclidean()`; give `LumpedMass(dΩ)` to compare it with SiMPL).
 - **Rejection** (`on_failure`, default `RejectStep(shrink = 0.5, max_attempts = 5)`): if the forward problem does not converge at the new design, the loop restores the previous one,

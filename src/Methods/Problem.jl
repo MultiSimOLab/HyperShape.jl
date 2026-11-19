@@ -17,8 +17,8 @@ when given they are checked) subject to the bounds of `z` and the named `constra
 (`history.constraints.volume`), the banner and the checkpoint. Constraints may read states.
 
 The optimiser treats some constraints itself (OC and SiMPL: one inequality that solves no state, typically the volume;
-see `handles`); the others need the augmented Lagrangian, which comes in the next version: until then `solve!` stops
-with an error that names them.
+see `handles`); the others enter its objective through the augmented Lagrangian of the method
+(`DensityMethod(…; lagrangian = AugmentedLagrangian(…))`, used by default and shown in the banner).
 
 A constraint built as linear (`Volume` over identity or filter maps, or a `Functional(…; linear = true)`) is checked
 to be linear when the optimisation starts, and costs nothing in the loop (its vector is computed once). A nonlinear
@@ -87,7 +87,7 @@ end
 const Metric = Union{Euclidean,LumpedMass}
 
 """
-    DensityMethod(optimizer; metric = default_metric(optimizer))
+    DensityMethod(optimizer; metric = default_metric(optimizer), lagrangian = AugmentedLagrangian())
 
 Density method (SIMP, RAMP or any interpolation written by the user in the weak forms): the step is `optimizer` (any
 `Optimizer`: `OC(…)`, `SiMPL(…)`). `metric`: [`LumpedMass`](@ref)`(dΩ)`, [`Euclidean`](@ref)`()`, a vector of
@@ -96,18 +96,30 @@ positive weights (one per entry of z: `inner(x, y) = Σ mᵢ xᵢ yᵢ`), an obj
 per block of z. SiMPL uses
 it in its step and its optimality measure, and needs it (no default). OC uses it only for the stationarity measure
 (see [`StopCriteria`](@ref)); its default is `Euclidean()`, which makes that measure depend on the mesh.
+
+`lagrangian`: how the constraints the optimiser does not treat itself are handled, an
+[`AugmentedLagrangian`](@ref HyperShape.Optimizers.AugmentedLagrangian) (default `AugmentedLagrangian()`:
+[`Bertsekas`](@ref HyperShape.Optimizers.Bertsekas) with a fixed penalty `μ = 1`, multipliers updated after every
+accepted iteration, the first constraints the optimiser handles kept native). It is used only when there is such a
+constraint, or when its `native` names fewer than the optimiser would take.
 """
-struct DensityMethod{O<:Optimizer,M}
+struct DensityMethod{O<:Optimizer,M,L<:AugmentedLagrangian}
   optimizer::O
   metric::M
   default_metric::Bool   # the metric was not given (shown in the banner)
-  function DensityMethod(optimizer::Optimizer; metric = nothing)
+  lagrangian::L
+  default_lagrangian::Bool
+  function DensityMethod(optimizer::Optimizer; metric = nothing, lagrangian = nothing)
+    lgiven = lagrangian !== nothing
+    lgiven || (lagrangian = AugmentedLagrangian())
+    lagrangian isa AugmentedLagrangian ||
+      throw(ArgumentError("DensityMethod: lagrangian must be an AugmentedLagrangian, for example AugmentedLagrangian(Bertsekas(μ0 = 0.1))"))
     given = metric !== nothing
     given || (metric = default_metric(optimizer))
     ok = _valid_metric(metric) || (metric isa NamedTuple && all(_valid_metric, values(metric)))
     ok || throw(ArgumentError("DensityMethod: metric must be LumpedMass(dΩ), Euclidean(), a vector of positive weights, " *
                               "an object with a metric_weights(m, z) method, or a named tuple of them per block"))
-    new{typeof(optimizer),typeof(metric)}(optimizer, metric, !given)
+    new{typeof(optimizer),typeof(metric),typeof(lagrangian)}(optimizer, metric, !given, lagrangian, !lgiven)
   end
 end
 

@@ -16,7 +16,23 @@ using ..Operators: get_model as HyperShape_get_model
 using ..Variables: PhysicalFields, DesignFields, Identity, update_fields!, design_gradient!, get_designfields,
                    get_optvariables, is_linear_field, reset_sink!, add_forms!, finish_sink!
 
-export AbstractFunctional, Functional, Constraint, Volume, functional_value, functional_gradient!
+export AbstractFunctional, Functional, Constraint, Volume, LinearInState, functional_value, functional_gradient!
+
+"""
+    LinearInState()
+
+`dJdu` of a [`Functional`](@ref) whose value `J(u, θ)` is linear in the state `u` (no constant term), such as
+`J = (u, θ) -> ∫(g ⋅ u)dΓ`: its derivative in the direction `w` is `J(w, θ)`, so it is not written twice.
+`J` must return a `DomainContribution`; `check_consistency` detects a functional that is not linear.
+"""
+struct LinearInState end
+
+# u -> (w -> J(w, θ))
+struct _LinearDerivative{F,T}
+  J::F
+  θ::T
+end
+(d::_LinearDerivative)(u) = w -> d.J(w, d.θ)
 
 """
     AbstractFunctional
@@ -40,8 +56,10 @@ With a state (first form), `S` a [`StateOperator`](@ref) built with an
 `pᵀ ∂R/∂θ` of the state):
 - `J(u, θ)`: value, a `DomainContribution` (`∫(…)dΩ`) or a number; `u = get_state(S)`.
 - `dJdu` (mandatory): the partial derivative with respect to the state, `u -> (w -> ∫(…)dΩ)` (a linear form in the
-  test function `w` of the adjoint), or [`SelfAdjoint`](@ref HyperShape.Operators.SelfAdjoint)`()` when it is the
-  load of a linear and symmetric state (the compliance): then `p = u` and no adjoint is solved.
+  test function `w` of the adjoint), [`LinearInState`](@ref)`()` when `J` is linear in `u` (a mean displacement, a
+  temperature at a probe: then `dJdu` is `J` itself with `w` in place of `u`), or
+  [`SelfAdjoint`](@ref HyperShape.Operators.SelfAdjoint)`()` when it is the load of a linear and symmetric state (the
+  compliance): then `p = u` and no adjoint is solved.
 - `dJdθ`: the partial derivative with respect to the physical fields, `(u, θ) -> (δ -> ∫(… * δ)dΩ)`, or a named tuple
   of such forms (`(ρ = δ -> …, E = δ -> …)`) when θ has several fields; `nothing` (default) when `J` does not read θ
   directly.
@@ -150,6 +168,7 @@ function Functional(J, S::StateOperator; dJdu = _Unused(), dJdθ = nothing, scal
     "Functional: the state depends on several PhysicalFields; the sensitivity through all of them is not supported yet"))
   mode, value = _scale(scale)
   θ = _fields(S, fields)
+  dJdu isa LinearInState && (dJdu = _LinearDerivative(J, θ))
   if dJdu isa SelfAdjoint
     HyperShape_get_model(S) isa HyperFEM.StaticLinearModel || throw(ArgumentError(
       "Functional: dJdu = SelfAdjoint() needs a linear state (a StaticLinearModel): p = u is not the adjoint of a nonlinear problem"))

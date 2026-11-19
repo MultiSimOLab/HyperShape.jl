@@ -12,16 +12,17 @@ mutable struct _Printer{IO_}
   widths::Vector{Int}   # widths of the continuation columns
   red::Float64          # a constraint value above this is shown in red
   monitors::Vector{Symbol}   # one column per monitor
+  multi::Bool           # several constraints: the largest violation and multiplier
 end
 
 _verbose_level(v::Bool) = v ? 2 : 0
 _verbose_level(v::Integer) = (0 <= v <= 2 || throw(ArgumentError("solve!: verbose must be 0, 1, 2 or a Bool")); Int(v))
 _verbose_level(v) = throw(ArgumentError("solve!: verbose must be 0, 1, 2 or a Bool"))
 
-function _Printer(io, verbose, schedule, monitors = ())
+function _Printer(io, verbose, schedule, monitors = (), multi = false)
   widths = schedule === nothing ? Int[] :
            [max(6, textwidth(string(n)), maximum(x -> textwidth(_g(x)), v)) for (n, v) in zip(schedule.names, schedule.values)]
-  _Printer(io, _verbose_level(verbose), time(), time(), false, widths, _RED_CONSTRAINT, collect(Symbol, monitors))
+  _Printer(io, _verbose_level(verbose), time(), time(), false, widths, _RED_CONSTRAINT, collect(Symbol, monitors), multi)
 end
 
 _mwidth(n) = max(7, textwidth(string(n)))
@@ -37,8 +38,8 @@ _pad(s, w) = " "^max(0, w - textwidth(s)) * s
 
 function _header(p::_Printer, names)
   cont = join(("  " * _pad(string(n), w) for (n, w) in zip(names, p.widths)))
-  @sprintf("  %5s  %13s  %9s  %10s  %9s  %9s  %9s  %9s  %9s", "it", "objective", "Δobj", "constraint", "kkt", "S",
-           "change", "step", "μ") * cont * join(("  " * _pad(string(n), _mwidth(n)) for n in p.monitors)) *
+  @sprintf("  %5s  %13s  %9s  %10s  %9s  %9s  %9s  %9s  %9s", "it", "objective", "Δobj", p.multi ? "max viol" : "constraint",
+           "kkt", "S", "change", "step", p.multi ? "max |λ|" : "λ") * cont * join(("  " * _pad(string(n), _mwidth(n)) for n in p.monitors)) *
     @sprintf("  %11s  %8s", "f/a/F", "t[s]")
 end
 
@@ -65,9 +66,11 @@ _stage_rule(stop, schedule) = (stop === nothing || schedule === nothing || !_act
                               schedule.close_early ? " · every stage (close_early)" : " · last stage only"
 
 _metric_name(m::Euclidean) = "Euclidean"
-_constraint_label(problem, opt) =
-  join((string(n) * _bounds_label(c) * ", " * (is_linear(c.F) ? "linear" : "nonlinear (tol $(_g_or_e(constraint_tol(opt))))")
-        for (n, c) in pairs(problem.constraints)), "; ")
+_constraint_label(problem, opt, native = 1:length(problem.constraints), tol = NaN) =
+  join((string(n) * _bounds_label(c) * ", " * (is_linear(c.F) ? "linear" : "nonlinear") *
+        (i in native ? (is_linear(c.F) ? "" : " (tol $(_g_or_e(constraint_tol(opt))))") * (length(native) < length(problem.constraints) ? ", native" : "") :
+                       ", augmented Lagrangian (tol $(_g_or_e(tol)))")
+        for (i, (n, c)) in enumerate(pairs(problem.constraints))), "; ")
 _bounds_label(c) = (c.lo == -Inf && c.hi == 0) ? "" : c.lo == c.hi ? " = $(_sig(c.hi))" :
                    c.lo == -Inf ? " ≤ $(_sig(c.hi))" : c.hi == Inf ? " ≥ $(_sig(c.lo))" :
                    " in [$(_sig(c.lo)), $(_sig(c.hi))]"
@@ -80,7 +83,8 @@ _metric_name(m::AbstractVector) = "weights of the user"
 _metric_name(m) = string(nameof(typeof(m)))
 _metric_name(m::NamedTuple) = join(("$k: $(_metric_name(v))" for (k, v) in pairs(m)), ", ")
 
-function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, defaults, schedule, resume)
+function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, defaults, schedule, resume,
+                       native = 1:length(problem.constraints))
   p.level >= 1 || return
   opt = method.optimizer
   z = problem.z
@@ -89,8 +93,14 @@ function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, 
   _styled(p, "━━" * title * "━"^max(3, W - 2 - textwidth(title)) * "\n", :cyan; bold = true)
   blocks = join(("$n ($(length(r)))" for (n, r) in zip(z.names, z.ranges)), ", ")
   nc = length(problem.constraints)
-  println(p.io, "  design variables $(length(z)): $blocks · constraint: ", nc == 0 ? "none" : _constraint_label(problem, opt), " · metric: ",
-          _metric_label(method))
+  lag = method.lagrangian
+  println(p.io, "  design variables $(length(z)): $blocks · constraint", nc > 1 ? "s" : "", ": ",
+          nc == 0 ? "none" : _constraint_label(problem, opt, native, lag.constraint_tol), " · metric: ", _metric_label(method))
+  if length(native) < nc
+    println(p.io, "  augmented Lagrangian: ", lag.update, method.default_lagrangian ? " (default)" : "",
+            ", multipliers updated every iteration")
+    opt isa OC && _styled(p, "  OC is heuristic for an augmented Lagrangian (an objective of mixed sign): SiMPL is the safe choice\n", :yellow)
+  end
   if schedule !== nothing
     for (n, v) in zip(schedule.names, schedule.values)
       println(p.io, "  continuation $n: ", join((_g(x) for x in v), " → "), " (every $(schedule.every) iterations)")
@@ -127,8 +137,13 @@ function _print_row(p::_Printer, hist::OptHistory)
   f = hist.objective[k]
   fp = k > 1 ? hist.objective[k-1] : NaN
   df = fp != 0 ? (f - fp) / abs(fp) : NaN
-  g = size(hist.constraint_values, 1) == 0 ? NaN : hist.constraint_values[1, k]
-  μ = size(hist.multiplier_values, 1) == 0 ? NaN : hist.multiplier_values[1, k]
+  if p.multi
+    g = maximum(view(hist.violation_values, :, k))
+    μ = maximum(x -> isfinite(x) ? abs(x) : -Inf, view(hist.multiplier_values, :, k))
+  else
+    g = size(hist.constraint_values, 1) == 0 ? NaN : hist.constraint_values[1, k]
+    μ = size(hist.multiplier_values, 1) == 0 ? NaN : hist.multiplier_values[1, k]
+  end
   @printf(p.io, "  %5d  %13.6e  %9s  ", hist.iteration[k], f, isfinite(df) ? @sprintf("%+9.1e", df) : "        —")
   if isfinite(g)
     _styled(p, @sprintf("%10.2e", g), g > p.red ? :red : :normal)

@@ -80,6 +80,81 @@ Base.minimum(x::NoScalarVector) = minimum(x.v)
 Base.any(f::Function, x::NoScalarVector) = any(f, x.v)
 Base.all(f::Function, x::NoScalarVector) = all(f, x.v)
 
+# ---------------------------------------------------------------------------------------------------------------
+# Augmented Lagrangian: Hock–Schittkowski problems (f* from Schittkowski's collection; the problem of the interval has
+# a closed form by projection)
+const HS = Dict{String,Any}()
+HS["HS14"] = (f = x -> (x[1] - 2)^2 + (x[2] - 1)^2, df! = (g, x) -> (g[1] = 2(x[1] - 2); g[2] = 2(x[2] - 1); g),
+  cons = ((x -> 0.25x[1]^2 + x[2]^2 - 1, (g, x) -> (g[1] = 0.5x[1]; g[2] = 2x[2]; g), -Inf, 0.0),
+          (x -> x[1] - 2x[2] + 1, (g, x) -> (g[1] = 1.0; g[2] = -2.0; g), 0.0, 0.0)),
+  lb = fill(-5.0, 2), ub = fill(5.0, 2), x0 = [2.0, 2.0], fstar = 9 - 2.875 * sqrt(7))
+HS["HS21"] = (f = x -> 0.01x[1]^2 + x[2]^2 - 100, df! = (g, x) -> (g[1] = 0.02x[1]; g[2] = 2x[2]; g),
+  cons = ((x -> -(10x[1] - x[2] - 10), (g, x) -> (g[1] = -10.0; g[2] = 1.0; g), -Inf, 0.0),),
+  lb = [2.0, -50.0], ub = [50.0, 50.0], x0 = [10.0, 10.0], fstar = -99.96)   # x0 moved inside the box (HS: (-1,-1))
+HS["HS35"] = (f = x -> 9 - 8x[1] - 6x[2] - 4x[3] + 2x[1]^2 + 2x[2]^2 + x[3]^2 + 2x[1] * x[2] + 2x[1] * x[3],
+  df! = (g, x) -> (g[1] = -8 + 4x[1] + 2x[2] + 2x[3]; g[2] = -6 + 4x[2] + 2x[1]; g[3] = -4 + 2x[3] + 2x[1]; g),
+  cons = ((x -> x[1] + x[2] + 2x[3] - 3, (g, x) -> (g[1] = 1.0; g[2] = 1.0; g[3] = 2.0; g), -Inf, 0.0),),
+  lb = zeros(3), ub = fill(10.0, 3), x0 = fill(0.5, 3), fstar = 1 / 9)
+HS["HS43"] = (f = x -> x[1]^2 + x[2]^2 + 2x[3]^2 + x[4]^2 - 5x[1] - 5x[2] - 21x[3] + 7x[4],
+  df! = (g, x) -> (g[1] = 2x[1] - 5; g[2] = 2x[2] - 5; g[3] = 4x[3] - 21; g[4] = 2x[4] + 7; g),
+  cons = ((x -> x[1]^2 + x[2]^2 + x[3]^2 + x[4]^2 + x[1] - x[2] + x[3] - x[4] - 8,
+           (g, x) -> (g[1] = 2x[1] + 1; g[2] = 2x[2] - 1; g[3] = 2x[3] + 1; g[4] = 2x[4] - 1; g), -Inf, 0.0),
+          (x -> x[1]^2 + 2x[2]^2 + x[3]^2 + 2x[4]^2 - x[1] - x[4] - 10,
+           (g, x) -> (g[1] = 2x[1] - 1; g[2] = 4x[2]; g[3] = 2x[3]; g[4] = 4x[4] - 1; g), -Inf, 0.0),
+          (x -> 2x[1]^2 + x[2]^2 + x[3]^2 + 2x[1] - x[2] - x[4] - 5,
+           (g, x) -> (g[1] = 4x[1] + 2; g[2] = 2x[2] - 1; g[3] = 2x[3]; g[4] = -1.0; g), -Inf, 0.0)),
+  lb = fill(-5.0, 4), ub = fill(5.0, 4), x0 = zeros(4), fstar = -44.0)
+HS["HS71"] = (f = x -> x[1] * x[4] * (x[1] + x[2] + x[3]) + x[3],
+  df! = (g, x) -> (g[1] = x[4] * (2x[1] + x[2] + x[3]); g[2] = x[1] * x[4]; g[3] = x[1] * x[4] + 1; g[4] = x[1] * (x[1] + x[2] + x[3]); g),
+  cons = ((x -> 25 - x[1] * x[2] * x[3] * x[4],
+           (g, x) -> (g[1] = -x[2] * x[3] * x[4]; g[2] = -x[1] * x[3] * x[4]; g[3] = -x[1] * x[2] * x[4]; g[4] = -x[1] * x[2] * x[3]; g), -Inf, 0.0),
+          (x -> x[1]^2 + x[2]^2 + x[3]^2 + x[4]^2 - 40, (g, x) -> (g .= 2 .* x; g), 0.0, 0.0)),
+  lb = fill(1.0, 4), ub = fill(5.0, 4), x0 = [1.0, 5.0, 5.0, 1.0], fstar = 17.0140173)
+HS["HS100"] = (f = x -> (x[1] - 10)^2 + 5(x[2] - 12)^2 + x[3]^4 + 3(x[4] - 11)^2 + 10x[5]^6 + 7x[6]^2 + x[7]^4 - 4x[6] * x[7] - 10x[6] - 8x[7],
+  df! = (g, x) -> (g[1] = 2(x[1] - 10); g[2] = 10(x[2] - 12); g[3] = 4x[3]^3; g[4] = 6(x[4] - 11); g[5] = 60x[5]^5;
+                   g[6] = 14x[6] - 4x[7] - 10; g[7] = 4x[7]^3 - 4x[6] - 8; g),
+  cons = ((x -> 2x[1]^2 + 3x[2]^4 + x[3] + 4x[4]^2 + 5x[5] - 127,
+           (g, x) -> (fill!(g, 0); g[1] = 4x[1]; g[2] = 12x[2]^3; g[3] = 1.0; g[4] = 8x[4]; g[5] = 5.0; g), -Inf, 0.0),
+          (x -> 7x[1] + 3x[2] + 10x[3]^2 + x[4] - x[5] - 282,
+           (g, x) -> (fill!(g, 0); g[1] = 7.0; g[2] = 3.0; g[3] = 20x[3]; g[4] = 1.0; g[5] = -1.0; g), -Inf, 0.0),
+          (x -> 23x[1] + x[2]^2 + 6x[6]^2 - 8x[7] - 196,
+           (g, x) -> (fill!(g, 0); g[1] = 23.0; g[2] = 2x[2]; g[6] = 12x[6]; g[7] = -8.0; g), -Inf, 0.0),
+          (x -> 4x[1]^2 + x[2]^2 - 3x[1] * x[2] + 2x[3]^2 + 5x[6] - 11x[7],
+           (g, x) -> (fill!(g, 0); g[1] = 8x[1] - 3x[2]; g[2] = 2x[2] - 3x[1]; g[3] = 4x[3]; g[6] = 5.0; g[7] = -11.0; g), -Inf, 0.0)),
+  lb = fill(-10.0, 7), ub = fill(10.0, 7), x0 = [1.0, 2.0, 0.0, 4.0, 0.0, 1.0, 1.0], fstar = 680.6300573)
+# interval class: min Σ (z_i − t_i)² with 1 ≤ Σ z ≤ 2, n = 50 (closed form by projection)
+let n = 50, t = [0.5 + 0.4 * sin(1.3i) for i in 1:50]
+  HS["interval50"] = (f = x -> sum(abs2, x .- t), df! = (g, x) -> (g .= 2 .* (x .- t); g),
+    cons = ((x -> sum(x), (g, x) -> fill!(g, 1.0), 1.0, 2.0),), lb = zeros(n), ub = ones(n), x0 = fill(0.5, n), fstar = NaN)
+end
+
+
+# KKT measure of the adviser's bench: projected gradient of the Lagrangian (first-order multipliers), violation and
+# complementarity, in the maximum norm
+function al_kkt(p, al, z)
+  dL = p.df!(similar(z), z); tmp = similar(z); v = 0.0; comp = 0.0
+  for (i, c) in enumerate(p.cons)
+    g = c[1](z); info = al.infos[i]
+    λn = HyperShape.Optimizers.weight(al.update, g, al.λ[i], al.μ[i], info)
+    c[2](tmp, z); dL .+= λn .* tmp
+    v = max(v, violation(info, g))
+    c[3] == c[4] || (comp = max(comp, abs(λn) * min(abs(g - c[4]), abs(g - c[3]))))
+  end
+  max(norm(z .- clamp.(z .- dL, p.lb, p.ub), Inf), v, comp)
+end
+function al_run(p; μ0 = 1.0, maxit = 20000, tol = 1e-6, x0 = p.x0)
+  inner = FunctionOracle(p.f, p.df!; lb = p.lb, ub = p.ub, constraints = p.cons)
+  z = copy(x0)
+  al = AugmentedLagrangianOracle(inner, AugmentedLagrangian(Bertsekas(; μ0)), (), z)
+  opt = SiMPL(); s = init(opt, z, al)
+  for k in 1:maxit
+    step!(opt, s, z, al, nothing)
+    al_kkt(p, al, z) < tol && return (; k, ok = true, z, f = p.f(z), λ = copy(al.λ), al)
+    end_iteration!(al, z) && objective_changed!(opt, s)
+  end
+  (; k = maxit, ok = false, z, f = p.f(z), λ = copy(al.λ), al)
+end
+
 @testset "Optimizers" begin
 
   n = 40
@@ -373,6 +448,92 @@ Base.all(f::Function, x::NoScalarVector) = all(f, x.v)
       @test all(i -> i.accepted, infos)
       @test g(z) <= 1e-3 && infos[end].f < infos[1].f
     end
+  end
+
+  @testset "Bertsekas: term, weight and multipliers" begin
+    u = Bertsekas()
+    W = HyperShape.Optimizers.weight
+    T = HyperShape.Optimizers.term
+    for c in (ConstraintInfo(-Inf, 0.0), ConstraintInfo(0.0, 0.0), ConstraintInfo(-0.5, 0.3)), λ in (-0.7, 0.0, 1.3), μ in (0.5, 2.0)
+      # weight = ∂term/∂g (central differences), continuous across the bounds
+      for g in (-1.1, -0.2, 0.05, 0.7)
+        h = 1e-6
+        @test W(u, g, λ, μ, c) ≈ (T(u, g + h, λ, μ, c) - T(u, g - h, λ, μ, c)) / 2h atol = 1e-6
+      end
+      for b in (c.lo, c.hi)
+        isfinite(b) || continue
+        y = b - λ / μ                                      # the kink of term: continuous value and weight
+        @test abs(T(u, y + 1e-9, λ, μ, c) - T(u, y - 1e-9, λ, μ, c)) < 1e-8
+        @test abs(W(u, y + 1e-9, λ, μ, c) - W(u, y - 1e-9, λ, μ, c)) < 1e-8
+      end
+    end
+    @test W(u, -1.0, 0.0, 1.0, ConstraintInfo(-Inf, 0.0)) == 0      # inactive inequality
+    @test W(u, 0.3, 0.2, 1.0, ConstraintInfo(0.0, 0.0)) ≈ 0.5       # equality: λ + μg
+    @test_throws ArgumentError Bertsekas(μ0 = 0.0)
+    @test_throws ArgumentError Bertsekas(growth = 0.5)
+    @test_throws ArgumentError AugmentedLagrangian(native = :volume)
+    @test_throws ArgumentError FunctionOracle(x -> 0.0, (g, x) -> g; constraint = (ones(2), 1.0),
+                                              constraints = ((x -> 0.0, (g, x) -> g, -Inf, 0.0),))
+    @test_throws ArgumentError FunctionOracle(x -> 0.0, (g, x) -> g; constraints = ((x -> 0.0, (g, x) -> g),))
+  end
+
+  @testset "Augmented Lagrangian + SiMPL: Hock–Schittkowski ($nm)" for (nm, μ0, itmax) in
+      (("HS21", 1.0, 7500), ("HS35", 1.0, 60), ("HS14", 1.0, 60), ("HS43", 1.0, 110), ("HS71", 0.1, 360),
+       ("HS100", 0.1, 1820), ("interval50", 1.0, 450))
+    p = HS[nm]
+    r = al_run(p; μ0)
+    @test r.ok && r.k <= itmax                  # iterations measured + 20 %: a guard of regression
+    isfinite(p.fstar) && @test abs(r.f - p.fstar) <= 1e-5 * max(1, abs(p.fstar))
+    nm == "HS43" && @test r.λ ≈ [1.0, 0.0, 2.0] atol = 1e-4
+    nm == "HS35" && @test r.λ[1] ≈ 2 / 9 atol = 1e-4
+    if nm == "interval50"                       # the closed form: projection onto 1 ≤ Σz ≤ 2 within the box
+      t = [0.5 + 0.4 * sin(1.3i) for i in 1:50]
+      zs(c) = clamp.(t .- c, 0, 1)
+      lo, hi = 0.0, 1.0
+      for _ in 1:200; mid = (lo + hi) / 2; sum(zs(mid)) > 2 ? (lo = mid) : (hi = mid); end
+      @test maximum(abs, r.z .- zs(hi)) < 1e-5
+    end
+  end
+
+  @testset "Augmented Lagrangian: objective_changed! keeps the step size of SiMPL" begin
+    p = HS["HS43"]
+    inner = FunctionOracle(p.f, p.df!; lb = p.lb, ub = p.ub, constraints = p.cons)
+    z = copy(p.x0)
+    al = AugmentedLagrangianOracle(inner, AugmentedLagrangian(), (), z)
+    opt = SiMPL(); s = init(opt, z, al)
+    for _ in 1:5
+      step!(opt, s, z, al, nothing)
+      end_iteration!(al, z) && objective_changed!(opt, s)
+    end
+    α = s.α_prev
+    n0 = evaluations(inner)
+    @test isfinite(α) && !s.have_f && !s.have_grad
+    step!(opt, s, z, al, nothing)                 # one value at z (the new objective) and the trials of the step
+    @test evaluations(inner)[2] == n0[2] + 1
+    # the oracle without the augmented Lagrangian: nothing to update
+    @test !end_iteration!(inner, z)
+    # native constraints pass through, renumbered
+    al2 = AugmentedLagrangianOracle(inner, AugmentedLagrangian(), (2,), z)
+    @test num_constraints(al2) == 1 && constraint(al2, 1, z) == p.cons[2][1](z) && al2.absorbed == [1, 3]
+    @test isnan(al2.λ[2]) && isnan(al2.μ[2])
+  end
+
+  @testset "Augmented Lagrangian + SiMPL with vectors without scalar indexing" begin
+    t = [0.5 + 0.4 * sin(1.3i) for i in 1:50]
+    f(z) = sum(abs2, z.v .- t)
+    df!(g, z) = (g .= 2 .* (z .- NoScalarVector(t)); g)
+    cons = ((z -> sum(z), (g, z) -> fill!(g, 1.0), 1.0, 2.0),)
+    zv = fill(0.5, 50)
+    alv = AugmentedLagrangianOracle(FunctionOracle(z -> sum(abs2, z .- t), (g, z) -> (g .= 2 .* (z .- t)); constraints = cons),
+                                    AugmentedLagrangian(), (), zv)
+    zn = NoScalarVector(fill(0.5, 50))
+    aln = AugmentedLagrangianOracle(FunctionOracle(f, df!; constraints = cons), AugmentedLagrangian(), (), zn)
+    sv, sn = init(SiMPL(), zv, alv), init(SiMPL(), zn, aln)
+    for _ in 1:100
+      step!(SiMPL(), sv, zv, alv, nothing); end_iteration!(alv, zv) && objective_changed!(SiMPL(), sv)
+      step!(SiMPL(), sn, zn, aln, nothing); end_iteration!(aln, zn) && objective_changed!(SiMPL(), sn)
+    end
+    @test maximum(abs, zn.v .- zv) < 1e-10 && 1 - 1e-4 <= sum(zv) <= 2 + 1e-4
   end
 
   @testset "Constructor checks and names" begin
