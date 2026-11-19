@@ -5,6 +5,4 @@ HyperFEMKernels = "c52e38e0-a033-47df-8a03-a6c4ac881830"
 HyperShape = "1a07404e-cd44-4b01-9b9c-59424ef2e75e"
 
 [sources]
-HyperFEM = {url = "https://github.com/MultiSimOLab/HyperFEM.jl", rev = "main"}
-HyperFEMKernels = {url = "https://github.com/MultiSimOLab/HyperFEMKernels.jl", rev = "main"}
 HyperShape = {path = ".."}
