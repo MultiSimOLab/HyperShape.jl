@@ -797,8 +797,8 @@ function solve!(problem::Optimization, method::DensityMethod; maxiter::Integer, 
   end
 
   f_final = _sync!(oracle)                     # fields and forward state at the final design
-  _warn_unmet(pr, hist, cnames)
   _print_end(pr, status, reason, run.k, f_final, _last_monitors(hist, monitors))
+  status === :converged || _warn_unmet(pr, hist, cnames)
   _print_summary(pr, map(_count, ops) .- cstart, run.k - k0)
   checkpoint === nothing ||
     _write_checkpoint(checkpoint, problem, opt, state, zk, hist, run.k, run.stage, run.stage_iters, cont_names, oracle)
@@ -1077,6 +1077,7 @@ function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_
                           "returned NaN: it does not compute it, or its gradient is not finite)"))
     end
     run.k = k
+    copyto!(run.zacc, zk)                      # with run.k: a checkpoint after an exception matches them
     run.stage_iters += 1
     c1 = (_count(fwd), _count(adj), _count(filters))
     row = (k, f_acc, info.kkt, info.stationarity, info.change, info.step, ctx.attempt, c1[1] - c0[1], c1[2] - c0[2],
@@ -1095,7 +1096,6 @@ function _iterate!(problem, opt, oracle, state, zk, zprev, hist, run, ctx, cont_
       fail("a monitor threw at iteration $k: " * first(sprint(showerror, e), 300))
     end
     _record!(hist, row, cvals, mults, mvals, cont_buf, viols, pens)
-    copyto!(run.zacc, zk)
     _print_row(pr, hist)
     r = _stop_reason(stop, info, hist, run.stage_start, ctx)
     # convergence also needs the constraints met to their tolerances

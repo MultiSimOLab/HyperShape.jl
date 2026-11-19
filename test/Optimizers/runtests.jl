@@ -160,7 +160,7 @@ struct _QuadPenalty <: HyperShape.Optimizers.MultiplierUpdate end
 HyperShape.Optimizers.term(::_QuadPenalty, g, λ, μ, c) = μ / 2 * violation(c, g)^2
 HyperShape.Optimizers.weight(::_QuadPenalty, g, λ, μ, c) = μ * (g > c.hi ? g - c.hi : g < c.lo ? g - c.lo : 0.0)
 HyperShape.Optimizers.initial_penalty(::_QuadPenalty) = 10.0
-HyperShape.Optimizers.update!(::_QuadPenalty, al) = (al.updates += 1; false)
+HyperShape.Optimizers.update!(::_QuadPenalty, al) = false
 
 @testset "Optimizers" begin
 

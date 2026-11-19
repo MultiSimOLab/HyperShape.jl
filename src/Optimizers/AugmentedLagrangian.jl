@@ -11,8 +11,8 @@ Supertype of the rules of an augmented Lagrangian ([`Bertsekas`](@ref)). A rule 
 - `weight(u, g, λ, μ, c)`: `∂term/∂g`;
 - `initial_penalty(u)`: the penalty `μ` of every absorbed constraint at the start;
 - `update!(u, al::AugmentedLagrangianOracle)`: new `al.λ[i]` and `al.μ[i]` for `i in al.absorbed` from the values
-  `al.g[i]` at the accepted design (`al.infos[i]` their bounds, `al.updates` the number of calls so far, `al.vref`
-  free for the rule); returns whether anything changed.
+  `al.g[i]` at the accepted design (`al.infos[i]` their bounds, `al.updates` the number of updates including this one,
+  counted by `end_iteration!`, `al.vref` free for the rule); returns whether anything changed.
 """
 abstract type MultiplierUpdate end
 
@@ -67,7 +67,6 @@ initial_penalty(u::Bertsekas) = u.μ0
 
 function update!(u::Bertsekas, al)
   changed = false
-  al.updates += 1
   check = u.growth > 1 && al.updates % u.window == 0
   for i in al.absorbed
     c = al.infos[i]
@@ -230,6 +229,7 @@ function end_iteration!(al::AugmentedLagrangianOracle, z)
   for i in al.absorbed
     al.g[i] = constraint(al.inner, i, z)        # the last evaluation may have been a rejected trial
   end
+  al.updates += 1
   changed = update!(al.update, al)
   changed && (al.version += 1)
   changed
