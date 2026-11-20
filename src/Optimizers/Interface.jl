@@ -73,6 +73,14 @@ How many constraints the optimiser can treat natively (see [`handles`](@ref)). D
 max_native(::Optimizer) = 0
 
 """
+    requires_native(opt::Optimizer) -> Bool
+
+Whether the optimiser needs one constraint of its own to work (OC: its bisection is on the multiplier of that
+constraint). Default `false`.
+"""
+requires_native(::Optimizer) = false
+
+"""
     constraint_tol(opt::Optimizer) -> Float64
 
 Tolerance to which the optimiser meets a nonlinear constraint; the loop only declares convergence when the constraint
@@ -87,23 +95,34 @@ Whether the optimiser reports an optimality measure (`kkt` in [`StepInfo`](@ref)
 """
 computes_kkt(::Optimizer) = true
 
+function _check_memory(v, names, n, who)
+  keys(v) == names || throw(ArgumentError("$who: the saved memory has entries $(keys(v)), expected $names"))
+  for x in values(v)
+    x isa Real || length(x) == n || throw(ArgumentError("$who: the saved memory has a vector of $(length(x)) values, z has $n"))
+  end
+end
+
 # a vector of any type copied into a Vector{Float64} (checkpoints), without scalar indexing
 _gather(x) = copyto!(Vector{Float64}(undef, length(x)), x)
 
 """
-    memory(opt::Optimizer, state, z) -> Vector{Float64} or nothing
+    memory(opt::Optimizer, state, z) -> NamedTuple or nothing
 
-Memory of the optimiser after an accepted step to `z`, saved in a checkpoint so that a resumed run continues as the
-uninterrupted one. Default `nothing`: not saved, the resumed run starts from `init`.
+Memory of the optimiser after an accepted step to `z`, saved in a checkpoint (and carried across a rebuild of the
+problem) so that a resumed run continues as the uninterrupted one: a named tuple whose entries are real numbers or
+vectors with one entry per entry of `z` (fields of the design space, which a change of mesh can transfer). The
+vectors may be those of `state`: the loop copies them (as `Vector{Float64}`) and checks their length; numbers come
+back as `Float64`, and the order of the entries is kept. Default `nothing`: not saved, the resumed run starts from
+`init`.
 """
 memory(::Optimizer, state, z) = nothing
 
 """
-    restore_memory!(opt::Optimizer, state, z, v) -> state
+    restore_memory!(opt::Optimizer, state, z, mem::NamedTuple) -> state
 
-Restores into `state`, just created by `init(opt, z, oracle)`, the memory `v` returned by [`memory`](@ref).
+Restores into `state`, just created by `init(opt, z, oracle)`, the memory `mem` returned by [`memory`](@ref).
 """
-restore_memory!(::Optimizer, state, z, v) = state
+restore_memory!(::Optimizer, state, z, mem) = state
 
 """
     init(opt::Optimizer, z, oracle) -> state

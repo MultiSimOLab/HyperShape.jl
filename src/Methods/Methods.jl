@@ -18,7 +18,7 @@ using Gridap.FESpaces
 import Gridap: solve!
 using ..Optimizers: Optimizer, OC, SiMPL, constraint_tol, computes_kkt, set_move!, _valid_move, memory, restore_memory!, AbstractOracle, StepInfo, init, step!, reset!, shrink!,
                    ConstraintInfo, violation, handles, max_native, AugmentedLagrangian, AugmentedLagrangianOracle,
-                   Bertsekas, end_iteration!, objective_changed!
+                   Bertsekas, end_iteration!, objective_changed!, requires_native
 import ..Optimizers: objective, gradient!, bounds, num_constraints, constraint_info, linear_constraint, constraint,
                      constraint_gradient!, weighted_gradient!, inner, riesz!
 using ..Operators: OptContext, set_context!, StateOperator, num_solves, Parameter
@@ -30,7 +30,7 @@ using ..PostProcess: OptPostProcessor, _post_start!, _post_due, _post_call!, _po
 
 export Optimization, DensityMethod, LumpedMass, Euclidean
 export Continuation, StopCriteria, RejectStep, Checkpoint, load_checkpoint, Grey
-export OptHistory, OptResult, OptimizationFailure
+export OptHistory, OptResult, OptimizationFailure, OptState
 export solve!
 
 include("Problem.jl")

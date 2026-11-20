@@ -388,3 +388,31 @@ end
 # OC and SiMPL treat one inequality g ≤ 0 that solves no state (each correction of the step evaluates it)
 handles(::Union{OC,SiMPL}, c::ConstraintInfo) = is_upper(c) && c.hi == 0 && c.design_only && !c.field
 max_native(::Union{OC,SiMPL}) = 1
+requires_native(::OC) = true
+
+# memory for a checkpoint: the latent variable (not recoverable from z, which init clamps 1e-12 away from the bounds),
+# the previous iterate and gradient of Barzilai–Borwein, the step, the multiplier and the correction shift. The value
+# and gradient at z are evaluated again after a restore.
+memory(::SiMPL, s::SiMPLState, z) = (k = Float64(s.k), μ = s.μ, α_prev = s.α_prev, shift = s.shift,
+                                     ψ = s.ψ, ψ_prev = s.ψ_prev, z_prev = s.z_prev, g_prev = s.g_prev)
+
+function restore_memory!(::SiMPL, s::SiMPLState, z, v::NamedTuple)
+  _check_memory(v, (:k, :μ, :α_prev, :shift, :ψ, :ψ_prev, :z_prev, :g_prev), length(z), "SiMPL")
+  s.k = Int(v.k)
+  s.μ = v.μ
+  s.α_prev = v.α_prev
+  s.shift = v.shift
+  copyto!(s.ψ, v.ψ)
+  copyto!(s.ψ_prev, v.ψ_prev)
+  copyto!(s.z_prev, v.z_prev)
+  copyto!(s.g_prev, v.g_prev)
+  copyto!(s.z, z)
+  s.resync = false
+  s.have_f = false
+  s.have_grad = false
+  s.can_rollback = false
+  s.retry = false
+  s.shrunk = false
+  s.scale = 1.0
+  s
+end

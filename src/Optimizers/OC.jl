@@ -118,19 +118,16 @@ function reset!(opt::OC, s::OCState)
   s.k = 0
   s
 end
-# memory for a checkpoint: [k > 0, shift, m, dprev, z_old] (adaptive limits and correction shift)
-function memory(::OC, s::OCState, z)
-  vcat(Float64(s.k > 0), s.shift, _gather(s.m), _gather(s.dprev), _gather(s.z_old))
-end
+# memory for a checkpoint: adaptive limits, last steps and correction shift
+memory(::OC, s::OCState, z) = (started = Float64(s.k > 0), shift = s.shift, m = s.m, dprev = s.dprev, z_old = s.z_old)
 
-function restore_memory!(::OC, s::OCState, z, v)
-  n = length(z)
-  length(v) == 3n + 2 || throw(ArgumentError("OC: the saved memory has $(length(v)) values, expected $(3n + 2)"))
-  s.k = v[1] > 0 ? 1 : 0
-  s.shift = v[2]
-  copyto!(s.m, view(v, 3:n+2))
-  copyto!(s.dprev, view(v, n+3:2n+2))
-  copyto!(s.z_old, view(v, 2n+3:3n+2))
+function restore_memory!(::OC, s::OCState, z, v::NamedTuple)
+  _check_memory(v, (:started, :shift, :m, :dprev, :z_old), length(z), "OC")
+  s.k = v.started > 0 ? 1 : 0
+  s.shift = v.shift
+  copyto!(s.m, v.m)
+  copyto!(s.dprev, v.dprev)
+  copyto!(s.z_old, v.z_old)
   s
 end
 
