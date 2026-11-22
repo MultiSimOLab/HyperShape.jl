@@ -89,6 +89,35 @@ z, x, θ = single_field_design(:ρ, Vρ; bounds = (0.0, 1.0), init = 0.5, frozen
   shows the frozen cells of each block, and the checkpoint keeps their number. With a zone, `θ.ρ` is an operation on
   fields: the fast `FieldWriter` writes it through Gridap's slower path (a warning says so).
 
+**Interface maps** turn a level-set-like field `φ` (`φ ≥ 0` solid; the variable of reaction–diffusion) into the
+material, as one more map of the chain `x → θ`; the weak forms integrate the design region with the measure that
+HyperShape gives, so that a later treatment by cut cells changes the quadrature and not the forms:
+
+```julia
+z  = OptVariables(φ = FieldVariable(Vφ; bounds = (-1.0, 1.0), init = x -> …))   # Vφ: P1; init may be a function of x
+x  = DesignFields(z; φ = Identity())
+θ  = PhysicalFields(x; ρ = :φ => Ersatz() ∘ HelmholtzFilter(dΩ; rmin, ls = LUSolver()))   # or ρ = :φ => Step()
+dΩd = design_measures(θ; degree = 2)        # dΩd.domain: a Measure; solid, void, interface reserved for cut cells
+a(u, v) = ∫(… θ.ρ …)dΩd.domain
+Vol = Volume(θ, dΩd; max_fraction = 0.4)
+```
+
+- `Step()`: χ = 1 where φ ≥ 0 at each quadrature point (the abrupt step of Li et al. 2023). A cut cell has the
+  material of its quadrature points: a higher `degree` smooths the jumps of the objective but does not remove them
+  (measured: with degree 2, 4 and 8 the objective did not change in 81, 52 and 10–30 of 120 small moves of an inclined
+  interface). No derivative with respect to φ: `DensityMethod` refuses it when the run starts, `check_consistency`
+  reports the derivative checks as not applicable (`–`); it is for methods that take the sensitivity with respect to
+  the physical field (reaction–diffusion, next).
+- `Ersatz()`: the classical ersatz material, the fraction of each cell where φ ≥ 0 (P0), with its exact derivative.
+  Closed forms on triangles and tetrahedra (no cancellation, no allocations); quadrilaterals and hexahedra are split
+  into 4 triangles and 24 tetrahedra around their centre (symmetric, about 6 times more accurate than splitting by a
+  diagonal against the bilinear field). Exact volume with any quadrature for the subdivided interpolant; O(h²) for the
+  geometry. Its input must be a nodal P1 scalar field (the design field or a filter output). The derivative lives on
+  the cut cells only: a design without interface does not move and holes are not nucleated by it.
+- Frozen zones: the material of a zone is the step of its value (φ = 1 gives 1), with both maps.
+- Cost of `Ersatz()` (Mac M5 Max, one thread, measured by the design adviser): 65 536 quadrilaterals, 0.8 ms to update
+  and 1.0 ms to pull back.
+
 Planned: global parameters as blocks (applied voltage, fibre angle), scaling and symmetries in the map `z → x`,
 physical fields that depend on several design fields, material interpolation in the map `x → θ`.
 
@@ -194,7 +223,8 @@ wrote and declared, and returns a report (`r.passed`, and one line per check, di
 z, the fields, the states and the scales of the functionals are restored on return. States shared by several
 functionals are solved once per design: each forward state at most `steps + 4` times. A Taylor test where J does not
 change along the direction (a saturated projection) is reported as not tested. Objects that no declared dependency
-leads to cannot be checked.
+leads to cannot be checked. A physical field through `Step()` has no derivative: its gradient and chain checks are reported as not
+applicable (`–`, they do not count in `passed`) and the dependency check compares the values only.
 
 ## Methods
 

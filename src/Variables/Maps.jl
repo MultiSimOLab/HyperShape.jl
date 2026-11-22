@@ -395,3 +395,196 @@ Base.show(io::IO, m::PointwiseMap) = print(io, "PointwiseMap(", length(m.paramet
 _pointwise(::Identity) = true
 _pointwise(::TanhProjection) = true
 _pointwise(::PointwiseMap) = true
+
+# whether the stage has a derivative with respect to its input (Step() has none)
+is_differentiable(s) = true
+
+# the map that carries the value of a frozen zone through a map of the chain (nothing: the value stays as it is)
+_frozen_map(m) = _pointwise(m) ? m : nothing
+
+# ---------------------------------------------------------------------------------------------------------------
+# Interface maps: from a level-set-like field φ (φ ≥ 0 solid) to the material
+
+"""
+    Step()
+
+Interface map: the material is the Heaviside step of the input at each quadrature point, `χ = 1` where `φ ≥ 0` and
+`0` elsewhere (the abrupt step of the ersatz material of Li et al. 2023). The material of a cell cut by the interface
+depends on which quadrature points fall on each side: integrate with a higher degree to smooth the jumps (see
+[`design_measures`](@ref)). It has no derivative with respect to φ: a method that differentiates through the maps
+(`DensityMethod`) refuses it when the run starts, and [`check_consistency`](@ref HyperShape.Checks.check_consistency)
+reports the derivative checks as not applicable; use [`Ersatz`](@ref)`()` to check the derivatives of the forms (they
+are the same). Lazy, point by point (a frozen zone `φ = 1` gives `χ = 1`).
+"""
+struct Step <: FieldMap end
+
+struct StepValue <: Function end
+(::StepValue)(φ) = ifelse(φ >= 0, one(φ), zero(φ))
+
+struct StepStage{I,F}
+  input::I
+  out::F
+end
+_stage(::Step, input) = StepStage(input, Operation(StepValue())(input))
+output(s::StepStage) = s.out
+update_stage!(s::StepStage, ctx) = s
+pullback(s::StepStage, L, ctx, key) =
+  throw(ArgumentError("Step(): the step has no derivative with respect to the design (use Ersatz(), or a method that " *
+                      "takes the sensitivity with respect to the physical field)"))
+is_differentiable(::StepStage) = false
+_pointwise(::Step) = true
+Base.show(io::IO, ::Step) = print(io, "Step()")
+
+"""
+    Ersatz(; backend = :compiled)
+
+Interface map of the classical ersatz material (Allaire, Jouve and Toader, 2004): the material of each cell is the
+fraction of the cell where the input `φ` is ≥ 0, `χ_K = |{φ_h ≥ 0} ∩ K| / |K|`, a cell-wise (P0) field. Exact for the
+linear interpolant of φ on simplices; quadrilaterals and hexahedra are split into 4 triangles and 24 tetrahedra
+around their centre (whose value is the mean of the nodes), so the fraction is exact for that subdivision and
+O(h²) with respect to the bilinear interpolant. Continuous in φ, with its exact derivative (closed forms, no
+cancellation). The input must be a nodal P1 scalar field: the design field or the output of a filter (`Ersatz() ∘
+HelmholtzFilter(…)`); triangles, quadrilaterals, tetrahedra and hexahedra. A volume of the material is exact with any
+quadrature.
+
+The derivative is nonzero only on the cells cut by the interface: a design without interface (uniform φ) does not
+move, and holes are not nucleated by this derivative. A cell with `φ ≡ 0` counts as material (derivative zero).
+`backend` assembles the forms on the cell-wise basis (`:compiled`, HyperFEMKernels, or `:lazy`, Gridap). Not lazy:
+the fractions are computed when the design changes (a loop over the cells, no solve).
+
+```julia
+θ  = PhysicalFields(x; ρ = :φ => Ersatz() ∘ HelmholtzFilter(dΩ; rmin, ls = LUSolver()))
+dΩ = design_measures(θ; degree = 2)
+```
+"""
+struct Ersatz <: FieldMap
+  backend::Symbol
+  Ersatz(backend::Symbol) = new(_check_backend(backend))
+end
+Ersatz(; backend::Symbol = :compiled) = Ersatz(backend)
+Base.show(io::IO, e::Ersatz) = print(io, "Ersatz(", e.backend, ")")
+_frozen_map(::Ersatz) = Step()        # the material of a frozen zone is the step of its value
+
+# A linear functional on the free values of the input of a stage, given by its vector (what Ersatz pulls back: the
+# derivative is a sum over cells of nodal values, not an integral form)
+struct DofFunctional
+  v::Vector{Float64}
+end
+
+# K: :tri, :quad, :tet or :hex; N: nodes per cell; W: weights of the subdivision per cell (nothing for simplices)
+struct ErsatzStage{K,N,I,F,U,W,V,A}
+  input::I
+  out::F
+  U::U
+  data::Vector{Int32}           # cell dof ids of the input (flat), positive: free, negative: Dirichlet
+  ptrs::Vector{Int32}
+  cdof::Vector{Int32}           # the dof of each cell in the cell-wise space
+  w::W
+  b::Vector{Float64}
+  acc::Vector{Float64}
+  pending::Base.RefValue{Bool}
+  gin::Vector{Float64}
+  V0::V
+  assem::A
+end
+
+function _stage(e::Ersatz, input)
+  ok = input isa Gridap.FESpaces.SingleFieldFEFunction
+  U = ok ? get_fe_space(input) : nothing
+  Ω = ok ? get_triangulation(U) : nothing
+  ids = ok ? Gridap.Arrays.Table(get_cell_dof_ids(U)) : nothing
+  D = ok ? num_cell_dims(Ω) : 0
+  N = ok && !isempty(ids) ? length(ids[1]) : 0
+  K = (D, N) == (2, 3) ? :tri : (D, N) == (2, 4) ? :quad : (D, N) == (3, 4) ? :tet : (D, N) == (3, 8) ? :hex : nothing
+  (ok && K !== nothing && all(c -> length(ids[c]) == N, 1:length(ids)) && num_vertices_per_cell(Ω) == N) ||
+    throw(ArgumentError("Ersatz: the input must be a nodal P1 scalar field on triangles, quadrilaterals, tetrahedra " *
+                        "or hexahedra (the design field or the output of a filter), not a lazy field, a P0 or a P2 field"))
+  V0 = FESpace(Ω, ReferenceFE(lagrangian, Float64, 0); conformity = :L2)
+  n = num_free_dofs(V0)
+  cdof = Int32[c[1] for c in get_cell_dof_ids(V0)]
+  X = get_cell_coordinates(Ω)
+  w = K === :quad ? [_quad_weights(X[c]) for c in 1:length(X)] :
+      K === :hex ? [_hex_weights(X[c]) for c in 1:length(X)] : nothing
+  out = FEFunction(V0, zeros(n))
+  assem = form_assembler(e.backend, V0, V0)
+  ErsatzStage{K,N,typeof(input),typeof(out),typeof(U),typeof(w),typeof(V0),typeof(assem)}(input, out, U,
+    Vector{Int32}(ids.data), Vector{Int32}(ids.ptrs), cdof, w, zeros(n), zeros(n), Ref(false),
+    zeros(num_free_dofs(U)), V0, assem)
+end
+
+num_vertices_per_cell(Ω) = length(first(get_cell_coordinates(Ω)))
+
+# the nodal values of cell c as a tuple (written out: a closure over the stage would allocate per cell)
+@inline _node_value(data, fv, dv, j) = (d = data[j]; d > 0 ? fv[d] : dv[-d])
+@inline function _cell_values(s::ErsatzStage{K,3}, fv, dv, c) where {K}
+  p, a = s.ptrs[c], s.data
+  (_node_value(a, fv, dv, p), _node_value(a, fv, dv, p + 1), _node_value(a, fv, dv, p + 2))
+end
+@inline function _cell_values(s::ErsatzStage{K,4}, fv, dv, c) where {K}
+  p, a = s.ptrs[c], s.data
+  (_node_value(a, fv, dv, p), _node_value(a, fv, dv, p + 1), _node_value(a, fv, dv, p + 2), _node_value(a, fv, dv, p + 3))
+end
+@inline function _cell_values(s::ErsatzStage{K,8}, fv, dv, c) where {K}
+  p, a = s.ptrs[c], s.data
+  (_node_value(a, fv, dv, p), _node_value(a, fv, dv, p + 1), _node_value(a, fv, dv, p + 2), _node_value(a, fv, dv, p + 3),
+   _node_value(a, fv, dv, p + 4), _node_value(a, fv, dv, p + 5), _node_value(a, fv, dv, p + 6), _node_value(a, fv, dv, p + 7))
+end
+@inline _fraction(s::ErsatzStage{:tri}, φ, c) = cell_fraction(φ)
+@inline _fraction(s::ErsatzStage{:tet}, φ, c) = cell_fraction(φ)
+@inline _fraction(s::ErsatzStage{:quad}, φ, c) = quad_fraction(φ, s.w[c])
+@inline _fraction(s::ErsatzStage{:hex}, φ, c) = hex_fraction(φ, s.w[c])
+
+output(s::ErsatzStage) = s.out
+
+function update_stage!(s::ErsatzStage, ctx)
+  _fractions!(get_free_dof_values(s.out), s, get_free_dof_values(s.input), get_dirichlet_dof_values(s.U))
+  s
+end
+function _fractions!(χ, s, fv, dv)
+  @inbounds for c in eachindex(s.cdof)
+    χ[s.cdof[c]] = _fraction(s, _cell_values(s, fv, dv, c), c)[1]
+  end
+  χ
+end
+
+function accumulate!(s::ErsatzStage, L, w::Float64, key)
+  assemble_form!(s.b, s.assem, L, key)          # L applied to the cell-wise basis: the derivative per cell
+  s.acc .+= w .* s.b
+  s.pending[] = true
+  s
+end
+
+function flush!(s::ErsatzStage, ctx)
+  _pull_fractions!(s.gin, s, get_free_dof_values(s.input), get_dirichlet_dof_values(s.U))
+  fill!(s.acc, 0.0)
+  s.pending[] = false
+  DofFunctional(s.gin)
+end
+function _pull_fractions!(g, s::ErsatzStage{K,N}, fv, dv) where {K,N}
+  fill!(g, 0.0)
+  @inbounds for c in eachindex(s.cdof)
+    a = s.acc[s.cdof[c]]
+    a == 0 && continue
+    _, dχ = _fraction(s, _cell_values(s, fv, dv, c), c)
+    p = s.ptrs[c]
+    for i in 1:N
+      d = s.data[p+i-1]
+      d > 0 && (g[d] += a * dχ[i])        # frozen (Dirichlet) values are not variables
+    end
+  end
+  g
+end
+
+is_lazy(::ErsatzStage) = false
+is_pending(s::ErsatzStage) = s.pending[]
+reset_accumulator!(s::ErsatzStage) = (fill!(s.acc, 0.0); s.pending[] = false; s)
+
+# the stages that receive what Ersatz pulls back: a filter (its accumulator is on the free values of its output, the
+# input of Ersatz) and the design field (see PhysicalFields)
+function accumulate!(s::FilterStage, L::DofFunctional, w::Float64, key)
+  s.acc .+= w .* L.v
+  s.pending[] = true
+  s
+end
+accumulate!(s, L::DofFunctional, w::Float64, key) =
+  throw(ArgumentError("Ersatz: its input must be the design field or the output of a filter"))

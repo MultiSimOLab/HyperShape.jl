@@ -59,6 +59,9 @@ end
 @_export Variables TanhProjection
 @_export Variables CellMean
 @_export Variables PointwiseMap
+@_export Variables Step
+@_export Variables Ersatz
+@_export Variables design_measures
 @_export Operators Parameter
 @_export Variables single_field_design
 @_export Variables frozen_indicator
@@ -67,6 +70,9 @@ end
 @_export Variables set_values!
 
 @_public Variables get_bounds
+@_public Variables DesignMeasures
+@_public Variables is_differentiable_field
+@_public Variables cell_fraction
 @_public Variables changed!
 @_public Variables set_beta!
 @_public Variables design_gradient!

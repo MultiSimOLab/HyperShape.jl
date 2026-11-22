@@ -58,9 +58,10 @@ function PhysicalFields(x::DesignFields; backend = :compiled, kwargs...)
       value = zone.value
       reference = getfield(getfield(x, :fields), src)
       for m in _maps(map)
-        _pointwise(m) || continue
-        value = output(_stage(m, value))
-        reference = output(_stage(m, reference))
+        fm = _frozen_map(m)
+        fm === nothing && continue
+        value = output(_stage(fm, value))
+        reference = output(_stage(fm, reference))
       end
       push!(stages, _mask_stage(input, zone, value, reference))
     end
@@ -156,6 +157,7 @@ function _push_back(chain::Tuple, L, w, ctx, key)
 end
 
 # adds w ⋅ (form assembled on the design space of field i)
+_add_to_design!(θ, i, L::DofFunctional, w, key) = (getfield(θ, :gx)[i] .+= w .* L.v; nothing)
 function _add_to_design!(θ, i, L, w, key)
   gx, gtmp, assems = getfield(θ, :gx), getfield(θ, :gtmp), getfield(θ, :assems)
   assemble_form!(gtmp[i], assems[i], L, key)
@@ -284,6 +286,68 @@ function is_linear_field(θ::PhysicalFields, name::Symbol)
   j = findfirst(==(name), getfield(θ, :names))
   j === nothing && throw(ArgumentError("PhysicalFields: no physical field named $name"))
   all(is_linear_stage, getfield(θ, :chains)[j])
+end
+
+"""
+    is_differentiable_field(θ::PhysicalFields, name) -> Bool
+
+Whether the physical field `name` has a derivative with respect to its design field (false through [`Step`](@ref)`()`).
+"""
+function is_differentiable_field(θ::PhysicalFields, name::Symbol)
+  j = findfirst(==(name), getfield(θ, :names))
+  j === nothing && throw(ArgumentError("PhysicalFields: no physical field named $name"))
+  all(is_differentiable, getfield(θ, :chains)[j])
+end
+is_differentiable(θ::PhysicalFields) = all(n -> is_differentiable_field(θ, n), getfield(θ, :names))
+
+# whether a chain of θ has an Ersatz stage (for the messages of check_consistency)
+has_ersatz(θ::PhysicalFields) = any(c -> any(s -> s isa ErsatzStage, c), getfield(θ, :chains))
+
+"""
+    DesignMeasures
+
+What [`design_measures`](@ref) returns: `domain` (a `Measure`); `solid`, `void` and `interface` are reserved for cut
+cells.
+"""
+struct DesignMeasures{M}
+  domain::M
+end
+
+function Base.getproperty(d::DesignMeasures, s::Symbol)
+  s === :domain && return getfield(d, :domain)
+  s in (:solid, :void, :interface) &&
+    throw(ArgumentError("design_measures: $s is reserved for cut cells (later); with Step() and Ersatz() integrate " *
+                        "over dΩ.domain and read the material in θ"))
+  throw(ArgumentError("design_measures: no measure named $s; available: domain"))
+end
+Base.propertynames(::DesignMeasures) = (:domain,)
+
+"""
+    design_measures(θ::PhysicalFields; degree, field = nothing) -> DesignMeasures
+
+The measures on which the weak forms integrate over the design region, given by HyperShape so that a later treatment of
+the interface by cut cells changes the quadrature without changing the forms. `dΩ.domain` is the `Measure` of degree
+`degree` (mandatory) on the triangulation of the design field of the physical field `field` (needed when θ has
+several fields); with [`Step`](@ref)`()` a higher degree smooths the jumps of the material of the cut cells.
+`dΩ.solid`, `dΩ.void` and `dΩ.interface` are reserved for cut cells (later).
+
+```julia
+dΩ = design_measures(θ; degree = 2)
+a(u, v) = ∫(… θ.ρ …)dΩ.domain
+Vol = Volume(θ, dΩ; max_fraction = 0.4)
+```
+"""
+function design_measures(θ::PhysicalFields; degree::Integer, field = nothing)
+  degree >= 0 || throw(ArgumentError("design_measures: degree must be ≥ 0"))
+  names = getfield(θ, :names)
+  f = field === nothing ?
+      (length(names) == 1 ? names[1] : throw(ArgumentError("design_measures: several fields ($(join(names, ", "))); give field = …"))) :
+      field
+  j = findfirst(==(f), names)
+  j === nothing && throw(ArgumentError("design_measures: no physical field named $f; available: $(join(names, ", "))"))
+  x = getfield(θ, :x)
+  xf = getfield(getfield(x, :fields), getfield(x, :names)[getfield(θ, :sources)[j]])
+  DesignMeasures(Measure(get_triangulation(xf), degree))
 end
 
 Base.show(io::IO, θ::PhysicalFields) =

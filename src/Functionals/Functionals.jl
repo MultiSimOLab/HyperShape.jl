@@ -14,7 +14,7 @@ using ..Operators: StateOperator, apply!, state_version, dirichlet_values, SelfA
 import ..Operators: invalidate!
 using ..Operators: get_model as HyperShape_get_model
 using ..Variables: PhysicalFields, DesignFields, Identity, update_fields!, design_gradient!, get_designfields,
-                   get_optvariables, is_linear_field, reset_sink!, add_forms!, finish_sink!
+                   get_optvariables, is_linear_field, reset_sink!, add_forms!, finish_sink!, DesignMeasures
 
 export AbstractFunctional, Functional, Constraint, Volume, LinearInState, functional_value, functional_gradient!
 
@@ -208,6 +208,8 @@ function Volume(θ::PhysicalFields, dΩ; max_fraction::Real, field = nothing, sc
   DJ = θ -> NamedTuple{(f,)}((δ -> ∫(δ)dΩ,))
   Functional(J, θ; dJdθ = DJ, scale, linear = is_linear_field(θ, f))
 end
+
+Volume(θ::PhysicalFields, dΩ::DesignMeasures; kwargs...) = Volume(θ, dΩ.domain; kwargs...)
 
 function Volume(x::DesignFields, dΩ; kwargs...)
   names = getfield(x, :names)

@@ -734,4 +734,6 @@ end
     @test sum(∫(frozen_indicator(x, :ρ) * (θ.ρ - 1.0) * (θ.ρ - 1.0))Measure(Ω, 2)) == 0
   end
 
+  include("interface.jl")
+
 end

@@ -3,8 +3,8 @@
 
 Block of [`OptVariables`](@ref) holding the free values of a scalar design field in the space `V` (cell-wise P0 or
 nodal P1 Lagrangian; the bounds act on the free values, which bound the field only for these two spaces).
-`bounds = (lb, ub)` with `lb < ub`; `init` is a number or a vector of the length of the free values, inside the
-bounds. Both are mandatory.
+`bounds = (lb, ub)` with `lb < ub`; `init` is a number, a vector of the length of the free values or a function of the
+coordinates (interpolated on `V`), inside the bounds. Both are mandatory.
 
 **Frozen zones** (solid or void that the optimisation cannot change, such as the material under a load or at a
 support): build `V` with `dirichlet_tags` on the zones and give their values in `frozen` (a number, one number per tag
@@ -73,6 +73,7 @@ function FieldVariable(V; bounds, init, frozen = nothing)
     zone = _frozen_zone(U, dv)
   end
   n = num_free_dofs(U)
+  init isa Function && (init = get_free_dof_values(interpolate(init, U)))   # a function of the coordinates
   x0 = init isa Number ? fill(Float64(init), n) : Vector{Float64}(init)
   length(x0) == n || throw(DimensionMismatch("FieldVariable: init has $(length(x0)) values, the space has $n"))
   all(v -> lb <= v <= ub, x0) || throw(ArgumentError("FieldVariable: init outside the bounds $bounds"))

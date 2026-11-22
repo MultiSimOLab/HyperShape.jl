@@ -1313,6 +1313,12 @@ function _make_feasible_nonlinear!(o, zk, i = 1; tol = 1e-6, maxit = 60)
   gt(t) = (@. zt = ifelse(acts, o.lb + t * (z0 - o.lb), z0); constraint(o, i, zt) + tol / 2)
   t0, t1 = 0.0, 1.0
   h0, h1 = gt(t0), g1 + tol / 2
+  # entries with a zero derivative at both designs (Ersatz() on cells without interface) may still decide the
+  # constraint at the lower bound: then every entry is scaled
+  if h0 >= 0 && !all(acts)
+    acts .= true
+    h0 = gt(t0)
+  end
   h0 < 0 || throw(ArgumentError("Optimization: the constraint cannot be met within the bounds (it is violated at the lower bound)" *
                                 _zone_hint(o)))
   t, side = t0, 0

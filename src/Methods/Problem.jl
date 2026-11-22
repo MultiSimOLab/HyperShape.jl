@@ -286,6 +286,14 @@ augmented_lagrangian(m::DensityMethod) = m.lagrangian
 function check_problem(::DensityMethod, problem)
   lb, ub = get_bounds(problem.z)
   (all(isfinite, lb) && all(isfinite, ub)) || throw(ArgumentError("DensityMethod: the bounds of z must be finite"))
+  # the step reads the derivative with respect to z, through the maps x → θ
+  for (n, F) in pairs((objective = problem.objective, map(c -> c.F, problem.constraints)...))
+    θ = physical_fields(F)
+    θ isa PhysicalFields && !is_differentiable(θ) &&
+      throw(ArgumentError("DensityMethod: the $(n === :objective ? "objective" : "constraint $n") reads a physical field " *
+                          "through Step(), which has no derivative with respect to the design; use Ersatz() (or a method " *
+                          "that takes the sensitivity with respect to the physical field)"))
+  end
   nothing
 end
 method_label(m::DensityMethod) = "DensityMethod($(nameof(typeof(m.optimizer))))"
