@@ -2,6 +2,7 @@
 
 [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://multisimolab.github.io/HyperShape.jl/dev/)
 [![Build Status](https://github.com/MultiSimOLab/HyperShape.jl/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MultiSimOLab/HyperShape.jl/actions/workflows/ci.yml?query=branch%3Amain)
+[![Coverage](https://codecov.io/gh/MultiSimOLab/HyperShape.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/MultiSimOLab/HyperShape.jl)
 
 ## Shape and Topology Optimisation of Nonlinear Multiphysics
 
