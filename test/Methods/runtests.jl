@@ -107,6 +107,64 @@ end
 
 nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
 
+# MBB written with the two factories of Optimization(model; design_setup, physics_setup) (PR 3b): `proj` is created
+# outside, `load` scales the load at each call of physics_setup (a stale capture on purpose when it changes)
+function mbb_model(nx, ny)
+  model  = CartesianDiscreteModel((0, nx, 0, ny), (nx, ny))
+  labels = get_face_labeling(model)
+  add_tag_from_vertex_filter!(labels, "sym", model, x -> x[1] ≈ 0)
+  add_tag_from_vertex_filter!(labels, "roller", model, x -> x[1] ≈ nx && x[2] ≈ 0)
+  add_tag_from_vertex_filter!(labels, "load", model, x -> x[2] ≈ ny && x[1] <= 1)
+  add_tag_from_vertex_filter!(labels, "solid", model, x -> x[1] >= nx - 2 - 1e-9 && x[2] <= 2 + 1e-9)
+  model
+end
+
+function mbb_factories(; order = 0, linear = false, al = false, frozen = false, proj = TanhProjection(β = 1.0, η = 0.5),
+                         load = () -> 1.0, output = true, monitors = true)
+  function design_setup(model)
+    reffe = ReferenceFE(lagrangian, Float64, order)
+    conf = order == 0 ? :L2 : :H1
+    Vρ = frozen ? TestFESpace(model, reffe; conformity = conf, dirichlet_tags = "solid") : TestFESpace(model, reffe; conformity = conf)
+    z = OptVariables(ρ = FieldVariable(Vρ; bounds = (0.0, 1.0), init = 0.5, frozen = frozen ? 1.0 : nothing))
+    x = DesignFields(z; ρ = Identity())
+    (; z, x)
+  end
+  function physics_setup(model, x)
+    Ω, Γ   = Triangulation(model), BoundaryTriangulation(model; tags = "load")
+    dΩ, dΓ = Measure(Ω, 2), Measure(Γ, 2)
+    bc = BoundaryConditions(BoundaryCondition("sym", VectorValue(0.0, 0.0); mask = (true, false)),
+                            BoundaryCondition("roller", VectorValue(0.0, 0.0); mask = (false, true)))
+    V  = TestFESpace(Ω, ReferenceFE(lagrangian, VectorValue{2,Float64}, 1), bc; conformity = :H1)
+    U  = TrialFESpace(V, bc, 1.0)
+    filt = HelmholtzFilter(dΩ; rmin = 1.5, ls = LUSolver())
+    θ  = PhysicalFields(x; ρ = linear ? filt : proj ∘ filt)
+    ν, Emin = 0.3, 1e-9
+    λ, μ = ν / (1 - ν^2), 1 / (2(1 + ν))
+    _, _, ∂²Ψ, _, _, ∂²Ψ_∂ρ = EnergyInterpolationScheme(LinearElasticity2D(λ = λ, μ = μ),
+                                                         LinearElasticity2D(λ = Emin * λ, μ = Emin * μ); p = 3.0)()
+    F, _, _ = get_Kinematics(Kinematics(Mechano, Solid))
+    c = load()
+    t(x) = VectorValue(0.0, -c * (4 - 6x[1]))
+    a(u, v) = ∫(∇(v)' ⊙ ((∂²Ψ ∘ (θ.ρ, F ∘ ∇(u)')) ⊙ ∇(u)'))dΩ
+    S = StateOperator(StaticLinearModel(v -> ∫(t ⋅ v)dΓ, a, U, V, bc; ls = LUSolver(), backend = :compiled), θ;
+          adjoint = AdjointProblem(sensitivity = (u, p) -> (δ -> ∫((∇(p)' ⊙ ((∂²Ψ_∂ρ ∘ (θ.ρ, F ∘ ∇(u)')) ⊙ ∇(u)')) * δ)dΩ)))
+    C = Functional((u, θ) -> ∫(t ⋅ u)dΓ, S; dJdu = SelfAdjoint(), scale = :initial)
+    Vol = Volume(θ, dΩ; max_fraction = 0.5)
+    cons = al ? (volume = Vol, tight = Volume(θ, dΩ; max_fraction = 0.45)) : (volume = Vol,)
+    r = (; objective = C, constraints = cons, θ, S, Ω, dΩ)
+    monitors && (r = (; r..., monitors = (grey = Grey(θ, dΩ),)))
+    output && (r = (; r..., output = (post, ctx) -> write_step(post, Ω, "rho" => θ.ρ, "u" => get_state(S))))
+    r
+  end
+  design_setup, physics_setup
+end
+
+# every column of the history but the counts of solves
+const _SAME_COLS = (:iteration, :objective, :kkt, :stationarity, :change, :step, :attempts)
+same_history(a, b) = all(isequal(getproperty(a, c), getproperty(b, c)) for c in _SAME_COLS) &&
+  isequal(a.constraints, b.constraints) && isequal(a.multipliers, b.multipliers) && isequal(a.violations, b.violations) &&
+  isequal(a.penalties, b.penalties) && isequal(a.monitors, b.monitors) && isequal(a.continuation, b.continuation)
+
 @testset "Methods" begin
 
   @testset "Several constraints: oracle and the check of the optimiser" begin
@@ -1206,7 +1264,8 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test_throws ArgumentError cm((n = nothing,), 4, OC())
     @test_throws ArgumentError cm([1.0], 4, OC())
     st = OptState(1, 0, 1, collect(1.0:4), [:ρ], Dict(:ρ => 0), Symbol[], (objective = 1.0,), OptHistory(2), "M", "X",
-                  (v = [1.0, 2, 3, 4], k = 3.0, w = [4.0, 3, 2, 1]), Dict{Symbol,Symbol}(), nothing, Dict{Symbol,Float64}())
+                  (v = [1.0, 2, 3, 4], k = 3.0, w = [4.0, 3, 2, 1]), Dict{Symbol,Symbol}(), nothing, Dict{Symbol,Float64}(),
+                  "FixedMesh", 0)
     d2 = mktempdir()
     HyperShape.Methods._write_checkpoint(Checkpoint(filepath = d2, every = 1), st)
     @test isequal(load_checkpoint(d2).memory, st.memory)
@@ -1252,5 +1311,182 @@ nonincreasing(v) = all(i -> v[i+1] <= v[i] + 1e-12 * abs(v[i]), 1:length(v)-1)
     @test !occursin("checkpoint", String(take!(buf)))
     r = solve!(q.problem, DensityMethod(SiMPL(); metric = LumpedMass()); maxiter = 8, verbose = 0, stop = nothing, resume = st)
     @test length(r.history) == 8
+  end
+
+  @testset "Factories and rebuilds: Optimization(model; design_setup, physics_setup), RebuildCheck" begin
+    RC = HyperShape.Methods.RebuildCheck
+    model = mbb_model(24, 8)
+    method(opt) = DensityMethod(opt === :OC ? OC() : SiMPL(); metric = LumpedMass())
+    # a run of 24 iterations, β = 1, 2, 4 every 8 (a jump after iterations 8 and 16)
+    function run(; opt = :SiMPL, order = 0, linear = false, al = false, frozen = false, maxiter = 24, verbose = 0, kw...)
+      proj = TanhProjection(β = 1.0, η = 0.5)
+      ds, ps = mbb_factories(; order, linear, al, frozen, proj, output = false)
+      pb = Optimization(model; design_setup = ds, physics_setup = ps)
+      r = solve!(pb, method(opt); maxiter, verbose, stop = nothing,
+                 continuation = linear ? nothing : Continuation(β = proj => [1.0, 2.0, 4.0]; every = 8), kw...)
+      pb, r
+    end
+
+    # the problem built by the factories: names kept, the same run as the problem built from its functionals
+    pb, r = run(; maxiter = 6)
+    @test r.problem === pb && pb.setup !== nothing
+    @test haskey(pb.physics, :θ) && pb.physics.θ isa PhysicalFields && pb.design.x isa DesignFields
+    proj = TanhProjection(β = 1.0, η = 0.5)
+    ds, ps = mbb_factories(; proj, output = false)
+    d = ds(model)
+    p = ps(model, d.x)
+    plain = Optimization(d.z; objective = p.objective, constraints = p.constraints)
+    rp = solve!(plain, method(:SiMPL); maxiter = 6, verbose = 0, stop = nothing, monitors = p.monitors,
+                continuation = Continuation(β = proj => [1.0, 2.0, 4.0]; every = 8))
+    @test same_history(rp.history, r.history) && get_values(rp.z) == get_values(r.z)
+    @test rp.problem === plain && plain.setup === nothing && plain.physics.objective === p.objective
+    rep = check_consistency(pb)
+    @test rep.passed && length(rep.results) >= 2
+
+    # RebuildCheck gives the run of FixedMesh bit for bit (solve counts aside), before a jump and in the middle of a
+    # stage, both factories or the physics only, OC and SiMPL, P0 and P1, linear and projected volume, augmented
+    # Lagrangian, frozen zone, several events
+    cases = [(; opt = :SiMPL), (; opt = :OC), (; opt = :SiMPL, order = 1), (; opt = :OC, order = 1),
+             (; opt = :SiMPL, linear = true), (; opt = :SiMPL, al = true), (; opt = :SiMPL, frozen = true)]
+    for c in cases
+      _, ref = run(; c...)
+      for d in (RC(at = 8), RC(at = 11), RC(at = 11, what = :physics), RC(every = 5))
+        pbe, re = run(; c..., discretization = d)
+        ok = same_history(re.history, ref.history) && get_values(re.z) == get_values(ref.z)
+        ok || @info "RebuildCheck differs" c d
+        @test ok
+        @test re.problem !== pbe                           # the last problem, built by the last rebuild
+        @test pbe.state[].events == (d.every > 0 ? 4 : 1)
+        @test (d.what === :physics) == (re.problem.z === pbe.z)
+        @test sum(re.history.forward) >= sum(ref.history.forward)
+      end
+    end
+
+    # banner, event line and summary; a factory that captures something that changes gives "differs"
+    buf = IOBuffer()
+    run(; maxiter = 10, discretization = RC(at = 5), verbose = 1, io = buf)
+    s = String(take!(buf))
+    @test occursin("discretization: RebuildCheck, design and physics rebuilt at iteration 5 (same mesh)", s)
+    @test occursin("problem from design_setup/physics_setup", s)
+    @test occursin("iteration 5: design and physics rebuilt", s) && occursin("objective at the rebuilt problem: identical", s)
+    @test occursin("1 rebuild event", s)
+    buf = IOBuffer()
+    run(; maxiter = 4, verbose = 1, io = buf)
+    @test occursin("discretization: fixed mesh (default)", String(take!(buf)))
+    ncalls = Ref(0)
+    ds, ps = mbb_factories(; proj = TanhProjection(β = 1.0, η = 0.5), output = false, load = () -> (ncalls[] += 1; 1.0 + 0.1 * (ncalls[] - 1)))
+    pb = Optimization(model; design_setup = ds, physics_setup = ps)
+    buf = IOBuffer()
+    solve!(pb, method(:SiMPL); maxiter = 6, verbose = 1, io = buf, stop = nothing, discretization = RC(at = 3))
+    @test occursin(r"objective at the rebuilt problem: differs by [0-9.e-]+ \(relative\)", String(take!(buf)))
+
+    # the contract: due allocates nothing, labels, errors of RebuildCheck
+    d = RC(every = 3)
+    HyperShape.Methods.due(d, 6, nothing, nothing, nothing)
+    @test @allocated(HyperShape.Methods.due(d, 6, nothing, nothing, nothing)) == 0
+    @test HyperShape.Methods.due(RC(at = [3, 9]), 9, nothing, nothing, nothing) && !HyperShape.Methods.due(RC(at = 3), 4, nothing, nothing, nothing)
+    @test !HyperShape.Methods.needs_setup(FixedMesh()) && HyperShape.Methods.needs_setup(d)
+    @test_throws ArgumentError RC()
+    @test_throws ArgumentError RC(at = 3, every = 2)
+    @test_throws ArgumentError RC(every = 0)
+    @test_throws ArgumentError RC(at = 3, what = :mesh)
+
+    # errors when the problem is built
+    ds0, ps0 = mbb_factories(; output = false)
+    @test_throws ArgumentError Optimization(model; design_setup = m -> (; z = ds0(m).z), physics_setup = ps0)
+    @test_throws ArgumentError Optimization(model; design_setup = ds0, physics_setup = (m, x) -> (; C = 1))
+    @test_throws ArgumentError Optimization(model; design_setup = ds0,
+                                            physics_setup = (m, x) -> (r = ps0(m, x); (; objective = r.objective, monitor = r.monitors)))
+    other = mbb_model(24, 8)
+    @test_throws ArgumentError Optimization(model; design_setup = m -> ds0(other), physics_setup = ps0)
+    dz = ds0(model)
+    @test_throws ArgumentError Optimization(model; design_setup = m -> dz, physics_setup = (m, x) -> ps0(m, ds0(m).x))
+
+    # errors of solve!: discretisation without factories, monitors or driver given twice or tied to the old problem,
+    # metric tied to the mesh, factories that capture the variables, the functionals or a continued projection
+    q = compliance_problem()
+    @test_throws ArgumentError solve!(q.problem, method(:SiMPL); maxiter = 3, verbose = 0, discretization = RC(at = 1))
+    ds, ps = mbb_factories(; output = true)
+    pb = Optimization(model; design_setup = ds, physics_setup = ps)
+    grey = Grey(pb.physics.θ, pb.physics.dΩ)
+    @test_throws ArgumentError solve!(pb, method(:SiMPL); maxiter = 3, verbose = 0, monitors = (g2 = grey,))
+    post0 = OptPostProcessor(every = 1)
+    postd = OptPostProcessor((post, ctx) -> nothing; every = 1)
+    @test_throws ArgumentError solve!(pb, method(:SiMPL); maxiter = 3, verbose = 0, post = postd)
+    dsn, psn = mbb_factories(; output = false, monitors = false)
+    pbn = Optimization(model; design_setup = dsn, physics_setup = psn)
+    @test_throws ArgumentError solve!(pbn, method(:SiMPL); maxiter = 3, verbose = 0, post = post0)
+    @test_throws ArgumentError solve!(pbn, method(:SiMPL); maxiter = 3, verbose = 0, post = postd, discretization = RC(at = 1))
+    @test_throws ArgumentError solve!(pbn, method(:SiMPL); maxiter = 3, verbose = 0, monitors = (grey = Grey(pbn.physics.θ, pbn.physics.dΩ),),
+                                      discretization = RC(at = 1))
+    @test_throws ArgumentError solve!(pbn, DensityMethod(SiMPL(); metric = LumpedMass(pbn.physics.dΩ)); maxiter = 3, verbose = 0,
+                                      discretization = RC(at = 1))
+    r = solve!(pbn, method(:SiMPL); maxiter = 3, verbose = 0, stop = nothing,
+               monitors = (grey = Grey(pbn.physics.θ, pbn.physics.dΩ),))           # without factory monitors, FixedMesh: allowed
+    @test haskey(r.history.monitors, :grey)
+    dsx, psx = mbb_factories(; output = false)
+    dfix = dsx(model)
+    pbx = Optimization(model; design_setup = m -> dfix, physics_setup = psx)
+    @test_throws r"same variables" solve!(pbx, method(:SiMPL); maxiter = 4, verbose = 0, stop = nothing, discretization = RC(at = 2))
+    dsy, psy = mbb_factories(; output = false)
+    pfix = Ref{Any}(nothing)
+    psfix = (m, x) -> (pfix[] === nothing && (pfix[] = psy(m, x)); pfix[])
+    pby = Optimization(model; design_setup = dsy, physics_setup = psfix)
+    @test_throws r"same objective" solve!(pby, method(:SiMPL); maxiter = 4, verbose = 0, stop = nothing,
+                                          discretization = RC(at = 2, what = :physics))
+    proj = TanhProjection(β = 1.0, η = 0.5)
+    ncalls = Ref(0)
+    psp = (m, x) -> (ncalls[] += 1; mbb_factories(; output = false, proj = ncalls[] == 1 ? proj : TanhProjection(β = 1.0, η = 0.5))[2](m, x))
+    pbp = Optimization(model; design_setup = mbb_factories()[1], physics_setup = psp)
+    @test_throws r"TanhProjection continued as β" solve!(pbp, method(:SiMPL); maxiter = 4, verbose = 0, stop = nothing,
+                                                         continuation = Continuation(β = proj => [1.0, 2.0]; every = 2),
+                                                         discretization = RC(at = 2))
+    ncalls[] = 0
+    psc = (m, x) -> (ncalls[] += 1; mbb_factories(; output = false, al = ncalls[] > 1)[2](m, x))
+    pbc = Optimization(model; design_setup = mbb_factories()[1], physics_setup = psc)
+    @test_throws r"the constraints changed" solve!(pbc, method(:SiMPL); maxiter = 4, verbose = 0, stop = nothing,
+                                                   discretization = RC(at = 2))
+
+    # output: the same files and the same collection with and without rebuilds; a checkpoint after a rebuild resumes
+    function out_run(d, dir; maxiter = 12, output = true, kw...)
+      proj = TanhProjection(β = 1.0, η = 0.5)
+      ds, ps = mbb_factories(; proj, output)
+      pb = Optimization(model; design_setup = ds, physics_setup = ps)
+      post = output ? OptPostProcessor(every = 2, filepath = joinpath(dir, "vtk"), async = false) : nothing
+      r = solve!(pb, method(:SiMPL); maxiter, verbose = 0, stop = nothing, post, discretization = d,
+                 continuation = Continuation(β = proj => [1.0, 2.0, 4.0]; every = 8),
+                 checkpoint = Checkpoint(filepath = joinpath(dir, "ck"), every = 3), kw...)
+      pb, r
+    end
+    da, db = mktempdir(), mktempdir()
+    _, ra = out_run(FixedMesh(), da)
+    _, rb = out_run(RC(every = 4), db)
+    @test same_history(ra.history, rb.history)
+    fa, fb = sort(readdir(joinpath(da, "vtk"))), sort(readdir(joinpath(db, "vtk")))
+    @test fa == fb && "optimization.pvd" in fa && length(fa) >= 6
+    @test read(joinpath(da, "vtk", "optimization.pvd"), String) == read(joinpath(db, "vtk", "optimization.pvd"), String)
+    for f in fa
+      endswith(f, ".vtu") && @test read(joinpath(da, "vtk", f)) == read(joinpath(db, "vtk", f))
+    end
+    ck = load_checkpoint(joinpath(db, "ck"))
+    @test ck.discretization == "RebuildCheck" && ck.events == 2 && ck.iteration == 12
+    # a checkpoint written right after a rebuild (iteration 9 of every = 3, a rebuild at 8): resume it with FixedMesh
+    dc = mktempdir()
+    out_run(RC(at = 8), dc; maxiter = 9)
+    ck = load_checkpoint(joinpath(dc, "ck"))
+    @test ck.events == 1 && ck.iteration == 9 && ck.memory !== nothing
+    dd = mktempdir()
+    _, rd = out_run(FixedMesh(), dd; output = false, resume = joinpath(dc, "ck"))
+    @test same_history(rd.history, ra.history) && get_values(rd.z) == get_values(ra.z)
+    @test load_checkpoint(joinpath(dd, "ck")).events == 1
+    # an exception in a factory at a rebuild: checkpoint from the state of the event (with the memory), then rethrown
+    ncalls[] = 0
+    psb = (m, x) -> (ncalls[] += 1; ncalls[] > 1 && error("boom in physics_setup"); mbb_factories(; output = false)[2](m, x))
+    pbb = Optimization(model; design_setup = mbb_factories()[1], physics_setup = psb)
+    de = mktempdir()
+    @test_throws ErrorException solve!(pbb, method(:SiMPL); maxiter = 6, verbose = 0, stop = nothing,
+                                       discretization = RC(at = 4), checkpoint = Checkpoint(filepath = de, every = 5))
+    cke = load_checkpoint(de)
+    @test cke.iteration == 4 && cke.memory !== nothing
   end
 end

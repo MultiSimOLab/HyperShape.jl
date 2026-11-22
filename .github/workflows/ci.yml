@@ -20,8 +20,6 @@ jobs:
     name: Tests
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
-    env:
-      JULIA_NUM_THREADS: 4   # the tests use the threaded kernels; ubuntu-latest has 4 cores
     strategy:
       fail-fast: false
       matrix:

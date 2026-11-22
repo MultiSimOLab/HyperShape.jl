@@ -87,7 +87,7 @@ _metric_name(m) = string(nameof(typeof(m)))
 _metric_name(m::NamedTuple) = join(("$k: $(_metric_name(v))" for (k, v) in pairs(m)), ", ")
 
 function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, defaults, schedule, resume,
-                       native = 1:length(problem.constraints))
+                       native = 1:length(problem.constraints), discretization = FixedMesh())
   p.level >= 1 || return
   opt = stepper(method)
   z = problem.z
@@ -115,6 +115,9 @@ function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, 
           " · maxiter $maxiter", resume === nothing ? "" : " · resumed at iteration $(resume.iteration)")
   println(p.io, "  on failure: reject step, shrink $(_g(on_failure.shrink)), at most $(on_failure.max_attempts) attempts",
           defaults.on_failure ? " (default)" : "")
+  println(p.io, "  discretization: ", discretization_label(discretization),
+          get(defaults, :discretization, false) ? " (default)" : "",
+          problem.setup === nothing ? "" : " · problem from design_setup/physics_setup")
   opt isa OC && println(p.io, "  OC: move $(_g(opt.move)) · ", opt.adapt === nothing ? "fixed (top88)" :
                         "adaptive per entry ×$(_g(opt.adapt[1]))/×$(_g(opt.adapt[2])), floor $(_g(opt.move_min))")
   _print_columns(p, schedule)
@@ -220,9 +223,10 @@ function _print_failure(p::_Printer, msg, k)
 end
 
 # solves: (forward, adjoint, filter) solved in this call, the setup and the final synchronisation included
-function _print_summary(p::_Printer, solves, iterations)
+function _print_summary(p::_Printer, solves, iterations, events = 0)
   p.level >= 1 || return
   t = time() - p.t0
   println(p.io, @sprintf("  solves: forward %d, adjoint %d, filter %d · time %.2f s (%.3f s per iteration)",
-                         solves..., t, t / max(iterations, 1)))
+                         solves..., t, t / max(iterations, 1)),
+          events == 0 ? "" : " · $events rebuild event" * (events == 1 ? "" : "s"))
 end

@@ -86,10 +86,11 @@ result = run_mbb()
 
 ## Installation
 
-HyperShape uses the registered versions of HyperFEM (0.3) and HyperFEMKernels (0.2.5 or later):
+HyperShape is registered in the General registry; it uses the registered HyperFEM (0.3) and HyperFEMKernels (0.2.5
+or later):
 
 ```julia
-pkg> add https://github.com/MultiSimOLab/HyperShape.jl
+pkg> add HyperShape
 ```
 
 It requires Julia 1.12 or later and Gridap 0.20.8. Start Julia with several threads (`julia -t auto`): by default
