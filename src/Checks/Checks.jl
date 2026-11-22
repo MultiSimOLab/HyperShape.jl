@@ -55,9 +55,11 @@ function Base.show(io::IO, ::MIME"text/plain", r::ConsistencyReport)
     println(io, "  ", !x.applicable ? "–" : x.passed ? "✓" : "✗", " ", rpad(x.label, w), "  ", x.message)
   end
 end
-Base.show(io::IO, r::ConsistencyReport) =
+function Base.show(io::IO, r::ConsistencyReport)
+  na = count(x -> !x.applicable, r.results)
   print(io, "ConsistencyReport(", count(x -> x.passed && x.applicable, r.results), " of ",
-        count(x -> x.applicable, r.results), " passed)")
+        count(x -> x.applicable, r.results), " passed", na > 0 ? ", $na not applicable" : "", ")")
+end
 
 const _NA_STEP = "not applicable: the physical field goes through Step(), which has no derivative; replace Step() by " *
                  "Ersatz() to check dJdθ, the adjoint and the sensitivity (the forms are the same)"

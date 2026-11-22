@@ -9,7 +9,8 @@
 #   accumulate!(s, L, w, key) stages that are not lazy (filter, cell mean): assembles L and adds w times it to the
 #                             accumulated vector of the stage; nothing is solved yet
 #   flush!(s, ctx)            stages that are not lazy: pulls the accumulated vector back once (one solve of a filter)
-#                             and returns the linear form on the input; the accumulator is emptied
+#                             and returns the linear form on the input (or a DofFunctional, a vector on its free
+#                             values: Ersatz); the accumulator is emptied
 #   parameter_version(s)      counter of the parameters of the map (β of a TanhProjection, the Parameters of a
 #                             PointwiseMap, the dependencies of a filter's operator); 0 if it has none
 #   is_lazy(s)                true if the output is evaluated lazily (nothing to recompute when an earlier parameter changes)
@@ -80,7 +81,8 @@ pullback(s::MaskStage, L, ctx, key) = (free = s.free; δ -> L(free * δ))
 is_linear_stage(::MaskStage) = true
 
 # maps evaluated point by point (they carry the frozen value into θ); filters and cell means leave it as it is. A new
-# kind of FieldMap that acts point by point must declare `_pointwise(::MyMap) = true`.
+# kind of FieldMap that acts point by point must declare `_pointwise(::MyMap) = true`; one that carries the frozen value
+# through another map declares `_frozen_map(::MyMap) = that map` (Ersatz: the step of the value).
 _pointwise(m) = false
 
 """
@@ -414,7 +416,8 @@ depends on which quadrature points fall on each side: integrate with a higher de
 [`design_measures`](@ref)). It has no derivative with respect to φ: a method that differentiates through the maps
 (`DensityMethod`) refuses it when the run starts, and [`check_consistency`](@ref HyperShape.Checks.check_consistency)
 reports the derivative checks as not applicable; use [`Ersatz`](@ref)`()` to check the derivatives of the forms (they
-are the same). Lazy, point by point (a frozen zone `φ = 1` gives `χ = 1`).
+are the same). Lazy, point by point (a frozen zone `φ = 1` gives `χ = 1`). The refusal looks at the whole
+`PhysicalFields`: a field through `Step()` next to differentiable ones goes in a `PhysicalFields` of its own.
 """
 struct Step <: FieldMap end
 
@@ -441,14 +444,18 @@ Base.show(io::IO, ::Step) = print(io, "Step()")
 Interface map of the classical ersatz material (Allaire, Jouve and Toader, 2004): the material of each cell is the
 fraction of the cell where the input `φ` is ≥ 0, `χ_K = |{φ_h ≥ 0} ∩ K| / |K|`, a cell-wise (P0) field. Exact for the
 linear interpolant of φ on simplices; quadrilaterals and hexahedra are split into 4 triangles and 24 tetrahedra
-around their centre (whose value is the mean of the nodes), so the fraction is exact for that subdivision and
-O(h²) with respect to the bilinear interpolant. Continuous in φ, with its exact derivative (closed forms, no
+around their centre (whose value is the mean of the nodes), so the fraction is exact for that subdivision (not for the
+bilinear interpolant: up to about 0.08 on a cell with values in a saddle) and O(h²) with respect to a smooth interface. Continuous in φ, with its exact derivative (closed forms, no
 cancellation). The input must be a nodal P1 scalar field: the design field or the output of a filter (`Ersatz() ∘
 HelmholtzFilter(…)`); triangles, quadrilaterals, tetrahedra and hexahedra. A volume of the material is exact with any
 quadrature.
 
-The derivative is nonzero only on the cells cut by the interface: a design without interface (uniform φ) does not
-move, and holes are not nucleated by this derivative. A cell with `φ ≡ 0` counts as material (derivative zero).
+The derivative is nonzero only on the cells cut by the interface: a design without interface (uniform φ, or φ at a
+bound everywhere) does not move, and holes are not nucleated by this derivative; `DensityMethod` refuses to start
+from a design without cut cells. A cell with `φ ≡ 0` counts as material (derivative zero). With a frozen zone `φ = 1`
+the cells next to it are partly material too (its nodes on their boundary have φ = 1). Cost (one thread, Mac M5 Max):
+about 12 ns per quadrilateral and 7 ns per tetrahedron to update or pull back; a hexahedron cut by the interface about
+350 ns (24 tetrahedra), one without interface a few ns.
 `backend` assembles the forms on the cell-wise basis (`:compiled`, HyperFEMKernels, or `:lazy`, Gridap). Not lazy:
 the fractions are computed when the design changes (a loop over the cells, no solve).
 
@@ -542,10 +549,15 @@ function update_stage!(s::ErsatzStage, ctx)
 end
 function _fractions!(χ, s, fv, dv)
   @inbounds for c in eachindex(s.cdof)
-    χ[s.cdof[c]] = _fraction(s, _cell_values(s, fv, dv, c), c)[1]
+    v = _cell_values(s, fv, dv, c)
+    isfinite(sum(v)) || throw(ArgumentError("Ersatz: the input field is not finite on cell $c"))
+    χ[s.cdof[c]] = _fraction(s, v, c)[1]
   end
   χ
 end
+
+# whether some cell is cut by the interface (0 < χ < 1)
+has_interface(s::ErsatzStage) = any(χ -> 0 < χ < 1, get_free_dof_values(s.out))
 
 function accumulate!(s::ErsatzStage, L, w::Float64, key)
   assemble_form!(s.b, s.assem, L, key)          # L applied to the cell-wise basis: the derivative per cell
@@ -586,5 +598,3 @@ function accumulate!(s::FilterStage, L::DofFunctional, w::Float64, key)
   s.pending[] = true
   s
 end
-accumulate!(s, L::DofFunctional, w::Float64, key) =
-  throw(ArgumentError("Ersatz: its input must be the design field or the output of a filter"))

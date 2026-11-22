@@ -103,6 +103,9 @@ end
 # w: relative volumes of the 24 tetrahedra, in the order of the loops below (1/24 on a parallelepiped).
 const HEX_FACES = ((1, 2, 4, 3), (5, 6, 8, 7), (1, 2, 6, 5), (3, 4, 8, 7), (1, 3, 7, 5), (2, 4, 8, 6))  # cyclic
 function hex_fraction(φ::NTuple{8,Float64}, w::NTuple{24,Float64})
+  z8 = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+  all(>=(0), φ) && return 1.0, z8                 # no interface: exact, and 24 times cheaper
+  all(<(0), φ) && return 0.0, z8
   c = (φ[1] + φ[2] + φ[3] + φ[4] + φ[5] + φ[6] + φ[7] + φ[8]) / 8
   f = 0.0
   gc = 0.0

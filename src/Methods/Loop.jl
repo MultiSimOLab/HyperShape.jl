@@ -195,6 +195,8 @@ struct Grey{T,M}
   volume::Float64
 end
 
+Grey(θ::PhysicalFields, dΩ::DesignMeasures; kwargs...) = Grey(θ, dΩ.domain; kwargs...)
+
 function Grey(θ::PhysicalFields, dΩ; field = nothing)
   names = propertynames(θ)
   f = field === nothing ?
@@ -753,7 +755,8 @@ function of the user, an interruption) writes a checkpoint at the last accepted 
 rethrown; an `OptimizationFailure` writes its own.
 
 If the starting design (not a resumed one) violates the constraint, it is scaled towards the lower bound,
-`z = lb + t (z − lb)` on the entries the constraint acts on (a linear constraint: so that it holds with equality; a
+`z = lb + t (z − lb)` on the entries the constraint acts on (on every entry if those cannot meet it, as with
+`Ersatz()` where only the cut cells have a derivative; a linear constraint: so that it holds with equality; a
 nonlinear one: with `t` found by regula falsi so that `-1e-6 ≤ g ≤ 0`); `t` is returned in `result.start_scaling`
 and reported as an event when `verbose ≥ 1`. At a continuation jump the design is not touched: an optimiser that
 finds it infeasible restores feasibility in its next step.
@@ -988,6 +991,7 @@ function _segment!(problem, method, opt, resume, isfirst, run, hist, ctx, cont_b
     (t_start === nothing || t_start > 1 - 1e-6) || _print_event(pr, "· the starting design violated the constraint; it was scaled " *
                                             "towards the lower bound by $(round(t_start, sigdigits = 4)) to meet it", :yellow)
   end
+  method isa DensityMethod && _check_interface(problem, ctx)
   # after the feasible start: a scale = :initial of a constraint is taken at the design the run starts from
   oracle = length(native) == num_constraints(fo) ? fo : AugmentedLagrangianOracle(fo, augmented_lagrangian(method), native, zk)
   oracle isa AugmentedLagrangianOracle && resume !== nothing && _restore_lagrangian!(oracle, resume, cnames)
@@ -1177,6 +1181,21 @@ function _projections(p)
     end
   end
   out
+end
+
+# Ersatz() moves only the cells cut by the interface: a design without them does not move (a step would find no
+# descent direction and no direction for the constraint)
+function _check_interface(problem, ctx)
+  for (n, F) in pairs((objective = problem.objective, map(c -> c.F, problem.constraints)...))
+    θ = physical_fields(F)
+    θ isa PhysicalFields || continue
+    update_fields!(θ, ctx)
+    has_interface(θ) ||
+      throw(ArgumentError("solve!: no cell is cut by the interface of Ersatz() at the starting design (the " *
+                          (n === :objective ? "objective" : "constraint $n") * "): its derivative vanishes and the design " *
+                          "cannot move; start from a design with an interface (φ changing sign inside the design region)"))
+  end
+  nothing
 end
 
 # the optimiser's own continued parameters, given back when solve! returns or throws

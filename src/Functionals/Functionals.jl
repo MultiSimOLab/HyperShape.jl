@@ -188,10 +188,11 @@ end
 """
     Volume(θ::PhysicalFields, dΩ; max_fraction, field = nothing, scale = Vmax)
     Volume(x::DesignFields, dΩ; max_fraction, field = nothing, scale = Vmax)
+    Volume(θ::PhysicalFields, dΩ::DesignMeasures; …)   # the domain of design_measures(θ; degree)
 
 Volume constraint `g = ∫ θ.field dΩ - Vmax ≤ 0` with `Vmax = max_fraction ⋅ |Ω|` (`0 < max_fraction ≤ 1`, `|Ω|` the
 measure of `dΩ`), a design-only [`Functional`](@ref) with its value and derivative written in. With physical fields θ, the volume of the physical density: nonlinear in z if its chain has a
-[`TanhProjection`](@ref HyperShape.Variables.TanhProjection) projection, linear otherwise. With design fields x, the volume of
+[`TanhProjection`](@ref HyperShape.Variables.TanhProjection), an `Ersatz()` or another nonlinear map, linear otherwise. With design fields x, the volume of
 the design density (linear; the identity physical fields are built inside). `field` is mandatory when there are
 several fields. `scale` divides the value and the derivative; default `Vmax`.
 """

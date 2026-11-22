@@ -115,8 +115,11 @@ Vol = Volume(θ, dΩd; max_fraction = 0.4)
   geometry. Its input must be a nodal P1 scalar field (the design field or a filter output). The derivative lives on
   the cut cells only: a design without interface does not move and holes are not nucleated by it.
 - Frozen zones: the material of a zone is the step of its value (φ = 1 gives 1), with both maps.
-- Cost of `Ersatz()` (Mac M5 Max, one thread, measured by the design adviser): 65 536 quadrilaterals, 0.8 ms to update
-  and 1.0 ms to pull back.
+- Cost of `Ersatz()` (Mac M5 Max, one thread, measured by the design adviser and the reviewer): 65 536 quadrilaterals,
+  0.8 ms to update and 1.0 ms to pull back; 82 944 tetrahedra, 0.6 and 0.55 ms; a hexahedron cut by the interface
+  about 350 ns (24 tetrahedra), one without interface a few ns.
+- With the derivative with respect to the design (`DensityMethod`) only the cut cells move: a design without them is
+  refused when the run starts, and a scaled start that crosses a plateau of φ at a bound can end without them.
 
 Planned: global parameters as blocks (applied voltage, fibre angle), scaling and symmetries in the map `z → x`,
 physical fields that depend on several design fields, material interpolation in the map `x → θ`.

@@ -73,10 +73,13 @@ function FieldVariable(V; bounds, init, frozen = nothing)
     zone = _frozen_zone(U, dv)
   end
   n = num_free_dofs(U)
-  init isa Function && (init = get_free_dof_values(interpolate(init, U)))   # a function of the coordinates
+  # a function (or a callable object) of the coordinates
+  init isa Union{Number,AbstractVector} || (init = get_free_dof_values(interpolate(init, U)))
   x0 = init isa Number ? fill(Float64(init), n) : Vector{Float64}(init)
   length(x0) == n || throw(DimensionMismatch("FieldVariable: init has $(length(x0)) values, the space has $n"))
-  all(v -> lb <= v <= ub, x0) || throw(ArgumentError("FieldVariable: init outside the bounds $bounds"))
+  all(v -> lb <= v <= ub, x0) ||
+    throw(ArgumentError("FieldVariable: init outside the bounds $bounds (its values go from $(minimum(x0)) to " *
+                        "$(maximum(x0)); clamp it)"))
   FieldVariable(U, lb, ub, x0, zone)
 end
 

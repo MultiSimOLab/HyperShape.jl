@@ -9,7 +9,8 @@ calling the solve functions of the operators with `ctx = OptContext(:setup)`. Re
 `FEFunction` or a `CellField`) updated in place, so the weak forms can capture it.
 
 A frozen zone of the design field (see [`FieldVariable`](@ref)) is imposed at the end of every chain: on its cells
-θ is the image of the frozen value by the pointwise maps of the chain (`ρ = 1` gives `θ = 1` through a projection),
+θ is the image of the frozen value by the pointwise maps of the chain (`ρ = 1` gives `θ = 1` through a projection;
+through [`Ersatz`](@ref)`()`, the step of the value),
 whatever the filters, and its derivative vanishes there. It costs no solve and keeps a linear chain linear. With a
 frozen zone, `θ.ρ` is an operation on fields (not the `FEFunction` of the last map), so read it as a `CellField`.
 
@@ -300,8 +301,10 @@ function is_differentiable_field(θ::PhysicalFields, name::Symbol)
 end
 is_differentiable(θ::PhysicalFields) = all(n -> is_differentiable_field(θ, n), getfield(θ, :names))
 
-# whether a chain of θ has an Ersatz stage (for the messages of check_consistency)
+# whether a chain of θ has an Ersatz stage (for the messages of check_consistency), and whether every Ersatz stage
+# of θ has a cell cut by the interface
 has_ersatz(θ::PhysicalFields) = any(c -> any(s -> s isa ErsatzStage, c), getfield(θ, :chains))
+has_interface(θ::PhysicalFields) = all(c -> all(s -> !(s isa ErsatzStage) || has_interface(s), c), getfield(θ, :chains))
 
 """
     DesignMeasures

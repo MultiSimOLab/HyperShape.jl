@@ -113,6 +113,17 @@ end
         end
       end
     end
+    # derivative of the hexahedron against centred differences, with weights of a non-affine cell
+    wr = Tuple(rand(rng, 24)); wr = wr ./ sum(wr)
+    for _ in 1:100
+      hq = Tuple(2 .* rand(rng, 8) .- 1)
+      minimum(abs, hq) > 1e-2 || continue
+      f, g = hex_fraction(hq, wr)
+      for i in 1:8
+        @test g[i] ≈ (hex_fraction(Base.setindex(hq, hq[i] + 1e-6, i), wr)[1] - hex_fraction(Base.setindex(hq, hq[i] - 1e-6, i), wr)[1]) / 2e-6 atol = 1e-6
+      end
+    end
+    @test hex_fraction(ntuple(_ -> 0.3, 8), w24) == (1.0, ntuple(_ -> 0.0, 8))   # no interface: exactly 1
     # no allocations
     φ3, φ4, φ8 = (0.3, -0.2, 0.1), (0.3, -0.2, 0.1, -0.4), Tuple(2 .* rand(rng, 8) .- 1)
     cell_fraction(φ3); cell_fraction(φ4); quad_fraction(φ4, w4); hex_fraction(φ8, w24)
@@ -140,6 +151,20 @@ end
       p = interface_problem(; n, dim, simplex, filter = true)
       @test check_consistency((J = p.J,)).passed
     end
+    # the analytic volume of a half plane, and non-affine quadrilaterals (the weights of the subdivision) against
+    # the triangles of the same mesh
+    p = interface_problem(; n = 8, init = x -> x[1] - 0.37)
+    @test sum(∫(p.θ.ρ)p.dΩd.domain) ≈ 0.63 atol = 1e-14
+    bend(x) = VectorValue(x[1] + 0.15 * x[2]^2, x[2] + 0.1 * x[1] * x[2])
+    vols = map((false, true)) do simplex
+      model = CartesianDiscreteModel((0, 1, 0, 1), (6, 6); map = bend)
+      simplex && (model = simplexify(model))
+      Vφ = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
+      zq = OptVariables(φ = FieldVariable(Vφ; bounds = (-2.0, 2.0), init = x -> 0.4x[1] - 0.3x[2] + 0.05))
+      θq = PhysicalFields(DesignFields(zq; φ = Identity()); ρ = :φ => Ersatz())
+      sum(∫(θq.ρ)design_measures(θq; degree = 2).domain)
+    end
+    @test vols[1] ≈ vols[2] atol = 1e-13
     p = interface_problem(; frozen = true, init = x -> x[1] + x[2] - 1.2)
     @test check_consistency((J = p.J,)).passed
     @test p.z.blocks[1].zone !== nothing
@@ -218,6 +243,14 @@ end
     problem = Optimization(p.z; objective = p.J, constraints = (volume = p.Vol,))
     r = solve!(problem, DensityMethod(SiMPL(); metric = LumpedMass()); maxiter = 3, verbose = 0, stop = nothing)
     @test r.start_scaling !== nothing && r.history.constraints.volume[1] <= 1e-3
+    # a design without interface is refused (its derivative vanishes)
+    p = interface_problem(; n = 8, init = x -> 0.5, maxfrac = 0.9)
+    problem = Optimization(p.z; objective = p.J, constraints = (volume = p.Vol,))
+    @test_throws r"no cell is cut" solve!(problem, DensityMethod(SiMPL(); metric = LumpedMass()); maxiter = 3, verbose = 0)
+    # Grey on the design measures; no method ambiguities in the maps
+    p = interface_problem(; n = 8)
+    @test HyperShape.Methods.monitor_value(Grey(p.θ, p.dΩd)) >= 0
+    @test isempty(Test.detect_ambiguities(HyperShape.Variables))
     # no allocations per cell: update and pullback of the stage allocate a fixed amount (Gridap's accessors)
     allocs = map((16, 32)) do n
       p = interface_problem(; n)
