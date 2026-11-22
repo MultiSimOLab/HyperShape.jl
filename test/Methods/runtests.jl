@@ -159,6 +159,15 @@ function mbb_factories(; order = 0, linear = false, al = false, frozen = false, 
   design_setup, physics_setup
 end
 
+# a discretisation of the user: one rebuild at `at`, keeping the design or not
+struct _KeepDesign <: HyperShape.Methods.Discretization
+  at::Int
+  what::Symbol
+end
+HyperShape.Methods.due(d::_KeepDesign, k, info, history, ctx) = (@assert history.n == k; k == d.at)
+HyperShape.Methods.rediscretize(d::_KeepDesign, problem, state, ctx) =
+  (@assert ctx.phase === :setup; HyperShape.Methods.rebuild(problem; what = d.what))
+
 # every column of the history but the counts of solves
 const _SAME_COLS = (:iteration, :objective, :kkt, :stationarity, :change, :step, :attempts)
 same_history(a, b) = all(isequal(getproperty(a, c), getproperty(b, c)) for c in _SAME_COLS) &&
@@ -1358,7 +1367,8 @@ same_history(a, b) = all(isequal(getproperty(a, c), getproperty(b, c)) for c in 
         @test re.problem !== pbe                           # the last problem, built by the last rebuild
         @test pbe.state[].events == (d.every > 0 ? 4 : 1)
         @test (d.what === :physics) == (re.problem.z === pbe.z)
-        @test sum(re.history.forward) >= sum(ref.history.forward)
+        @test sum(re.history.forward) == sum(ref.history.forward)     # the solves of a rebuild are not in the rows
+        @test pbe.state[] === re.problem.state[]
       end
     end
 
@@ -1427,7 +1437,10 @@ same_history(a, b) = all(isequal(getproperty(a, c), getproperty(b, c)) for c in 
     dsx, psx = mbb_factories(; output = false)
     dfix = dsx(model)
     pbx = Optimization(model; design_setup = m -> dfix, physics_setup = psx)
-    @test_throws r"same variables" solve!(pbx, method(:SiMPL); maxiter = 4, verbose = 0, stop = nothing, discretization = RC(at = 2))
+    # a design_setup that returns the same design is a rebuild of the physics only (on the same mesh it is harmless;
+    # on another mesh its spaces are not on the new model, an error when the problem is built)
+    rx = solve!(pbx, method(:SiMPL); maxiter = 4, verbose = 0, stop = nothing, discretization = RC(at = 2))
+    @test rx.problem.z === pbx.z
     dsy, psy = mbb_factories(; output = false)
     pfix = Ref{Any}(nothing)
     psfix = (m, x) -> (pfix[] === nothing && (pfix[] = psy(m, x)); pfix[])
@@ -1488,5 +1501,62 @@ same_history(a, b) = all(isequal(getproperty(a, c), getproperty(b, c)) for c in 
                                        discretization = RC(at = 4), checkpoint = Checkpoint(filepath = de, every = 5))
     cke = load_checkpoint(de)
     @test cke.iteration == 4 && cke.memory !== nothing
+    # the same when the check after the rebuild fails (factories that change the constraints)
+    ncalls[] = 0
+    pbc = Optimization(model; design_setup = mbb_factories()[1], physics_setup = psc)
+    dg = mktempdir()
+    @test_throws r"the constraints changed" solve!(pbc, method(:SiMPL); maxiter = 6, verbose = 0, stop = nothing,
+                                                   discretization = RC(at = 4), checkpoint = Checkpoint(filepath = dg, every = 3))
+    ckg = load_checkpoint(dg)
+    @test ckg.iteration == 4 && ckg.memory !== nothing && pbc.state[].iteration == 4
+
+    # review fixes: the scaled start survives rebuilds; an output with typed arguments; a discretisation of the user
+    # that keeps the design (rebuild(…; what = :physics)); OC with its move continued; a resume at an iteration of a rebuild
+    function scaled(d)
+      ds, ps = mbb_factories(; linear = true, output = false)
+      pb = Optimization(model; design_setup = ds, physics_setup = ps)
+      set_values!(pb.z, fill(0.8, length(pb.z)))
+      solve!(pb, method(:SiMPL); maxiter = 6, verbose = 0, stop = nothing, discretization = d)
+    end
+    r0, r1 = scaled(FixedMesh()), scaled(RC(at = 3))
+    @test r0.start_scaling !== nothing && r1.start_scaling == r0.start_scaling && same_history(r0.history, r1.history)
+    dsT, psT = mbb_factories(; output = false)
+    psTyped = (m, x) -> (r = psT(m, x); (; r..., output = (post::OptPostProcessor, ctx) -> nothing))
+    @test Optimization(model; design_setup = dsT, physics_setup = psTyped) isa Optimization
+    @test_throws ArgumentError Optimization(model; design_setup = dsT, physics_setup = (m, x) -> (; psT(m, x)..., output = 1))
+    @test_throws ArgumentError Optimization(model; design_setup = dsT)
+    @test_throws ArgumentError Optimization(pb.design.x; objective = pb.objective)
+    _, ref = run(; maxiter = 10)
+    for what in (:physics, :design)
+      buf = IOBuffer()
+      pbk, rk = run(; maxiter = 10, discretization = _KeepDesign(4, what), verbose = 1, io = buf)
+      s = String(take!(buf))
+      @test same_history(rk.history, ref.history) && (rk.problem.z === pbk.z) == (what === :physics)
+      @test occursin("discretization: _KeepDesign", s) && occursin("iteration 4: " * (what === :physics ? "physics" : "design and physics") * " rebuilt", s)
+    end
+    @test_throws ArgumentError HyperShape.Methods.rebuild(pb; what = :physics, model = mbb_model(24, 8))
+    pbm = HyperShape.Methods.rebuild(pb; model = mbb_model(24, 8))
+    @test pbm.setup.model !== pb.setup.model && pbm.state === pb.state
+    function oc_run(d)
+      proj = TanhProjection(β = 1.0, η = 0.5)
+      ds, ps = mbb_factories(; proj, output = false)
+      pb = Optimization(model; design_setup = ds, physics_setup = ps)
+      opt = OC(move = 0.2)
+      r = solve!(pb, DensityMethod(opt; metric = LumpedMass()); maxiter = 12, verbose = 0, stop = nothing, discretization = d,
+                 continuation = Continuation(β = proj => [1.0, 2.0, 4.0], move = opt => [0.2, 0.1, 0.05]; every = 4))
+      r, opt
+    end
+    (ra, oa), (rb, ob) = oc_run(FixedMesh()), oc_run(RC(every = 3))
+    @test same_history(ra.history, rb.history) && get_values(ra.z) == get_values(rb.z) && oa.move == ob.move == 0.2
+    dr = mktempdir()
+    pbr, _ = run(; maxiter = 8, discretization = RC(every = 4), checkpoint = Checkpoint(filepath = dr, every = 4))
+    @test pbr.state[].events == 1                   # at 4; none at 8, the last iteration
+    pbs, rs = run(; maxiter = 16, discretization = RC(every = 4), resume = dr)
+    _, rf = run(; maxiter = 16, discretization = RC(every = 4))
+    @test same_history(rs.history, rf.history) && get_values(rs.z) == get_values(rf.z)
+    @test pbs.state[].events == 2 && rf.problem.state[].events == 3   # resumed at 8: no rebuild at 8 (4 and 12 only)
+    buf = IOBuffer()
+    run(; maxiter = 4, discretization = RC(at = 9), verbose = 1, io = buf)
+    @test occursin("no rebuild before maxiter", String(take!(buf)))
   end
 end

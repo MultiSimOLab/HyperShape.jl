@@ -839,7 +839,7 @@ function solve!(problem::Optimization, method::AbstractMethod; maxiter::Integer,
                                          join(dropped, ", "), :yellow)
   end
   run = _LoopState(k0, stage, stage_iters, hist.n - stage_iters, (0, 0, 0), k0, Float64[], (0, 0, 0),
-                   resume === nothing ? 0 : resume.events, string(nameof(typeof(discretization))), 0.0)
+                   resume === nothing ? 0 : resume.events, string(nameof(typeof(discretization))), false, 0.0, nothing)
 
   # an optimiser whose parameters the schedule continues gets them back at the end (the stages change them)
   restore_opt = _restorer(opt)
@@ -848,21 +848,35 @@ function solve!(problem::Optimization, method::AbstractMethod; maxiter::Integer,
     cont_buf = zeros(length(cont_names))
     set_context!(ctx, :continuation, schedule === nothing ? NamedTuple() : _apply_stage!(schedule, stage, cont_buf))
     _print_banner(pr, problem, method, maxiter, stop, on_failure, defaults, schedule, resume, native, discretization)
+    post === nothing && problem.setup !== nothing && haskey(problem.physics, :output) &&
+      _print_event(pr, "· physics_setup returns an output but no post-processor is given: it is not called", :yellow)
+    discretization isa RebuildCheck && discretization.every == 0 && first(discretization.at) >= maxiter &&
+      _print_event(pr, "· RebuildCheck: no rebuild before maxiter = $maxiter (at = $(discretization.at))", :yellow)
     set_context!(ctx, :iteration, k0)
     set_context!(ctx, :attempt, 0)
     set_context!(ctx, :trial, 0)
     st = resume
-    first = true
+    isfirst = true
     while true
       # a function barrier: the types of the problem can change at a rebuild
-      out = _segment!(problem, method, opt, st, first, run, hist, ctx, cont_buf, cont_names, maxiter, on_failure, stop,
-                      schedule, checkpoint, post, monitors, discretization, pr, t_call)
+      out = try
+        _segment!(problem, method, opt, st, isfirst, run, hist, ctx, cont_buf, cont_names, maxiter, on_failure, stop,
+                  schedule, checkpoint, post, monitors, discretization, pr, t_call)
+      catch e
+        # an error after a rebuild and before its first accepted iteration (setting up the rebuilt problem, the forward
+        # solve there): the state of the rebuild, with the memory of the optimiser, is the one to keep
+        !isfirst && run.k == st.iteration && !(e isa OptimizationFailure) && _keep_event_state!(problem, st, checkpoint, pr, run, e)
+        rethrow()
+      end
       out isa OptResult && return out
       st = out
       problem = _rediscretize!(discretization, problem, st, run, post, schedule, checkpoint, pr)
       monitors = _run_monitors(problem, (;), discretization)
+      for (n, m) in pairs(monitors)
+        applicable(monitor_value, m) || throw(ArgumentError("solve!: monitor $n: no monitor_value method for $(typeof(m))"))
+      end
       _restore!(problem, st, schedule, cont_names, maxiter)
-      first = false
+      isfirst = false
     end
   finally
     restore_opt()
@@ -941,13 +955,13 @@ end
 
 # One stretch of the run on one problem: from the start (or the state `resume`) to the end of the run, or to a
 # rebuild, when it returns the state captured there.
-function _segment!(problem, method, opt, resume, first, run, hist, ctx, cont_buf, cont_names, maxiter, on_failure, stop,
+function _segment!(problem, method, opt, resume, isfirst, run, hist, ctx, cont_buf, cont_names, maxiter, on_failure, stop,
                    schedule, checkpoint, post, monitors, discretization, pr, t_call)
   z = problem.z
   cnames = keys(problem.constraints)
   k0 = run.k
   native = _native_split(problem, opt, augmented_lagrangian(method))
-  first || check_problem(method, problem)
+  isfirst || check_problem(method, problem)
   fo = build_oracle(method, problem)
   ops = _counters(problem)
   run.cstart = map(_count, ops)
@@ -967,9 +981,9 @@ function _segment!(problem, method, opt, resume, first, run, hist, ctx, cont_buf
   zk = fo.zk
   copyto!(zk, get_values(z))
   resume === nothing || _check_handled(native, resume, cnames)
-  t_start = nothing
   if resume === nothing                       # a resumed design is the one the run left
     t_start = isempty(native) ? nothing : _make_feasible!(fo, zk, native[1])
+    run.start_scaling = t_start
     # a start feasible up to rounding (t within 1e-6 of 1) is not worth an event
     (t_start === nothing || t_start > 1 - 1e-6) || _print_event(pr, "· the starting design violated the constraint; it was scaled " *
                                             "towards the lower bound by $(round(t_start, sigdigits = 4)) to meet it", :yellow)
@@ -989,14 +1003,13 @@ function _segment!(problem, method, opt, resume, first, run, hist, ctx, cont_buf
     end
   end
   _set_output!(post, problem)
-  if !first
+  if !isfirst
     # a rebuild: the forward solve of the next iteration, done now, gives the objective at the rebuilt problem
     post === nothing || (post.problem = problem)
     f = _sync!(oracle)
     fh = hist.objective[hist.n]
     same = isequal(f, fh) ? "identical" : "differs by " * _g(abs(f - fh) / max(abs(fh), floatmin())) * " (relative)"
-    _print_event(pr, "· iteration $k0: " * (discretization isa RebuildCheck && discretization.what === :physics ?
-                     "physics" : "design and physics") * " rebuilt (" * @sprintf("%.2f s", time() - run.tevent) *
+    _print_event(pr, "· iteration $k0: " * (run.physics_only ? "physics" : "design and physics") * " rebuilt (" * @sprintf("%.2f s", time() - run.tevent) *
                      "); objective at the rebuilt problem: $same", isequal(f, fh) ? :cyan : :yellow)
     pr.tlast = time()                          # the time of the rebuild is not charged to the next row
   elseif post !== nothing
@@ -1059,44 +1072,53 @@ function _segment!(problem, method, opt, resume, first, run, hist, ctx, cont_buf
   lastm(j) = hist.n == 0 ? NaN : hist.multiplier_values[j, hist.n]
   mults = NamedTuple{Tuple(cnames)}(Tuple(final.lagrangian !== nothing && final.handled[n] === :lagrangian ?
                                           final.lagrangian.multipliers[n] : lastm(j) for (j, n) in enumerate(cnames)))
-  OptResult(status, reason, run.k, f_final, z, _trim!(hist), time() - t_call, state, t_start, mults, problem)
+  OptResult(status, reason, run.k, f_final, z, _trim!(hist), time() - t_call, state, run.start_scaling, mults, problem)
 end
 
 # A rebuild after the accepted iteration run.k: the writers are closed, the factories called, the new problem checked
 function _rediscretize!(d, problem, st, run, post, schedule, checkpoint, pr)
   run.tevent = time()
   ctx = problem.ctx
-  if post !== nothing
-    _post_close!(post)                         # the writers hold the spaces of the old problem
-    post.resume_upto = run.k
-  end
-  set_context!(ctx, :phase, :setup)
   new = try
-    rediscretize(d, problem, st, ctx)
-  catch e
-    # the state of the event has the memory of the optimiser: a checkpoint from it resumes exactly
-    if checkpoint !== nothing && !(e isa InterruptException)
-      try
-        _write_checkpoint(checkpoint, st)
-        _print_event(pr, "✗ $(nameof(typeof(e))) in the rebuild at iteration $(run.k): checkpoint written in " *
-                         checkpoint.filepath, :red)
-      catch
-      end
+    if post !== nothing
+      _post_close!(post)                       # the writers hold the spaces of the old problem
+      # the files of this run keep their steps up to k (nothing written yet: an old file is overwritten, as without
+      # a rebuild)
+      post.resume_upto = (post.last >= 0 || post.resume_upto !== nothing) ? run.k : nothing
     end
+    set_context!(ctx, :phase, :setup)
+    new = rediscretize(d, problem, st, ctx)
+    new isa Optimization || throw(ArgumentError("solve!: rediscretize must return an Optimization"))
+    _check_rebuilt(problem, new, d, schedule, run.k)
+    new
+  catch e
+    _keep_event_state!(problem, st, checkpoint, pr, run, e)
     rethrow()
   end
-  new isa Optimization || throw(ArgumentError("solve!: rediscretize must return an Optimization"))
-  _check_rebuilt(problem, new, d, schedule, run.k)
+  run.physics_only = new.design === problem.design
   run.events += 1
   new
 end
 
+# an error at a rebuild: the state captured there (with the memory of the optimiser) is kept in problem.state[] and,
+# with a checkpoint, written, so that a resume continues exactly
+function _keep_event_state!(problem, st, checkpoint, pr, run, e)
+  problem.state[] = st
+  checkpoint === nothing && return nothing
+  try
+    _write_checkpoint(checkpoint, st)
+    _print_event(pr, "✗ $(nameof(typeof(e))) at the rebuild of iteration $(run.k): checkpoint written at iteration " *
+                     "$(run.k) in $(checkpoint.filepath)", :red)
+  catch e2
+    e2 isa InterruptException || _print_event(pr, "✗ the checkpoint could not be written after the exception", :red)
+  end
+  nothing
+end
+
 function _check_rebuilt(old, new, d, schedule, k)
   pre = "solve!: after the rebuild at iteration $k: "
-  physics_only = d isa RebuildCheck && d.what === :physics
-  if physics_only
-    new.z === old.z || throw(ArgumentError(pre * "the variables z changed in a rebuild of the physics only"))
-  else
+  # a rebuild of the physics only keeps the design of the old problem (rebuild(…; what = :physics))
+  if new.design !== old.design
     new.z === old.z && throw(ArgumentError(pre * "design_setup returned the same variables as before: create the spaces " *
                                            "and the variables inside it"))
   end
@@ -1328,7 +1350,9 @@ mutable struct _LoopState
   acc::NTuple{3,Int}      # solves of the problems replaced by rebuilds
   events::Int             # rebuilds of the run (those of a resumed checkpoint included)
   kind::String            # the discretisation, for the checkpoint
+  physics_only::Bool      # the last rebuild kept the design
   tevent::Float64         # time the current rebuild started
+  start_scaling::Union{Nothing,Float64}   # the factor of a scaled start (first stretch)
 end
 
 function _fail(msg, problem, method, opt, oracle, zk, hist, run, cont_names, checkpoint, pr, ops, post)

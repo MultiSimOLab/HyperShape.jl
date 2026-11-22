@@ -8,10 +8,20 @@ during the run, when, and how. [`FixedMesh`](@ref)`()` (the default) never does;
 does it on the same mesh; adaptive meshes come later. The contract (public, not exported):
 
 - `needs_setup(d)`: whether the problem must have factories (`Optimization(model; design_setup, physics_setup)`);
-- `due(d, k, info, history, ctx) -> Bool`: after the accepted iteration `k` (not the last one), whether to rebuild;
+- `due(d, k, info, history, ctx) -> Bool`: after the accepted iteration `k` (not the last one, nor the iteration a
+  run resumes from), whether to rebuild; `history` is the live [`OptHistory`](@ref) (its first `history.n` entries
+  are filled);
 - `rediscretize(d, problem, state::OptState, ctx) -> Optimization`: the new problem (for example
-  `HyperShape.Methods.rebuild(problem)`); `solve!` checks it and continues from `state`;
+  `HyperShape.Methods.rebuild(problem)`, or `rebuild(problem; what = :physics)` to keep the design), called with
+  `ctx.phase == :setup`; `solve!` checks it (new variables, unless the design is kept, and new functionals; the same
+  blocks and number of values of z, the same frozen cells, the same constraints with the same bounds and kind, the
+  same monitors and output, a continued `TanhProjection` in the new maps) and continues from `state`. A change of
+  mesh (another number of values) is not supported yet;
 - `discretization_label(d)`: the line of the banner.
+
+A rebuild costs the calls of the factories, one forward solve and one filter (counted in the summary of the run, not
+in the rows of the history). An error at a rebuild, or before the first iteration after it, keeps the state of the
+rebuild (with the memory of the optimiser) in `problem.state[]` and in the checkpoint.
 """
 abstract type Discretization end
 
@@ -30,8 +40,8 @@ Builds the problem again on the same mesh, calling the factories of `Optimizatio
 physics_setup)` after the accepted iterations `at` (an integer or a collection) or every `every` iterations: both
 factories (`what = :design`) or only `physics_setup`, with the same design (`what = :physics`). The run continues from
 the state captured at that iteration (the path of `resume`), so with linear states solved by direct solvers it is the
-run of `FixedMesh()` bit for bit (the counts of solves aside: one forward solve more per rebuild in the middle of a
-stage). It checks that the factories capture nothing of the problem they replace, before paying for a change of mesh:
+run of `FixedMesh()` bit for bit (the counts of solves aside: one forward solve and one filter more per rebuild, in
+the summary). A run resumed from a checkpoint written at an iteration of a rebuild does not rebuild there again. It checks that the factories capture nothing of the problem they replace, before paying for a change of mesh:
 at each rebuild the objective at the rebuilt problem is compared with the one of the history (`identical`, or its
 relative difference, on screen). A nonlinear state or an iterative solver starts from another initial guess after a
 rebuild, and agrees only to its tolerance.

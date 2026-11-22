@@ -42,7 +42,10 @@ x)` returns a named tuple with `objective` and optionally `constraints`, `monito
 `problem.design` and `problem.physics` (for example `problem.physics.θ`). What is continued or does not depend on the
 mesh (a `TanhProjection` of a `Continuation`, a `Parameter`, the optimiser) is created once, outside the factories,
 and used inside them; everything that depends on the mesh (spaces, measures, fields, states, functionals, monitors,
-output) is created inside. The factories may be called several times: they should have no other effects.
+output) is created inside. The factories may be called several times: they should have no other effects. A name
+close to one of the contract (`monitor`, `constraint`, `outputs`, `post`, `driver`, `objectives`, `J`) without the
+right one is an error. After a run with rebuilds the variable `problem` of the script is the first problem:
+the last one is `result.problem` (both share `problem.state[]`).
 
 The problem owns the context `ctx` ([`OptContext`](@ref)) that reaches the solve functions of the user, and
 `problem.state[]`, the last [`OptState`](@ref) captured by `solve!` (at the end of a run, after a failure or an
@@ -67,22 +70,32 @@ end
 Optimization(z::OptVariables; objective, constraints = (;)) = _optimization(z, objective, constraints)
 Optimization(; objective, constraints = (;)) = _optimization(nothing, objective, constraints)
 
-Optimization(model; design_setup, physics_setup) =
+function Optimization(model; design_setup = nothing, physics_setup = nothing, kwargs...)
+  (design_setup === nothing || physics_setup === nothing || !isempty(kwargs)) &&
+    throw(ArgumentError("Optimization: give the variables z and the functionals, Optimization(z; objective, constraints), " *
+                        "or a model and the two factories, Optimization(model; design_setup, physics_setup)"))
   _from_setup(ProblemSetup(model, design_setup, physics_setup), OptContext(:optimization), Ref{Any}(nothing), nothing)
+end
 
 """
-    HyperShape.Methods.rebuild(problem; what = :design) -> Optimization
+    HyperShape.Methods.rebuild(problem; what = :design, model = problem.setup.model) -> Optimization
 
 Builds the problem again with its factories (a problem built with `Optimization(model; design_setup, physics_setup)`):
-both (`what = :design`) or only `physics_setup`, with the design of `problem` (`what = :physics`). The new problem
+both (`what = :design`) or only `physics_setup`, with the design of `problem` (`what = :physics`), on `model` (the
+same one by default; another model is for the discretisations that change the mesh, later). The new problem
 shares the context and `state` of `problem`; the values of `z` are not copied (`solve!` restores them from the state
 at a rebuild). Used by the discretisations of [`solve!`](@ref) (`RebuildCheck`).
 """
-function rebuild(problem::Optimization; what::Symbol = :design)
+function rebuild(problem::Optimization; what::Symbol = :design, model = nothing)
   problem.setup === nothing &&
     throw(ArgumentError("rebuild: the problem has no factories; build it with Optimization(model; design_setup, physics_setup)"))
   what in (:design, :physics) || throw(ArgumentError("rebuild: what must be :design or :physics"))
-  _from_setup(problem.setup, problem.ctx, problem.state, what === :physics ? problem.design : nothing)
+  setup = problem.setup
+  if model !== nothing && model !== setup.model
+    what === :physics && throw(ArgumentError("rebuild: a new model needs the design built again (what = :design)"))
+    setup = ProblemSetup(model, setup.design_setup, setup.physics_setup)
+  end
+  _from_setup(setup, problem.ctx, problem.state, what === :physics ? problem.design : nothing)
 end
 
 """
@@ -133,7 +146,7 @@ function _from_setup(setup::ProblemSetup, ctx, state, design)
   F = physics.objective
   (F isa AbstractFunctional && get_designfields(physical_fields(F)) === design.x) ||
     throw(ArgumentError("Optimization: the objective returned by physics_setup is not built on the x it received"))
-  haskey(physics, :output) && !applicable(physics.output, nothing, nothing) &&
+  haskey(physics, :output) && !hasmethod(physics.output, Tuple{OptPostProcessor{_SetupDriver},OptContext}) &&
     throw(ArgumentError("Optimization: the output returned by physics_setup must be a function (post, ctx) -> …"))
   p = _optimization(design.z, F, get(physics, :constraints, (;)))
   Optimization(_Validated(), p.z, p.objective, p.constraints; ctx, state, setup, design, physics)
@@ -236,7 +249,7 @@ metric_label(::AbstractMethod) = nothing
 Density method (SIMP, RAMP or any interpolation written by the user in the weak forms): the step is `optimizer` (any
 `Optimizer`: `OC(…)`, `SiMPL(…)`). `metric`: [`LumpedMass`](@ref)`(dΩ)`, [`Euclidean`](@ref)`()`, a vector of
 positive weights (one per entry of z: `inner(x, y) = Σ mᵢ xᵢ yᵢ`), an object of the user with a method
-[`metric_weights`](@ref)`(m, z) -> Vector` (called once, at the start of `solve!`), or a named tuple with one of them
+[`metric_weights`](@ref)`(m, z) -> Vector` (called once at the start of `solve!` and again after each rebuild of the problem), or a named tuple with one of them
 per block of z. SiMPL uses
 it in its step and its optimality measure, and needs it (no default). OC uses it only for the stationarity measure
 (see [`StopCriteria`](@ref)); its default is `Euclidean()`, which makes that measure depend on the mesh.
@@ -295,7 +308,7 @@ _valid_metric(m) = !(m isa Union{Nothing,Symbol,AbstractString,Number,Tuple,Abst
     metric_weights(m, z) -> AbstractVector
 
 Weights of a diagonal metric of the user, one per entry of the variables `z` (or of the block, in a named tuple of
-metrics: then `z` is the space of that block). Called once, at the start of [`solve!`](@ref); they must be positive.
+metrics: then `z` is the space of that block). Called once at the start of [`solve!`](@ref) and again after each rebuild of the problem; they must be positive.
 """
 function metric_weights end
 

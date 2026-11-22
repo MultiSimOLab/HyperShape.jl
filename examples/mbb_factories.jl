@@ -51,7 +51,7 @@ function run_mbb_factories(; nx = 60, ny = 20, maxiter = 300, out = "results/mbb
 
     C   = Functional((u, θ) -> ∫(t ⋅ u)dΓ, S; dJdu = SelfAdjoint(), scale = :initial)
     Vol = Volume(θ, dΩ; max_fraction = 0.5)
-    (; objective = C, constraints = (volume = Vol,),
+    (; objective = C, constraints = (volume = Vol,), θ, S,                  # θ and S: result.problem.physics.θ
        monitors = (grey = Grey(θ, dΩ),),
        output   = (post, ctx) -> write_step(post, Ω, "rho" => θ.ρ, "x" => x.ρ, "u" => get_state(S)))
   end
