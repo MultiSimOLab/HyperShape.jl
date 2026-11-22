@@ -301,10 +301,8 @@ function is_differentiable_field(θ::PhysicalFields, name::Symbol)
 end
 is_differentiable(θ::PhysicalFields) = all(n -> is_differentiable_field(θ, n), getfield(θ, :names))
 
-# whether a chain of θ has an Ersatz stage (for the messages of check_consistency), and whether every Ersatz stage
-# of θ has a cell cut by the interface
+# whether a chain of θ has an Ersatz stage (refused by DensityMethod; the messages of check_consistency)
 has_ersatz(θ::PhysicalFields) = any(c -> any(s -> s isa ErsatzStage, c), getfield(θ, :chains))
-has_interface(θ::PhysicalFields) = all(c -> all(s -> !(s isa ErsatzStage) || has_interface(s), c), getfield(θ, :chains))
 
 """
     DesignMeasures

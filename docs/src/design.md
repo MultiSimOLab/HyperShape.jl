@@ -118,8 +118,9 @@ Vol = Volume(θ, dΩd; max_fraction = 0.4)
 - Cost of `Ersatz()` (Mac M5 Max, one thread, measured by the design adviser and the reviewer): 65 536 quadrilaterals,
   0.8 ms to update and 1.0 ms to pull back; 82 944 tetrahedra, 0.6 and 0.55 ms; a hexahedron cut by the interface
   about 350 ns (24 tetrahedra), one without interface a few ns.
-- With the derivative with respect to the design (`DensityMethod`) only the cut cells move: a design without them is
-  refused when the run starts, and a scaled start that crosses a plateau of φ at a bound can end without them.
+- Interface maps are for interface methods (reaction–diffusion, next): `DensityMethod` refuses `Step()` and
+  `Ersatz()` when the run starts (a density method interpolates the density itself, SIMP or RAMP). In interface
+  methods the starting design need not meet the constraint: the evolution takes it there.
 
 Planned: global parameters as blocks (applied voltage, fibre angle), scaling and symmetries in the map `z → x`,
 physical fields that depend on several design fields, material interpolation in the map `x → θ`.

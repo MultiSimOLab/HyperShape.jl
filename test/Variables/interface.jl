@@ -231,22 +231,13 @@ end
     @test get_values(zf) ≈ get_free_dof_values(interpolate(x -> x[1] - 0.5, V1))
   end
 
-  @testset "Ersatz in the loop of DensityMethod (smoke test), an infeasible start, allocations" begin
-    holes(x) = -0.3 + 0.8cos(4π * x[1]) * cos(4π * x[2])
-    p = interface_problem(; n = 16, init = holes, filter = true, maxfrac = 0.4)
-    problem = Optimization(p.z; objective = p.J, constraints = (volume = p.Vol,))
-    r = solve!(problem, DensityMethod(SiMPL(); metric = LumpedMass()); maxiter = 15, verbose = 0, stop = nothing)
-    @test r.history.objective[end] < r.history.objective[1]
-    @test r.history.constraints.volume[end] <= 1e-3
-    # an infeasible start whose constraint depends on entries without derivative there: every entry is scaled
-    p = interface_problem(; n = 8, init = x -> x[1] - 0.2, maxfrac = 0.5)
-    problem = Optimization(p.z; objective = p.J, constraints = (volume = p.Vol,))
-    r = solve!(problem, DensityMethod(SiMPL(); metric = LumpedMass()); maxiter = 3, verbose = 0, stop = nothing)
-    @test r.start_scaling !== nothing && r.history.constraints.volume[1] <= 1e-3
-    # a design without interface is refused (its derivative vanishes)
-    p = interface_problem(; n = 8, init = x -> 0.5, maxfrac = 0.9)
-    problem = Optimization(p.z; objective = p.J, constraints = (volume = p.Vol,))
-    @test_throws r"no cell is cut" solve!(problem, DensityMethod(SiMPL(); metric = LumpedMass()); maxiter = 3, verbose = 0)
+  @testset "DensityMethod refuses Ersatz; Grey, ambiguities, allocations" begin
+    # the objective and a constraint through Ersatz(), with and without a filter
+    for filter in (false, true)
+      p = interface_problem(; n = 8, filter, maxfrac = 0.5)
+      problem = Optimization(p.z; objective = p.J, constraints = (volume = p.Vol,))
+      @test_throws r"interface map" solve!(problem, DensityMethod(SiMPL(); metric = LumpedMass()); maxiter = 2, verbose = 0)
+    end
     # Grey on the design measures; no method ambiguities in the maps
     p = interface_problem(; n = 8)
     @test HyperShape.Methods.monitor_value(Grey(p.θ, p.dΩd)) >= 0

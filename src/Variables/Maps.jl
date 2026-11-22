@@ -451,8 +451,8 @@ HelmholtzFilter(…)`); triangles, quadrilaterals, tetrahedra and hexahedra. A v
 quadrature.
 
 The derivative is nonzero only on the cells cut by the interface: a design without interface (uniform φ, or φ at a
-bound everywhere) does not move, and holes are not nucleated by this derivative; `DensityMethod` refuses to start
-from a design without cut cells. A cell with `φ ≡ 0` counts as material (derivative zero). With a frozen zone `φ = 1`
+bound everywhere) does not move, and holes are not nucleated by this derivative. Interface maps are for interface
+methods (reaction–diffusion): `DensityMethod` refuses them when the run starts. A cell with `φ ≡ 0` counts as material (derivative zero). With a frozen zone `φ = 1`
 the cells next to it are partly material too (its nodes on their boundary have φ = 1). Cost (one thread, Mac M5 Max):
 about 12 ns per quadrilateral and 7 ns per tetrahedron to update or pull back; a hexahedron cut by the interface about
 350 ns (24 tetrahedra), one without interface a few ns.
@@ -555,9 +555,6 @@ function _fractions!(χ, s, fv, dv)
   end
   χ
 end
-
-# whether some cell is cut by the interface (0 < χ < 1)
-has_interface(s::ErsatzStage) = any(χ -> 0 < χ < 1, get_free_dof_values(s.out))
 
 function accumulate!(s::ErsatzStage, L, w::Float64, key)
   assemble_form!(s.b, s.assem, L, key)          # L applied to the cell-wise basis: the derivative per cell
