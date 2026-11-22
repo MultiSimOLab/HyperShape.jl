@@ -17,13 +17,17 @@ permissions: # needed to allow julia-actions/cache to delete old caches that it 
 
 jobs:
   test:
-    name: Tests
+    name: Tests (${{ matrix.version }}, ${{ matrix.group }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    env:
+      HYPERSHAPE_TEST_GROUP: ${{ matrix.group }}   # the suite in parallel jobs (see test/runtests.jl)
+      JULIA_NUM_THREADS: 4                          # the threaded kernels and the asynchronous writers
     strategy:
       fail-fast: false
       matrix:
         version: ['min', '1'] # min = lowest Julia allowed by [compat]
+        group: ['core', 'methods', 'validation']
         arch: [x64]
         os: [ubuntu-latest]
 
