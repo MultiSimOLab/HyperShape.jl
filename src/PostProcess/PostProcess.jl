@@ -138,6 +138,7 @@ include("FieldWriters.jl")
     OptPostProcessor(driver; every, filepath = nothing, initial = true, history = true, name = "optimization",
                      format = :vtu, precision = Float64, compress = false, async = Threads.nthreads() > 1,
                      maxpending = 2)
+    OptPostProcessor(; every, filepath = nothing, …)
 
 Post-processing of an optimisation: pass it to `solve!(…; post)`. `solve!` calls `driver(post, ctx)` (written
 by the user, as the driver of HyperFEM's `PostProcessor`) with the fields, the variables and the forward state at the
@@ -170,6 +171,10 @@ fails or is interrupted. An error of a write during the run stops it (it is thro
 appears when the writers are closed at the end is logged with `@error` and `solve!` still returns its result.
 After a stall in a continuation stage whose last iteration was already written, the result of `solve!` is at the new
 stage but that iteration is not written again.
+
+The second form has no driver: it takes the `output` returned by the `physics_setup` of a problem built with
+`Optimization(model; design_setup, physics_setup)` (a function `(post, ctx) -> …`, built again with the problem when
+`solve!` rebuilds it; the writers are closed at each rebuild).
 
 The driver can write with [`write_step`](@ref) (HyperShape's fast writer), add any file it writes itself (`get_pvd(post)[ctx.iteration]
 = "file.vtu"`) or write nothing to the collection. Fields: `post.filepath`, `post.every`, `post.iteration` (of the
@@ -219,6 +224,15 @@ function OptPostProcessor(driver; every::Integer, filepath = nothing, initial::B
   OptPostProcessor(driver, Int(every), filepath === nothing ? nothing : abspath(filepath), initial, history, String(name),
                    nothing, -1, nothing, -1, format, precision, compress, async, Int(maxpending), Dict{String,Any}(), nothing)
 end
+
+# the driver of a post-processor built without one: the output of the factories of the problem, set by solve!
+mutable struct _SetupDriver
+  f::Any
+end
+(d::_SetupDriver)(post, ctx) = d.f === nothing ?
+  throw(ArgumentError("OptPostProcessor: built without a driver and the problem gives no output")) : d.f(post, ctx)
+
+OptPostProcessor(; kwargs...) = OptPostProcessor(_SetupDriver(nothing); kwargs...)
 
 _check_name(name, who) =
   (isempty(name) || occursin('/', name) || occursin('\\', name)) &&

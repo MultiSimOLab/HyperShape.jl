@@ -161,7 +161,7 @@ Writes the state of the optimisation to the folder `filepath` every `every` acce
 optimisation stops or fails: `checkpoint.toml` (format version 3: iteration, continuation stage, scales of the
 functionals by name, who treats each constraint and the multipliers and penalties of the augmented Lagrangian by
 name, the offsets of the linear constraints, the method and the optimiser, sizes and the names of the other files;
-a `discretization` entry is reserved for later versions and not read), `z_<iteration>.bin` (the design, raw `Float64`), `history_<iteration>.csv`
+the discretisation and its number of rebuilds), `z_<iteration>.bin` (the design, raw `Float64`), `history_<iteration>.csv`
 and, for optimisers that save one, `memory_<iteration>.bin` (see [`memory`](@ref HyperShape.Optimizers.memory): its numbers and then its vectors, raw
 `Float64`). These are the fields of an [`OptState`](@ref).
 The data files are written first and `checkpoint.toml` last, under a temporary name and then renamed, so they always
@@ -370,7 +370,9 @@ sync with it: `get_values(result.z)`), `history` ([`OptHistory`](@ref)), `time` 
 state of the optimiser, for advanced use) and `start_scaling` (the factor `t` by which an infeasible starting design
 was scaled towards the lower bound, `nothing` if it was not) and `multipliers` (named tuple, one per constraint: the
 last multiplier reported by the optimiser for a native constraint, the final `λ` of the augmented Lagrangian, after
-its last update, for the others). The full state of the run is in `problem.state[]` ([`OptState`](@ref)).
+its last update, for the others) and `problem` (the [`Optimization`](@ref) of the last stretch of the run: the problem
+given to `solve!`, or the last one built by a rebuild of the `discretization`). The full state of the run is in
+`problem.state[]` ([`OptState`](@ref)).
 """
 struct OptResult{Z,S}
   status::Symbol
@@ -383,6 +385,7 @@ struct OptResult{Z,S}
   state::S
   start_scaling::Union{Nothing,Float64}
   multipliers::NamedTuple
+  problem::Any
 end
 
 Base.show(io::IO, r::OptResult) =
@@ -462,8 +465,10 @@ The state of an optimisation by name, what a [`Checkpoint`](@ref) writes and `re
 (names), `memory` (of the step, see [`memory`](@ref HyperShape.Optimizers.memory); `nothing` after a failure or an
 exception: a run resumed from such a state starts the optimiser again from `init` and is not the uninterrupted one),
 `handled` (for each constraint, `:native` or `:lagrangian`), `lagrangian` (`nothing`, or the multipliers, penalties,
-penalty references and number of updates of the augmented Lagrangian, by name) and `linear_offsets` (the offset `V`
-of each linear constraint, kept so that a resumed run uses the same bits). Nothing in it is tied to the mesh except
+penalty references and number of updates of the augmented Lagrangian, by name), `linear_offsets` (the offset `V`
+of each linear constraint, kept so that a resumed run uses the same bits), `discretization` (the name of the
+discretisation of the run) and `events` (its rebuilds so far). A rebuild of the problem during `solve!` goes through
+this state, as a resume does. Nothing in it is tied to the mesh except
 the vectors of the design (`z` and those of `memory`).
 """
 struct OptState
@@ -482,13 +487,16 @@ struct OptState
   handled::Dict{Symbol,Symbol}
   lagrangian::Union{Nothing,NamedTuple}
   linear_offsets::Dict{Symbol,Float64}
+  discretization::String
+  events::Int
 end
 
 Base.show(io::IO, s::OptState) =
   print(io, "OptState(iteration ", s.iteration, ", stage ", s.stage, ", ", length(s.z), " variables, ", s.method, ")")
 
 # `opt_state === nothing` (a failure): the memory of the optimiser is not kept, a resumed run starts from `init`
-function _capture(problem, method, opt, opt_state, zk, hist, k, stage, stage_iters, cont_names, oracle)
+function _capture(problem, method, opt, opt_state, zk, hist, run, cont_names, oracle)
+  k, stage, stage_iters = run.k, run.stage, run.stage_iters
   names = collect(keys(problem.constraints))
   al = oracle isa AugmentedLagrangianOracle ? oracle : nothing
   fo = _fo(oracle)
@@ -505,7 +513,8 @@ function _capture(problem, method, opt, opt_state, zk, hist, k, stage, stage_ite
               penalties = Dict{Symbol,Float64}(n => al.μ[i] for (i, n) in enumerate(names)),
               penalty_reference = Dict{Symbol,Float64}(n => al.vref[i] for (i, n) in enumerate(names)),
               updates = al.updates),
-           Dict{Symbol,Float64}(n => fo.V[i] for (i, n) in enumerate(names) if fo.a[i] !== nothing))
+           Dict{Symbol,Float64}(n => fo.V[i] for (i, n) in enumerate(names) if fo.a[i] !== nothing),
+           run.kind, run.events)
 end
 _gather_vec(x) = copyto!(Vector{Float64}(undef, length(x)), x)
 
@@ -562,7 +571,7 @@ function _write_checkpoint(c::Checkpoint, st::OptState)
     meta["penalty_reference"] = Dict{String,Any}(String(n) => v for (n, v) in st.lagrangian.penalty_reference)
     meta["lagrangian_updates"] = st.lagrangian.updates
   end
-  meta["discretization"] = Dict{String,Any}("kind" => "FixedMesh", "events" => 0)   # reserved
+  meta["discretization"] = Dict{String,Any}("kind" => st.discretization, "events" => st.events)
   _atomic_write(io -> TOML.print(io, meta), joinpath(c.filepath, "checkpoint.toml"))
   for f in readdir(c.filepath)
     (occursin(r"^(z|memory)_\d+\.bin$", f) || occursin(r"^history_\d+\.csv$", f)) && f ∉ (zfile, hfile, mfile) &&
@@ -574,8 +583,8 @@ const _CHECKPOINT_VERSION = 3
 const _OFFSET_RTOL = 1e-9    # saved and recomputed offsets of a linear constraint closer than this are the same
 
 # the state of the run into problem.state[] and, with a checkpoint, to its files
-function _save_state!(checkpoint, problem, method, opt, opt_state, zk, hist, k, stage, stage_iters, cont_names, oracle)
-  st = _capture(problem, method, opt, opt_state, zk, hist, k, stage, stage_iters, cont_names, oracle)
+function _save_state!(checkpoint, problem, method, opt, opt_state, zk, hist, run, cont_names, oracle)
+  st = _capture(problem, method, opt, opt_state, zk, hist, run, cont_names, oracle)
   problem.state[] = st
   checkpoint === nothing || _write_checkpoint(checkpoint, st)
   st
@@ -626,7 +635,9 @@ function load_checkpoint(filepath::AbstractString)
            haskey(meta, "multipliers") ?
              (multipliers = _by_name(meta["multipliers"]), penalties = _by_name(meta["penalties"]),
               penalty_reference = _by_name(meta["penalty_reference"]), updates = Int(meta["lagrangian_updates"])) : nothing,
-           _by_name(get(meta, "linear_offsets", Dict())))
+           _by_name(get(meta, "linear_offsets", Dict())),
+           String(get(get(meta, "discretization", Dict()), "kind", "FixedMesh")),
+           Int(get(get(meta, "discretization", Dict()), "events", 0)))
 end
 
 _by_name(d) = Dict{Symbol,Float64}(Symbol(k) => Float64(v) for (k, v) in d)
@@ -700,7 +711,7 @@ _stop_reason(stop::Union{Nothing,StopCriteria}, info, hist, stage_start, ctx) = 
 """
     solve!(problem::Optimization, method::AbstractMethod; maxiter, on_failure = RejectStep(),
            stop = default_stop(optimizer), continuation = nothing, checkpoint = nothing, post = nothing,
-           monitors = (;), resume = nothing, verbose = 2, io = stdout) -> OptResult
+           monitors = (;), resume = nothing, discretization = FixedMesh(), verbose = 2, io = stdout) -> OptResult
 
 Runs the optimisation from the current values of `z`. Mandatory: `maxiter` (total iterations, resumed ones included).
 Optional: `on_failure` ([`RejectStep`](@ref), default `RejectStep(shrink = 0.5, max_attempts = 5)`), `stop`
@@ -719,6 +730,15 @@ design) and
 history, the table and the closing line), `resume` (the folder of a [`Checkpoint`](@ref), the result of
 [`load_checkpoint`](@ref) or `problem.state[]`, an [`OptState`](@ref)), `verbose` and `io`. An `OC` whose `move` is continued by `continuation` gets its own
 `move` back when `solve!` returns or throws; the other continued parameters keep the values of the last stage.
+
+`discretization` ([`FixedMesh`](@ref)`()` by default: the problem is not built again) says when the problem is built
+again during the run, which needs a problem built with `Optimization(model; design_setup, physics_setup)`:
+`HyperShape.Methods.RebuildCheck` calls its factories again on the same mesh (a check of the factories before a
+change of mesh). The run continues from the state captured at the rebuild (as a resume), with the same history,
+checkpoint and post-processor; the result carries the last problem (`result.problem`). With factories, `monitors`
+and the driver of the post-processor come from `physics_setup` (`monitors`, `output`; the post-processor is then built
+without a driver, `OptPostProcessor(; every, filepath)`); with a discretisation that rebuilds, they cannot be given
+here, nor a metric fixed on the mesh (`LumpedMass(dΩ)`; use `LumpedMass()`).
 
 Screen output (`verbose`, default `2`, printed to `io`): `0` nothing; `1` a banner (variables, constraint, metric,
 continuation, stopping criteria and failure handling, each marked when it is a default), the events (continuation
@@ -758,18 +778,25 @@ and, with their states, one adjoint solve per state in the same reverse sweep as
 """
 function solve!(problem::Optimization, method::AbstractMethod; maxiter::Integer, on_failure = _DefaultFailure(),
                 stop = _DefaultStop(), continuation = nothing, checkpoint = nothing, post = nothing, monitors = (;),
-                resume = nothing, verbose = 2, io::IO = stdout)
+                resume = nothing, discretization = FixedMesh(), verbose = 2, io::IO = stdout)
   t_call = time()
   schedule = continuation
   z, ctx, opt = problem.z, problem.ctx, stepper(method)
+  discretization isa Discretization ||
+    throw(ArgumentError("solve!: discretization must be a Discretization, such as FixedMesh() (the default)"))
+  needs_setup(discretization) && problem.setup === nothing &&
+    throw(ArgumentError("solve!: discretization = $(discretization_label(discretization)) builds the problem again: " *
+                        "build it with Optimization(model; design_setup, physics_setup)"))
   monitors isa NamedTuple || throw(ArgumentError("solve!: monitors must be a named tuple, (grey = Grey(θ, dΩ),)"))
+  monitors = _run_monitors(problem, monitors, discretization)
   for (n, m) in pairs(monitors)
     applicable(monitor_value, m) || throw(ArgumentError("solve!: monitor $n: no monitor_value method for $(typeof(m))"))
   end
   resume isa AbstractString && (resume = load_checkpoint(resume))
   resume === nothing || resume isa OptState ||
     throw(ArgumentError("solve!: resume must be the folder of a Checkpoint, the result of load_checkpoint or problem.state[]"))
-  defaults = (stop = stop isa _DefaultStop, on_failure = on_failure isa _DefaultFailure)
+  defaults = (stop = stop isa _DefaultStop, on_failure = on_failure isa _DefaultFailure,
+              discretization = discretization isa FixedMesh)
   defaults.stop && (stop = default_stop(opt))
   defaults.on_failure && (on_failure = RejectStep())
   on_failure isa RejectStep || throw(ArgumentError("solve!: on_failure must be a RejectStep"))
@@ -781,6 +808,11 @@ function solve!(problem::Optimization, method::AbstractMethod; maxiter::Integer,
   checkpoint === nothing || checkpoint isa Checkpoint || throw(ArgumentError("solve!: checkpoint must be a Checkpoint"))
   post === nothing || post isa OptPostProcessor ||
     throw(ArgumentError("solve!: post must be an OptPostProcessor, for example OptPostProcessor((post, ctx) -> …; every = 1)"))
+  _check_output(problem, post, discretization)
+  needs_setup(discretization) && _tied_to_mesh(method) &&
+    throw(ArgumentError("solve!: the metric of the method is tied to the mesh and discretization = " *
+                        "$(discretization_label(discretization)) builds the problem again: use LumpedMass(), Euclidean() " *
+                        "or an object with a metric_weights(m, z) method"))
   maxiter >= 1 || throw(ArgumentError("solve!: maxiter must be at least 1"))
   if stop isa StopCriteria && (stop.kkt_tol !== nothing || stop.kkt_rtol !== nothing) && !computes_kkt(opt)
     throw(ArgumentError("StopCriteria: kkt needs an optimiser that computes an optimality measure ($(nameof(typeof(opt))) does not)"))
@@ -793,62 +825,153 @@ function solve!(problem::Optimization, method::AbstractMethod; maxiter::Integer,
   check_problem(method, problem)
   native = _native_split(problem, opt, augmented_lagrangian(method))
   pr = _Printer(io, verbose, schedule, keys(monitors), length(problem.constraints) > 1)
-  # a nonlinear constraint is met to the tolerance of the optimiser: above it, the value is shown in red
-  # a constraint violated beyond its tolerance is shown in red (set once the split is known; see below)
   cont_names = schedule === nothing ? () : schedule.names
-  Fs = (problem.objective, (c.F for c in problem.constraints)...)
 
   k0, stage, stage_iters = 0, schedule === nothing ? 0 : 1, 0
   cnames = keys(problem.constraints)
   hist = OptHistory(maxiter, cont_names; constraints = cnames, monitors = keys(monitors))
   if resume !== nothing
-    length(resume.z) == length(z) || throw(ArgumentError("solve!: the checkpoint has $(length(resume.z)) values, z has $(length(z))"))
-    resume.blocks == collect(z.names) || throw(ArgumentError("solve!: the checkpoint has blocks $(resume.blocks), z has $(collect(z.names))"))
-    for (n, b) in zip(z.names, z.blocks)
-      nc = b.zone === nothing ? 0 : b.zone.ncells
-      get(resume.frozen_cells, n, nc) == nc || throw(ArgumentError("solve!: the checkpoint has $(resume.frozen_cells[n]) " *
-                                                                  "frozen cells in $n, z has $nc"))
-    end
-    resume.continuation == collect(cont_names) ||
-      throw(ArgumentError("solve!: the checkpoint continues $(resume.continuation), the continuation $(collect(cont_names))"))
-    nst = schedule === nothing ? 0 : schedule.nstages
-    (schedule === nothing ? resume.stage == 0 : 1 <= resume.stage <= nst) ||
-      throw(ArgumentError("solve!: the checkpoint is at stage $(resume.stage); the continuation has $nst stages"))
-    Set(keys(resume.scales)) == Set((:objective, cnames...)) ||
-      throw(ArgumentError("solve!: the checkpoint has functionals $(join(keys(resume.scales), ", ")); the problem has " *
-                          join((:objective, cnames...), ", ")))
-    resume.iteration < maxiter || throw(ArgumentError("solve!: the checkpoint is already at iteration $(resume.iteration) ≥ maxiter"))
-    set_values!(z, resume.z)
-    # a scale fixed by :initial is restored; a scale given by the user stays
-    foreach((F, n) -> (F.scale_mode === :initial && (F.scale[] = getproperty(resume.scales, n))), Fs, (:objective, cnames...))
+    _restore!(problem, resume, schedule, cont_names, maxiter)
     k0, stage, stage_iters = resume.iteration, resume.stage, resume.stage_iterations
     _prefill!(hist, resume.history)
     dropped = setdiff(resume.history.monitor_names, collect(keys(monitors)))
     isempty(dropped) || _print_event(pr, "· monitors of the checkpoint not given now (their columns are dropped): " *
                                          join(dropped, ", "), :yellow)
   end
+  run = _LoopState(k0, stage, stage_iters, hist.n - stage_iters, (0, 0, 0), k0, Float64[], (0, 0, 0),
+                   resume === nothing ? 0 : resume.events, string(nameof(typeof(discretization))), false, 0.0, nothing)
 
   # an optimiser whose parameters the schedule continues gets them back at the end (the stages change them)
   restore_opt = _restorer(opt)
   try
-  # the parameters of the first stage are applied before the banner, which shows them
-  cont_buf = zeros(length(cont_names))
-  set_context!(ctx, :continuation, schedule === nothing ? NamedTuple() : _apply_stage!(schedule, stage, cont_buf))
-  _print_banner(pr, problem, method, maxiter, stop, on_failure, defaults, schedule, resume, native)
-  set_context!(ctx, :iteration, k0)
-  set_context!(ctx, :attempt, 0)
-  set_context!(ctx, :trial, 0)
+    # the parameters of the first stage are applied before the banner, which shows them
+    cont_buf = zeros(length(cont_names))
+    set_context!(ctx, :continuation, schedule === nothing ? NamedTuple() : _apply_stage!(schedule, stage, cont_buf))
+    _print_banner(pr, problem, method, maxiter, stop, on_failure, defaults, schedule, resume, native, discretization)
+    post === nothing && problem.setup !== nothing && haskey(problem.physics, :output) &&
+      _print_event(pr, "· physics_setup returns an output but no post-processor is given: it is not called", :yellow)
+    discretization isa RebuildCheck && discretization.every == 0 && first(discretization.at) >= maxiter &&
+      _print_event(pr, "· RebuildCheck: no rebuild before maxiter = $maxiter (at = $(discretization.at))", :yellow)
+    set_context!(ctx, :iteration, k0)
+    set_context!(ctx, :attempt, 0)
+    set_context!(ctx, :trial, 0)
+    st = resume
+    isfirst = true
+    while true
+      # a function barrier: the types of the problem can change at a rebuild
+      out = try
+        _segment!(problem, method, opt, st, isfirst, run, hist, ctx, cont_buf, cont_names, maxiter, on_failure, stop,
+                  schedule, checkpoint, post, monitors, discretization, pr, t_call)
+      catch e
+        # an error after a rebuild and before its first accepted iteration (setting up the rebuilt problem, the forward
+        # solve there): the state of the rebuild, with the memory of the optimiser, is the one to keep
+        !isfirst && run.k == st.iteration && !(e isa OptimizationFailure) && _keep_event_state!(problem, st, checkpoint, pr, run, e)
+        rethrow()
+      end
+      out isa OptResult && return out
+      st = out
+      problem = _rediscretize!(discretization, problem, st, run, post, schedule, checkpoint, pr)
+      monitors = _run_monitors(problem, (;), discretization)
+      for (n, m) in pairs(monitors)
+        applicable(monitor_value, m) || throw(ArgumentError("solve!: monitor $n: no monitor_value method for $(typeof(m))"))
+      end
+      _restore!(problem, st, schedule, cont_names, maxiter)
+      isfirst = false
+    end
+  finally
+    restore_opt()
+    post isa OptPostProcessor && _post_close!(post; quiet = true)   # failure or interruption: finish the writes
+  end
+end
 
+# the monitors of a run: those of physics_setup, or those given to solve! (D2: one source)
+function _run_monitors(problem, given, d)
+  fm = problem.setup === nothing ? nothing : get(problem.physics, :monitors, nothing)
+  if fm !== nothing
+    fm isa NamedTuple || throw(ArgumentError("solve!: the monitors returned by physics_setup must be a named tuple"))
+    isempty(given) || throw(ArgumentError("solve!: the monitors are given twice: returned by physics_setup and given to " *
+                                          "solve!; give them in one place"))
+    return fm
+  end
+  needs_setup(d) && !isempty(given) &&
+    throw(ArgumentError("solve!: discretization = $(discretization_label(d)) builds the problem again and the monitors " *
+                        "read fields of the old one: return them from physics_setup (monitors = (grey = Grey(θ, dΩ),))"))
+  given
+end
+
+# the driver of the post-processor: its own, or the output of physics_setup
+function _check_output(problem, post, d)
+  post === nothing && return nothing
+  out = problem.setup === nothing ? nothing : get(problem.physics, :output, nothing)
+  if post.driver isa _SetupDriver
+    out === nothing && throw(ArgumentError("solve!: the OptPostProcessor has no driver and the problem gives no output: " *
+                                           "give the driver to OptPostProcessor, or return output = (post, ctx) -> … " *
+                                           "from physics_setup"))
+  else
+    out === nothing || throw(ArgumentError("solve!: the output is given twice: the driver of the OptPostProcessor and the " *
+                                           "output of physics_setup; build the post-processor with OptPostProcessor(; every, filepath)"))
+    needs_setup(d) && throw(ArgumentError("solve!: discretization = $(discretization_label(d)) builds the problem again " *
+                                          "and the driver reads fields of the old one: return it from physics_setup " *
+                                          "(output = (post, ctx) -> …) and use OptPostProcessor(; every, filepath)"))
+  end
+  nothing
+end
+
+_set_output!(post, problem) =
+  (post !== nothing && post.driver isa _SetupDriver && (post.driver.f = problem.physics.output); nothing)
+
+# a metric fixed on the mesh (a measure, a vector of weights) does not follow a rebuild
+_tied_to_mesh(m) = false
+_tied_to_mesh(m::DensityMethod) = _tied_metric(m.metric)
+_tied_metric(m) = (m isa LumpedMass && m.measure !== nothing) || m isa AbstractVector
+_tied_metric(m::NamedTuple) = any(_tied_metric, values(m))
+
+# the problem brought to a captured state: checks, values of z, scales fixed by :initial
+function _restore!(problem, st, schedule, cont_names, maxiter)
+  z = problem.z
+  cnames = keys(problem.constraints)
+  Fs = (problem.objective, (c.F for c in problem.constraints)...)
+  length(st.z) == length(z) || throw(ArgumentError("solve!: the checkpoint has $(length(st.z)) values, z has $(length(z))"))
+  st.blocks == collect(z.names) || throw(ArgumentError("solve!: the checkpoint has blocks $(st.blocks), z has $(collect(z.names))"))
+  for (n, b) in zip(z.names, z.blocks)
+    nc = b.zone === nothing ? 0 : b.zone.ncells
+    get(st.frozen_cells, n, nc) == nc || throw(ArgumentError("solve!: the checkpoint has $(st.frozen_cells[n]) " *
+                                                             "frozen cells in $n, z has $nc"))
+  end
+  st.continuation == collect(cont_names) ||
+    throw(ArgumentError("solve!: the checkpoint continues $(st.continuation), the continuation $(collect(cont_names))"))
+  nst = schedule === nothing ? 0 : schedule.nstages
+  (schedule === nothing ? st.stage == 0 : 1 <= st.stage <= nst) ||
+    throw(ArgumentError("solve!: the checkpoint is at stage $(st.stage); the continuation has $nst stages"))
+  Set(keys(st.scales)) == Set((:objective, cnames...)) ||
+    throw(ArgumentError("solve!: the checkpoint has functionals $(join(keys(st.scales), ", ")); the problem has " *
+                        join((:objective, cnames...), ", ")))
+  st.iteration < maxiter || throw(ArgumentError("solve!: the checkpoint is already at iteration $(st.iteration) ≥ maxiter"))
+  set_values!(z, st.z)
+  # a scale fixed by :initial is restored; a scale given by the user stays
+  foreach((F, n) -> (F.scale_mode === :initial && (F.scale[] = getproperty(st.scales, n))), Fs, (:objective, cnames...))
+  nothing
+end
+
+# One stretch of the run on one problem: from the start (or the state `resume`) to the end of the run, or to a
+# rebuild, when it returns the state captured there.
+function _segment!(problem, method, opt, resume, isfirst, run, hist, ctx, cont_buf, cont_names, maxiter, on_failure, stop,
+                   schedule, checkpoint, post, monitors, discretization, pr, t_call)
+  z = problem.z
+  cnames = keys(problem.constraints)
+  k0 = run.k
+  native = _native_split(problem, opt, augmented_lagrangian(method))
+  isfirst || check_problem(method, problem)
   fo = build_oracle(method, problem)
   ops = _counters(problem)
-  cstart = map(_count, ops)
+  run.cstart = map(_count, ops)
   for i in 1:num_constraints(fo)
     _is_linear(fo, i) && _setup_constraint!(fo, i, ctx)
   end
   # the offsets of the linear constraints of the run that is resumed: computed again they could differ in the last
   # bits; a bound or scale changed by the user changes V beyond rounding, and then the new one is kept
   if resume !== nothing
-    for (i, n) in enumerate(keys(problem.constraints))
+    for (i, n) in enumerate(cnames)
       (fo.a[i] === nothing || !haskey(resume.linear_offsets, n)) && continue
       Vs = resume.linear_offsets[n]
       abs(fo.V[i] - Vs) <= _OFFSET_RTOL * max(abs(fo.V[i]), abs(Vs), 1.0) && (fo.V[i] = Vs)
@@ -858,9 +981,9 @@ function solve!(problem::Optimization, method::AbstractMethod; maxiter::Integer,
   zk = fo.zk
   copyto!(zk, get_values(z))
   resume === nothing || _check_handled(native, resume, cnames)
-  t_start = nothing
   if resume === nothing                       # a resumed design is the one the run left
     t_start = isempty(native) ? nothing : _make_feasible!(fo, zk, native[1])
+    run.start_scaling = t_start
     # a start feasible up to rounding (t within 1e-6 of 1) is not worth an event
     (t_start === nothing || t_start > 1 - 1e-6) || _print_event(pr, "· the starting design violated the constraint; it was scaled " *
                                             "towards the lower bound by $(round(t_start, sigdigits = 4)) to meet it", :yellow)
@@ -879,11 +1002,21 @@ function solve!(problem::Optimization, method::AbstractMethod; maxiter::Integer,
       _print_event(pr, "· the memory of the optimiser was not restored (checkpoint written by $(resume.optimizer))", :yellow)
     end
   end
-  if post !== nothing
+  _set_output!(post, problem)
+  if !isfirst
+    # a rebuild: the forward solve of the next iteration, done now, gives the objective at the rebuilt problem
+    post === nothing || (post.problem = problem)
+    f = _sync!(oracle)
+    fh = hist.objective[hist.n]
+    same = isequal(f, fh) ? "identical" : "differs by " * _g(abs(f - fh) / max(abs(fh), floatmin())) * " (relative)"
+    _print_event(pr, "· iteration $k0: " * (run.physics_only ? "physics" : "design and physics") * " rebuilt (" * @sprintf("%.2f s", time() - run.tevent) *
+                     "); objective at the rebuilt problem: $same", isequal(f, fh) ? :cyan : :yellow)
+    pr.tlast = time()                          # the time of the rebuild is not charged to the next row
+  elseif post !== nothing
     _post_start!(post, problem, k0, resume !== nothing)
     # a resumed run that starts with a continuation jump: the design of k0 is the one of the previous stage, and
     # solving it now would cost one more forward solve (the first iteration solves it again at the new stage)
-    jump_first = schedule !== nothing && stage < schedule.nstages && stage_iters >= schedule.every
+    jump_first = schedule !== nothing && run.stage < schedule.nstages && run.stage_iters >= schedule.every
     if post.initial && post.last != k0 && !jump_first
       # a resumed run writes k0 again: files without a collection entry (VTKHDF) keep only the steps before it
       resume !== nothing && (post.resume_upto = k0 - 1)
@@ -897,16 +1030,17 @@ function solve!(problem::Optimization, method::AbstractMethod; maxiter::Integer,
     end
   end
   fwd, adj, filters = ops
-  run = _LoopState(k0, stage, stage_iters, hist.n - stage_iters, cstart, k0, copy(zk))   # what a failure needs
+  resize!(run.zacc, length(zk))
+  copyto!(run.zacc, zk)                        # what a failure needs
   status, reason = try
     _iterate!(problem, method, opt, oracle, state, zk, zprev, hist, run, ctx, cont_buf, cont_names, maxiter, on_failure, stop,
-              schedule, checkpoint, post, monitors, fwd, adj, filters, pr)
+              schedule, checkpoint, post, monitors, fwd, adj, filters, pr, discretization)
   catch e
     # OptimizationFailure has written its checkpoint; any other exception (an error in a solve or post function of
     # the user, an interruption) gets one at the last accepted design before it is rethrown
     if !(e isa OptimizationFailure)
       try
-        _save_state!(checkpoint, problem, method, opt, nothing, run.zacc, hist, run.k, run.stage, run.stage_iters, cont_names, oracle)
+        _save_state!(checkpoint, problem, method, opt, nothing, run.zacc, hist, run, cont_names, oracle)
         checkpoint === nothing ||
           _print_event(pr, "✗ $(nameof(typeof(e))) after $(run.k) accepted iterations: checkpoint written at iteration " *
                            "$(run.k) in $(checkpoint.filepath)", :red)
@@ -918,12 +1052,16 @@ function solve!(problem::Optimization, method::AbstractMethod; maxiter::Integer,
     end
     rethrow()
   end
+  if status === :rediscretize                  # the state at the event, memory of the optimiser included
+    run.acc = run.acc .+ (map(_count, ops) .- run.cstart)
+    return _save_state!(nothing, problem, method, opt, state, zk, hist, run, cont_names, oracle)
+  end
 
   f_final = _sync!(oracle)                     # fields and forward state at the final design
   _print_end(pr, status, reason, run.k, f_final, _last_monitors(hist, monitors))
   status === :converged || _warn_unmet(pr, hist, cnames)
-  _print_summary(pr, map(_count, ops) .- cstart, run.k - k0)
-  final = _save_state!(checkpoint, problem, method, opt, state, zk, hist, run.k, run.stage, run.stage_iters, cont_names, oracle)
+  _print_summary(pr, map(_count, ops) .- run.cstart .+ run.acc, run.k - run.k0, run.events)
+  final = _save_state!(checkpoint, problem, method, opt, state, zk, hist, run, cont_names, oracle)
   if post !== nothing && post.last != run.k && isfinite(f_final)
     set_context!(ctx, :iteration, run.k)       # after a stall, the iteration tried was run.k + 1
     _postprocess!(post, oracle, hist)
@@ -934,11 +1072,111 @@ function solve!(problem::Optimization, method::AbstractMethod; maxiter::Integer,
   lastm(j) = hist.n == 0 ? NaN : hist.multiplier_values[j, hist.n]
   mults = NamedTuple{Tuple(cnames)}(Tuple(final.lagrangian !== nothing && final.handled[n] === :lagrangian ?
                                           final.lagrangian.multipliers[n] : lastm(j) for (j, n) in enumerate(cnames)))
-  OptResult(status, reason, run.k, f_final, z, _trim!(hist), time() - t_call, state, t_start, mults)
-  finally
-    restore_opt()
-    post isa OptPostProcessor && _post_close!(post; quiet = true)   # failure or interruption: finish the writes
+  OptResult(status, reason, run.k, f_final, z, _trim!(hist), time() - t_call, state, run.start_scaling, mults, problem)
+end
+
+# A rebuild after the accepted iteration run.k: the writers are closed, the factories called, the new problem checked
+function _rediscretize!(d, problem, st, run, post, schedule, checkpoint, pr)
+  run.tevent = time()
+  ctx = problem.ctx
+  new = try
+    if post !== nothing
+      _post_close!(post)                       # the writers hold the spaces of the old problem
+      # the files of this run keep their steps up to k (nothing written yet: an old file is overwritten, as without
+      # a rebuild)
+      post.resume_upto = (post.last >= 0 || post.resume_upto !== nothing) ? run.k : nothing
+    end
+    set_context!(ctx, :phase, :setup)
+    new = rediscretize(d, problem, st, ctx)
+    new isa Optimization || throw(ArgumentError("solve!: rediscretize must return an Optimization"))
+    _check_rebuilt(problem, new, d, schedule, run.k)
+    new
+  catch e
+    _keep_event_state!(problem, st, checkpoint, pr, run, e)
+    rethrow()
   end
+  run.physics_only = new.design === problem.design
+  run.events += 1
+  new
+end
+
+# an error at a rebuild: the state captured there (with the memory of the optimiser) is kept in problem.state[] and,
+# with a checkpoint, written, so that a resume continues exactly
+function _keep_event_state!(problem, st, checkpoint, pr, run, e)
+  problem.state[] = st
+  checkpoint === nothing && return nothing
+  try
+    _write_checkpoint(checkpoint, st)
+    _print_event(pr, "✗ $(nameof(typeof(e))) at the rebuild of iteration $(run.k): checkpoint written at iteration " *
+                     "$(run.k) in $(checkpoint.filepath)", :red)
+  catch e2
+    e2 isa InterruptException || _print_event(pr, "✗ the checkpoint could not be written after the exception", :red)
+  end
+  nothing
+end
+
+function _check_rebuilt(old, new, d, schedule, k)
+  pre = "solve!: after the rebuild at iteration $k: "
+  # a rebuild of the physics only keeps the design of the old problem (rebuild(…; what = :physics))
+  if new.design !== old.design
+    new.z === old.z && throw(ArgumentError(pre * "design_setup returned the same variables as before: create the spaces " *
+                                           "and the variables inside it"))
+  end
+  new.objective === old.objective && throw(ArgumentError(pre * "physics_setup returned the same objective as before: " *
+                                                         "create the functionals inside it"))
+  collect(new.z.names) == collect(old.z.names) ||
+    throw(ArgumentError(pre * "the blocks of z changed: $(collect(old.z.names)) → $(collect(new.z.names))"))
+  length(new.z) == length(old.z) || throw(ArgumentError(pre * "z has $(length(new.z)) values, it had $(length(old.z))"))
+  for (n, b, c) in zip(new.z.names, new.z.blocks, old.z.blocks)
+    nb, nc = b.zone === nothing ? 0 : b.zone.ncells, c.zone === nothing ? 0 : c.zone.ncells
+    nb == nc || throw(ArgumentError(pre * "$n has $nb frozen cells, it had $nc"))
+  end
+  keys(new.constraints) == keys(old.constraints) ||
+    throw(ArgumentError(pre * "the constraints changed: ($(join(keys(old.constraints), ", "))) → " *
+                        "($(join(keys(new.constraints), ", "))); the factories must return the same names in the same order"))
+  for n in keys(new.constraints)
+    a, b = old.constraints[n], new.constraints[n]
+    b.F === a.F && throw(ArgumentError(pre * "physics_setup returned the same constraint $n as before: create the " *
+                                       "functionals inside it"))
+    (isequal(a.lo, b.lo) && isequal(a.hi, b.hi)) || throw(ArgumentError(pre * "the bounds of the constraint $n changed"))
+    is_linear(a.F) == is_linear(b.F) || throw(ArgumentError(pre * "the constraint $n changed between linear and nonlinear"))
+    _scale_mode(a.F) === _scale_mode(b.F) || throw(ArgumentError(pre * "the scale of the constraint $n changed its kind"))
+  end
+  _scale_mode(old.objective) === _scale_mode(new.objective) ||
+    throw(ArgumentError(pre * "the scale of the objective changed its kind"))
+  m(p) = keys(get(p.physics, :monitors, (;)))
+  m(new) == m(old) || throw(ArgumentError(pre * "the monitors changed: ($(join(m(old), ", "))) → ($(join(m(new), ", ")))"))
+  haskey(new.physics, :output) == haskey(old.physics, :output) ||
+    throw(ArgumentError(pre * "physics_setup " * (haskey(old.physics, :output) ? "no longer returns" : "now returns") * " output"))
+  if schedule !== nothing
+    projs = _projections(new)
+    for (n, o) in zip(schedule.names, schedule.objects)
+      o isa TanhProjection && !any(p -> p === o, projs) &&
+        throw(ArgumentError(pre * "the TanhProjection continued as $n is not in the maps of the rebuilt physical fields: " *
+                            "create it once, outside physics_setup, and use that object inside"))
+    end
+  end
+  nothing
+end
+
+_scale_mode(F::Functional) = F.scale_mode
+_scale_mode(F) = nothing
+
+# the projections in the chains x → θ of the functionals of a problem
+function _projections(p)
+  out = TanhProjection[]
+  for F in (p.objective, (c.F for c in p.constraints)...)
+    θ = try
+      physical_fields(F)
+    catch
+      continue
+    end
+    θ isa PhysicalFields || continue
+    for ch in getfield(θ, :chains), s in ch
+      s isa TanhStage && push!(out, s.h)
+    end
+  end
+  out
 end
 
 # the optimiser's own continued parameters, given back when solve! returns or throws
@@ -1106,9 +1344,15 @@ mutable struct _LoopState
   stage::Int
   stage_iters::Int
   stage_start::Int    # history length when the current stage started
-  cstart::NTuple{3,Int}   # solve counters at the start of the call
+  cstart::NTuple{3,Int}   # solve counters at the start of the current problem (a rebuild starts again)
   k0::Int                 # iterations done before the call (resume)
   zacc::Vector{Float64}   # the last accepted design (for a checkpoint after an unexpected exception)
+  acc::NTuple{3,Int}      # solves of the problems replaced by rebuilds
+  events::Int             # rebuilds of the run (those of a resumed checkpoint included)
+  kind::String            # the discretisation, for the checkpoint
+  physics_only::Bool      # the last rebuild kept the design
+  tevent::Float64         # time the current rebuild started
+  start_scaling::Union{Nothing,Float64}   # the factor of a scaled start (first stretch)
 end
 
 function _fail(msg, problem, method, opt, oracle, zk, hist, run, cont_names, checkpoint, pr, ops, post)
@@ -1120,8 +1364,8 @@ function _fail(msg, problem, method, opt, oracle, zk, hist, run, cont_names, che
   end
   synced || (msg *= " (the forward state could not be solved again at the last accepted design)")
   _print_failure(pr, msg, run.k)
-  _print_summary(pr, map(_count, ops) .- run.cstart, run.k - run.k0)
-  _save_state!(checkpoint, problem, method, opt, nothing, zk, hist, run.k, run.stage, run.stage_iters, cont_names, oracle)
+  _print_summary(pr, map(_count, ops) .- run.cstart .+ run.acc, run.k - run.k0, run.events)
+  _save_state!(checkpoint, problem, method, opt, nothing, zk, hist, run, cont_names, oracle)
   if synced && post !== nothing && post.last != run.k
     set_context!(problem.ctx, :iteration, run.k)
     try
@@ -1135,7 +1379,7 @@ function _fail(msg, problem, method, opt, oracle, zk, hist, run, cont_names, che
 end
 
 function _iterate!(problem, method, opt, oracle, state, zk, zprev, hist, run, ctx, cont_buf, cont_names, maxiter, on_failure,
-                   stop, schedule, checkpoint, post, monitors, fwd, adj, filters, pr)
+                   stop, schedule, checkpoint, post, monitors, fwd, adj, filters, pr, discretization)
   fail(msg) = _fail(msg, problem, method, opt, oracle, zk, hist, run, cont_names, checkpoint, pr, (fwd, adj, filters), post)
   while run.k < maxiter
     k = run.k + 1
@@ -1242,10 +1486,12 @@ function _iterate!(problem, method, opt, oracle, state, zk, zprev, hist, run, ct
       end
     end
     checkpoint === nothing || k % checkpoint.every == 0 &&
-      _save_state!(checkpoint, problem, method, opt, state, zk, hist, k, run.stage, run.stage_iters, cont_names, oracle)
+      _save_state!(checkpoint, problem, method, opt, state, zk, hist, run, cont_names, oracle)
     # after the checkpoint: an error of the driver does not lose it
     post !== nothing && _post_due(post, k) && _postprocess!(post, oracle, hist)
     done && return :converged, r
+    # a rebuild of the problem after this iteration (never after the last one)
+    k < maxiter && due(discretization, k, info, hist, ctx) && return :rediscretize, nothing
   end
   :maxiter, nothing
 end

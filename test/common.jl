@@ -98,3 +98,25 @@ function frozen_mbb(; nx = 16, ny = 6, order = 0, frozen = true, backend = :comp
   Vol = Volume(θ, dΩ; max_fraction = 0.5)
   (; z, x, θ, S, C, Vol, dΩ, proj, problem = Optimization(objective = C, constraints = (volume = Vol,)))
 end
+
+# (used by the Methods and PostProcess tests)
+# heat compliance (self-adjoint) and the volume of the unprojected design density
+function compliance_problem(; design = :P0, n = 8, dim = 2, init = 0.4, fraction = 0.4, solve_flag = nothing,
+                            phases = nothing, sign = nothing)
+  p = state_problem(; design, n, dim, init)
+  (; z, x, θ, S, f, dk, dΩ) = p
+  flag = solve_flag === nothing ? () -> true : solve_flag
+  Sc = (solve_flag === nothing && phases === nothing) ? S :
+       StateOperator(S.model; depends = θ, adjoint = p.adj, solve = (m, ctx) -> begin
+         push!(p.ctxs, (:S, ctx))
+         phases === nothing || push!(phases, (ctx.iteration, ctx.trial, ctx.phase))
+         (solve!(m; Assembly = true), flag())
+       end)
+  # sign (a Ref): the derivative is multiplied by sign[] (a wrong gradient when it is −1), through dJdθ
+  dJdθ = sign === nothing ? nothing : (u, θ) -> (δ -> ∫((1 - sign[]) * (dk ∘ θ.ρ) * ∇(u) ⋅ ∇(u) * δ)dΩ)
+  C = Functional((u, θ) -> ∫(f * u)dΩ, Sc; dJdu = SelfAdjoint(), dJdθ, fields = θ, scale = :initial)
+  θv = PhysicalFields(x; ρ = Identity())
+  vol = sum(∫(1.0)dΩ)
+  Vol = Functional(θ -> sum(∫(θ.ρ)dΩ) - fraction * vol, θv; dJdθ = θ -> (δ -> ∫(δ)dΩ), scale = fraction * vol, linear = true)
+  (; p..., C, Vol, θv, S = Sc, problem = Optimization(z; objective = C, constraints = (volume = Vol,)))
+end

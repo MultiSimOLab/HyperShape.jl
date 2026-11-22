@@ -39,6 +39,7 @@ end
 @_export Methods DensityMethod
 @_export Methods LumpedMass
 @_export Methods Euclidean
+@_export Methods FixedMesh
 @_export Methods Continuation
 @_export Methods StopCriteria
 @_export Methods Grey
@@ -98,3 +99,10 @@ end
 @_public Methods check_problem
 @_public Methods method_label
 @_public Methods metric_label
+@_public Methods Discretization
+@_public Methods RebuildCheck
+@_public Methods needs_setup
+@_public Methods due
+@_public Methods rediscretize
+@_public Methods discretization_label
+@_public Methods rebuild

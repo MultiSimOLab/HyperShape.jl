@@ -276,6 +276,21 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
   the user; phases `:setup`, `:check`, `:optimization` and `:linesearch`.
 - **Checkpoint:** `checkpoint.toml`, `z_<k>.bin` and `history_<k>.csv` in a folder; resume with
   `solve!(…; resume = "results/ckpt")` (the folder; or the result of `load_checkpoint`). OC (adaptive move limits, correction shift) and SiMPL (latent variable, Barzilai–Borwein memory, multiplier, shift) save their memory (`memory`/`restore_memory!`, a named tuple of numbers and design vectors), and the offsets of the linear constraints are kept (unless the user changed the bound or the scale), so a run resumed from an accepted iteration gives the designs of the uninterrupted one bit for bit (its first iteration repeats one forward solve). The state of a run is an `OptState` (`problem.state[]` after `solve!`; `resume = problem.state[]` continues without files); after an exception or an interruption the memory of the optimiser is not kept, and the resumed run restarts it. Checkpoints have format version 3. An `OC` continued by `continuation` gets its `move` back at the end of `solve!`.
+- **Factories and discretisation:** `Optimization(model; design_setup, physics_setup)` builds the problem from two
+  functions of the user: `design_setup(model) -> (; z, x)` and `physics_setup(model, x) -> (; objective, constraints,
+  monitors, output, …)` (every name returned is kept in `problem.design` and `problem.physics`). What is continued or
+  independent of the mesh (a `TanhProjection` of a `Continuation`, a `Parameter`, the optimiser) is created once, outside
+  them; spaces, measures, fields, states, functionals, monitors and the output driver are created inside.
+  `solve!(…; discretization)` says when the problem is built again: `FixedMesh()` (default) never;
+  `HyperShape.Methods.RebuildCheck(at | every; what = :design | :physics)` on the same mesh, to check the factories
+  (with linear states and direct solvers it is the run of `FixedMesh()` bit for bit, the counts of solves aside; at
+  each rebuild the screen says whether the objective at the rebuilt problem is identical to the one of the history).
+  A rebuild goes through the captured `OptState`, as a resume does; after it `solve!` checks that the factories built
+  new variables and functionals, kept the blocks, constraints (names, bounds, kind), monitors and output, and that a
+  continued `TanhProjection` is in the new maps. With factories, monitors and the output come from `physics_setup`
+  (`OptPostProcessor(; every, filepath)` without a driver); the post-processor closes its writers at each rebuild and
+  keeps one collection. `result.problem` is the last problem. Adaptive meshes (phase 4) are discretisations with a
+  change of mesh and a transfer of the state. Example: `examples/mbb_factories.jl`.
 - **Start:** a starting design that violates the constraint is scaled towards the lower bound (a linear constraint:
   on the entries it acts on, with equality; a nonlinear one: by regula falsi to `-1e-6 ≤ g ≤ 0`); the factor is in
   `result.start_scaling`. A resumed design is not touched, nor the design at a continuation jump.
