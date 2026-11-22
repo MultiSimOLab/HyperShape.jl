@@ -195,6 +195,8 @@ struct Grey{T,M}
   volume::Float64
 end
 
+Grey(θ::PhysicalFields, dΩ::DesignMeasures; kwargs...) = Grey(θ, dΩ.domain; kwargs...)
+
 function Grey(θ::PhysicalFields, dΩ; field = nothing)
   names = propertynames(θ)
   f = field === nothing ?

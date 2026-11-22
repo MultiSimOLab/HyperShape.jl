@@ -14,7 +14,7 @@ using ..Operators: StateOperator, apply!, state_version, dirichlet_values, SelfA
 import ..Operators: invalidate!
 using ..Operators: get_model as HyperShape_get_model
 using ..Variables: PhysicalFields, DesignFields, Identity, update_fields!, design_gradient!, get_designfields,
-                   get_optvariables, is_linear_field, reset_sink!, add_forms!, finish_sink!
+                   get_optvariables, is_linear_field, reset_sink!, add_forms!, finish_sink!, DesignMeasures
 
 export AbstractFunctional, Functional, Constraint, Volume, LinearInState, functional_value, functional_gradient!
 
@@ -188,10 +188,11 @@ end
 """
     Volume(θ::PhysicalFields, dΩ; max_fraction, field = nothing, scale = Vmax)
     Volume(x::DesignFields, dΩ; max_fraction, field = nothing, scale = Vmax)
+    Volume(θ::PhysicalFields, dΩ::DesignMeasures; …)   # the domain of design_measures(θ; degree)
 
 Volume constraint `g = ∫ θ.field dΩ - Vmax ≤ 0` with `Vmax = max_fraction ⋅ |Ω|` (`0 < max_fraction ≤ 1`, `|Ω|` the
 measure of `dΩ`), a design-only [`Functional`](@ref) with its value and derivative written in. With physical fields θ, the volume of the physical density: nonlinear in z if its chain has a
-[`TanhProjection`](@ref HyperShape.Variables.TanhProjection) projection, linear otherwise. With design fields x, the volume of
+[`TanhProjection`](@ref HyperShape.Variables.TanhProjection), an `Ersatz()` or another nonlinear map, linear otherwise. With design fields x, the volume of
 the design density (linear; the identity physical fields are built inside). `field` is mandatory when there are
 several fields. `scale` divides the value and the derivative; default `Vmax`.
 """
@@ -208,6 +209,8 @@ function Volume(θ::PhysicalFields, dΩ; max_fraction::Real, field = nothing, sc
   DJ = θ -> NamedTuple{(f,)}((δ -> ∫(δ)dΩ,))
   Functional(J, θ; dJdθ = DJ, scale, linear = is_linear_field(θ, f))
 end
+
+Volume(θ::PhysicalFields, dΩ::DesignMeasures; kwargs...) = Volume(θ, dΩ.domain; kwargs...)
 
 function Volume(x::DesignFields, dΩ; kwargs...)
   names = getfield(x, :names)

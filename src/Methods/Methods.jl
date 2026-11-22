@@ -22,7 +22,8 @@ using ..Optimizers: Optimizer, OC, SiMPL, constraint_tol, computes_kkt, set_move
 import ..Optimizers: objective, gradient!, bounds, num_constraints, constraint_info, linear_constraint, constraint,
                      constraint_gradient!, weighted_gradient!, inner, riesz!
 using ..Operators: OptContext, set_context!, StateOperator, num_solves, Parameter
-using ..Variables: PhysicalFields, OptVariables, DesignFields, TanhProjection, TanhStage, set_beta!, get_values, get_bounds, set_values!, get_designfields,
+using ..Variables: PhysicalFields, OptVariables, DesignFields, DesignMeasures, TanhProjection, TanhStage, is_differentiable,
+                   has_ersatz, update_fields!, set_beta!, get_values, get_bounds, set_values!, get_designfields,
                    get_optvariables, filter_operators
 using ..Functionals: AbstractFunctional, Functional, Constraint, functional_value, functional_gradient!, get_scale,
                      is_design_only, is_linear, physical_fields, responses, _reference

@@ -12,7 +12,8 @@ using Gridap.FESpaces
 using HyperFEM: get_state, get_spaces
 using ..Operators: AbstractOperator, LinearOperator, StateOperator, apply!, solve_linear!, invalidate!, OptContext
 using ..Variables: PhysicalFields, update_fields!, design_gradient!, get_designfields, get_optvariables,
-                   get_values, get_bounds, set_values!, filter_operators, _frozen_check
+                   get_values, get_bounds, set_values!, filter_operators, _frozen_check, is_differentiable,
+                   is_differentiable_field, has_ersatz
 using ..Functionals: Functional, functional_value, functional_gradient!
 
 export check_consistency
@@ -20,37 +21,49 @@ export check_consistency
 """
     CheckResult
 
-One line of a [`ConsistencyReport`](@ref): `label`, `passed` and a `message` with the details (observed rates of the
-Taylor tests, relative differences).
+One line of a [`ConsistencyReport`](@ref): `label`, `passed`, a `message` with the details (observed rates of the
+Taylor tests, relative differences) and `applicable` (false for a derivative check of a physical field without
+derivative, through `Step()`: neither passed nor failed, shown with `–`).
 """
 struct CheckResult
   label::String
   passed::Bool
   message::String
+  applicable::Bool
 end
+CheckResult(label, passed, message) = CheckResult(label, passed, message, true)
 
 """
     ConsistencyReport
 
 Result of [`check_consistency`](@ref): `results`, a vector of [`CheckResult`](@ref), and `passed`, true when all of
-them passed. Displayed as a table.
+them passed (those not applicable do not count). Displayed as a table.
 """
 struct ConsistencyReport
   results::Vector{CheckResult}
   passed::Bool
 end
-ConsistencyReport(results::Vector{CheckResult}) = ConsistencyReport(results, all(r -> r.passed, results))
+ConsistencyReport(results::Vector{CheckResult}) = ConsistencyReport(results, all(r -> r.passed || !r.applicable, results))
 
 function Base.show(io::IO, ::MIME"text/plain", r::ConsistencyReport)
-  n = count(x -> x.passed, r.results)
-  println(io, "Consistency check: $n of $(length(r.results)) passed")
+  n = count(x -> x.passed && x.applicable, r.results)
+  m = count(x -> x.applicable, r.results)
+  na = length(r.results) - m
+  println(io, "Consistency check: $n of $m passed", na > 0 ? " ($na not applicable)" : "")
   w = maximum(x -> length(x.label), r.results; init = 0)
   for x in r.results
-    println(io, "  ", x.passed ? "✓" : "✗", " ", rpad(x.label, w), "  ", x.message)
+    println(io, "  ", !x.applicable ? "–" : x.passed ? "✓" : "✗", " ", rpad(x.label, w), "  ", x.message)
   end
 end
-Base.show(io::IO, r::ConsistencyReport) =
-  print(io, "ConsistencyReport(", count(x -> x.passed, r.results), " of ", length(r.results), " passed)")
+function Base.show(io::IO, r::ConsistencyReport)
+  na = count(x -> !x.applicable, r.results)
+  print(io, "ConsistencyReport(", count(x -> x.passed && x.applicable, r.results), " of ",
+        count(x -> x.applicable, r.results), " passed", na > 0 ? ", $na not applicable" : "", ")")
+end
+
+const _NA_STEP = "not applicable: the physical field goes through Step(), which has no derivative; replace Step() by " *
+                 "Ersatz() to check dJdθ, the adjoint and the sensitivity (the forms are the same)"
+_cut_hint(msg, θ) = (startswith(msg, "not tested") && has_ersatz(θ)) ? msg * " (no cell is cut by the interface?)" : msg
 
 """
     check_consistency(J1, J2, …; ctx = OptContext(:check), kwargs...) -> ConsistencyReport
@@ -282,7 +295,9 @@ function _check_gradients(Fs, z, z0, d, hs, ctx, min_rate)
   J0 = [functional_value(F, ctx) for F in Fv]
   gd = fill(NaN, length(Fv))
   fail = Vector{Union{Nothing,String}}(nothing, length(Fv))
+  na = [!is_differentiable(F.θ) for F in Fv]
   for (i, F) in enumerate(Fv)
+    na[i] && (fail[i] = _NA_STEP; continue)
     if !isfinite(J0[i])
       fail[i] = "the value is not finite at the current design (a state did not converge?)"
       continue
@@ -302,11 +317,11 @@ function _check_gradients(Fs, z, z0, d, hs, ctx, min_rate)
   end
   map(enumerate(names)) do (i, name)
     label = "gradient of $name"
-    fail[i] === nothing || return CheckResult(label, false, fail[i])
+    fail[i] === nothing || return CheckResult(label, false, fail[i], !na[i])
     errs = [abs(vals[i][k] - J0[i] - hs[k] * gd[i]) for k in eachindex(hs)]
     vars = [abs(vals[i][k] - J0[i]) + abs(hs[k] * gd[i]) for k in eachindex(hs)]
     ok, msg = _taylor_verdict(errs, vars, _floor(J0[i]), min_rate)
-    CheckResult(label, ok, msg)
+    CheckResult(label, ok, _cut_hint(msg, Fv[i].θ))
   end
 end
 
@@ -320,7 +335,9 @@ function _check_chains(θ, k, nθ, z, z0, d, hs, ctx, min_rate)
   dΩs = [Measure(get_triangulation(f), 4) for f in fs]
   values_now() = (update_fields!(θ, ctx); [0.5 * sum(∫(f * f)dΩ) for (f, dΩ) in zip(fs, dΩs)])
   J0 = values_now()
+  na = [!is_differentiable_field(θ, n) for n in names]
   gd = map(eachindex(names)) do i
+    na[i] && return NaN
     f, dΩ = fs[i], dΩs[i]
     forms = NamedTuple{(names[i],)}((δ -> ∫(f * δ)dΩ,))
     dot(design_gradient!(zeros(length(z0)), θ, forms, ctx; key = (:check_consistency, names[i])), d)
@@ -333,10 +350,11 @@ function _check_chains(θ, k, nθ, z, z0, d, hs, ctx, min_rate)
   set_values!(z, z0)
   map(eachindex(names)) do i
     label = "design chain of θ.$(names[i])" * (nθ > 1 ? " (physical fields $k)" : "")
+    na[i] && return CheckResult(label, false, _NA_STEP, false)
     errs = [abs(vals[s][i] - J0[i] - hs[s] * gd[i]) for s in eachindex(hs)]
     vars = [abs(vals[s][i] - J0[i]) + abs(hs[s] * gd[i]) for s in eachindex(hs)]
     ok, msg = _taylor_verdict(errs, vars, _floor(J0[i]), min_rate)
-    CheckResult(label, ok, msg)
+    CheckResult(label, ok, _cut_hint(msg, θ))
   end
 end
 
@@ -376,10 +394,11 @@ function _check_tangent(k, n, S::StateOperator, res, jac, rng, hs, ctx, min_rate
   CheckResult(label, ok, msg)
 end
 
+# the gradient of a functional without derivative (Step()) is not compared: zeros
 function _values_and_gradients(Fv, n, ctx)
   foreach(invalidate!, Fv)
   vs = [functional_value(F, ctx) for F in Fv]
-  gs = [functional_gradient!(zeros(n), F, ctx) for F in Fv]
+  gs = [is_differentiable(F.θ) ? functional_gradient!(zeros(n), F, ctx) : zeros(n) for F in Fv]
   vs, gs
 end
 
@@ -397,6 +416,9 @@ function _check_dependencies(Fs, ops, θs, z, z0, d, h, ctx, rtol)
     scale = max(abs(v2[i]), h * norm(g2[i]) * norm(d), floatmin())   # a value near zero is compared with its variation
     dv = abs(v1[i] - v2[i]) / scale
     dg = norm(g1[i] - g2[i]) / max(norm(g2[i]), floatmin())
+    is_differentiable(Fv[i].θ) ||
+      return CheckResult(label, dv <= rtol, "relative difference of the value after solving everything again: " *
+                                            "$(_fmt(dv)) (the gradient is not compared: Step())")
     CheckResult(label, dv <= rtol && dg <= rtol,
                 "relative difference after solving everything again: value $(_fmt(dv)), gradient $(_fmt(dg))")
   end
