@@ -1,7 +1,7 @@
 name = "HyperShape"
 uuid = "1a07404e-cd44-4b01-9b9c-59424ef2e75e"
-authors = ["MultiSimOLab"]
 version = "0.1.0"
+authors = ["MultiSimOLab"]
 
 [deps]
 Gridap = "56d4f2e9-7ea1-5844-9cf6-b9c51ca7ce8e"
@@ -20,7 +20,7 @@ HDF5 = "f67ccb44-e63f-5c2f-98bd-6dc0ccc4ba2f"
 HyperShapeHDF5Ext = "HDF5"
 
 [compat]
-Gridap = "=0.20.8"
+Gridap = "=0.20.8, 0.20"
 HDF5 = "0.17"
 HyperFEM = "0.3"
 HyperFEMKernels = "0.2.5"
