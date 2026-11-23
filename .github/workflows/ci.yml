@@ -11,15 +11,18 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
 
-permissions: # needed to allow julia-actions/cache to delete old caches that it has created
-  actions: write
+permissions:
+  actions: write   # julia-actions/cache deletes the old caches it has created
   contents: read
+  id-token: write  # Codecov upload with OIDC (no token)
 
 jobs:
   test:
     name: Tests (${{ matrix.version }}, ${{ matrix.group }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    # coverage only after a merge (push to main) or on demand, never on pull requests: instrumented, the suite is
+    # about three times slower
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 90 || 360 }}
     env:
       HYPERSHAPE_TEST_GROUP: ${{ matrix.group }}   # the suite in parallel jobs (see test/runtests.jl)
       JULIA_NUM_THREADS: 4                          # the threaded kernels and the asynchronous writers
@@ -41,4 +44,14 @@ jobs:
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
         with:
-          coverage: false   # not uploaded anywhere; with it the suite is about three times slower
+          coverage: ${{ matrix.version == '1' && github.event_name != 'pull_request' }}
+      - uses: julia-actions/julia-processcoverage@v1
+        if: matrix.version == '1' && github.event_name != 'pull_request'
+        continue-on-error: true
+      - uses: codecov/codecov-action@v5
+        if: matrix.version == '1' && github.event_name != 'pull_request'
+        with:
+          files: lcov.info
+          flags: ${{ matrix.group }}  # one upload per test group; Codecov merges them
+          use_oidc: true
+          fail_ci_if_error: false
