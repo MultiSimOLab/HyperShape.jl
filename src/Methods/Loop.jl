@@ -77,8 +77,9 @@ StopCriteria(; objective_range = nothing, window = 10, kkt_tol = nothing, kkt_rt
     default_stop(optimizer) -> Union{StopCriteria,Nothing}
 
 Stopping criteria of [`solve!`](@ref) when `stop` is not given: `StopCriteria(objective_range = 1e-3)` (range of
-the objective below 0.1 % over the last 10 iterations of the last stage), for every optimiser. With a projection,
-`kkt_tol` and `change_tol` are rarely reached; the objective settles.
+the objective below 0.1 % over the last 10 iterations of the last stage), for OC and SiMPL. With a projection,
+`kkt_tol` and `change_tol` are rarely reached; the objective settles. [`ReactionDiffusion`](@ref):
+`StopCriteria(change_tol = 1e-2)`.
 """
 default_stop(::Optimizer) = StopCriteria(objective_range = 1e-3)
 
@@ -718,7 +719,7 @@ _stop_reason(stop::Union{Nothing,StopCriteria}, info, hist, stage_start, ctx) = 
 Runs the optimisation from the current values of `z`. Mandatory: `maxiter` (total iterations, resumed ones included).
 Optional: `on_failure` ([`RejectStep`](@ref), default `RejectStep(shrink = 0.5, max_attempts = 5)`), `stop`
 ([`StopCriteria`](@ref); default [`default_stop`](@ref): range of the objective below 0.1 % over 10 iterations of
-the last stage; `stop = nothing` runs `maxiter` iterations; or a function (or callable object)
+the last stage, or the change of z below `1e-2` for [`ReactionDiffusion`](@ref); `stop = nothing` runs `maxiter` iterations; or a function (or callable object)
 `(info, history, ctx) -> Bool` of the user, checked after every accepted iteration, with the
 [`StepInfo`](@ref HyperShape.Optimizers.StepInfo) of the step (`info.f` is the objective before it), the
 [`OptHistory`](@ref) up to this iteration (a copy) and the context: `true` stops with reason `:custom`, under the
@@ -983,12 +984,20 @@ function _segment!(problem, method, opt, resume, isfirst, run, hist, ctx, cont_b
   zk = fo.zk
   copyto!(zk, get_values(z))
   resume === nothing || _check_handled(native, resume, cnames)
-  if resume === nothing                       # a resumed design is the one the run left
+  if resume === nothing && feasible_start(method)   # a resumed design is the one the run left
     t_start = isempty(native) ? nothing : _make_feasible!(fo, zk, native[1])
     run.start_scaling = t_start
     # a start feasible up to rounding (t within 1e-6 of 1) is not worth an event
     (t_start === nothing || t_start > 1 - 1e-6) || _print_event(pr, "· the starting design violated the constraint; it was scaled " *
                                             "towards the lower bound by $(round(t_start, sigdigits = 4)) to meet it", :yellow)
+  elseif resume === nothing
+    run.start_scaling = nothing
+    if !isempty(native)                        # the method lowers it (ReactionDiffusion)
+      constraint_info(fo, native[1])
+      g = constraint(fo, native[1], zk)
+      g > 0 && _print_event(pr, "· the starting design violates the constraint $(cnames[native[1]]) by $(@sprintf("%.3g", g)) " *
+                                "(scaled); it is not made feasible: $(method_label(method)) brings it down", :yellow)
+    end
   end
   # after the feasible start: a scale = :initial of a constraint is taken at the design the run starts from
   oracle = length(native) == num_constraints(fo) ? fo : AugmentedLagrangianOracle(fo, augmented_lagrangian(method), native, zk)
@@ -1062,7 +1071,7 @@ function _segment!(problem, method, opt, resume, isfirst, run, hist, ctx, cont_b
   f_final = _sync!(oracle)                     # fields and forward state at the final design
   _print_end(pr, status, reason, run.k, f_final, _last_monitors(hist, monitors))
   status === :converged || _warn_unmet(pr, hist, cnames)
-  _print_summary(pr, map(_count, ops) .- run.cstart .+ run.acc, run.k - run.k0, run.events)
+  _print_summary(pr, map(_count, ops) .- run.cstart .+ run.acc, run.k - run.k0, run.events, summary_note(opt, state))
   final = _save_state!(checkpoint, problem, method, opt, state, zk, hist, run, cont_names, oracle)
   if post !== nothing && post.last != run.k && isfinite(f_final)
     set_context!(ctx, :iteration, run.k)       # after a stall, the iteration tried was run.k + 1

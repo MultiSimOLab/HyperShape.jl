@@ -30,7 +30,7 @@ jobs:
       fail-fast: false
       matrix:
         version: ['min', '1'] # min = lowest Julia allowed by [compat]
-        group: ['core', 'methods', 'validation']
+        group: ['core', 'methods', 'rd', 'validation']
         arch: [x64]
         os: [ubuntu-latest]
 

@@ -12,8 +12,9 @@ ecosystem.
 !!! note "Status"
     Phase 0 is implemented and validated: density methods for linear problems (Helmholtz filter, tanh projection,
     optimality criteria and SiMPL, consistency checks, continuation, checkpoints, fast output), reproducing top88 and
-    the SiMPL paper (see [Validation](@ref)). Nonlinear and multiphysics problems, reaction–diffusion and level-set
-    methods come in the next phases ([Roadmap](@ref)). The package is not registered yet.
+    the SiMPL paper (see [Validation](@ref)). The reaction–diffusion method (level set through an interface map, or
+    density) is implemented. Nonlinear and multiphysics problems and level-set methods come in the next phases
+    ([Roadmap](@ref)). The package is not registered yet.
 
 ## Principles
 
@@ -24,7 +25,7 @@ ecosystem.
 - **Analytical derivatives.** No automatic differentiation; every sensitivity is verified with a Taylor test
   (`check_consistency`).
 - **One abstraction for several methods.** Density, reaction–diffusion and level set are meant to share variables,
-  states, functionals and the optimisation loop (density methods are implemented).
+  states, functionals and the optimisation loop (density and reaction–diffusion methods are implemented).
 
 ## Contents
 

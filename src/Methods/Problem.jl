@@ -219,7 +219,7 @@ const Metric = Union{Euclidean,LumpedMass}
 """
     AbstractMethod
 
-Supertype of the methods (`DensityMethod`; reaction–diffusion and level set later). All methods share the loop of
+Supertype of the methods (`DensityMethod`, `ReactionDiffusion`; level set later). All methods share the loop of
 [`solve!`](@ref) (evaluation, acceptance, continuation, augmented Lagrangian, stopping, checkpoint, output); a method
 only gives its step and what the step sees of the problem, through four functions (public, not exported):
 
@@ -232,7 +232,10 @@ only gives its step and what the step sees of the problem, through four function
   the step does not treat;
 - `check_problem(m, problem)`: errors when the run starts (default: none).
 
-`method_label(m)` (default: the name of the type) and `metric_label(m)` (default: none) go to the banner.
+`method_label(m)` (default: the name of the type) and `metric_label(m)` (default: none) go to the banner, with the
+lines of `banner_lines(m, problem)` (default: none; a vector of `(text, colour)`). `feasible_start(m)` (default
+`true`): whether a starting design that violates the native constraint is scaled to meet it before the first step
+(`ReactionDiffusion`: `false`, its step lowers the volume).
 """
 abstract type AbstractMethod end
 
@@ -242,6 +245,8 @@ function augmented_lagrangian end
 check_problem(::AbstractMethod, problem) = nothing
 method_label(m::AbstractMethod) = string(nameof(typeof(m)))
 metric_label(::AbstractMethod) = nothing
+banner_lines(::AbstractMethod, problem) = Tuple{String,Symbol}[]
+feasible_start(::AbstractMethod) = true
 
 """
     DensityMethod(optimizer; metric = default_metric(optimizer), lagrangian = AugmentedLagrangian())

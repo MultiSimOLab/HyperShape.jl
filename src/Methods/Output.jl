@@ -118,8 +118,9 @@ function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, 
   println(p.io, "  discretization: ", discretization_label(discretization),
           get(defaults, :discretization, false) ? " (default)" : "",
           problem.setup === nothing ? "" : " · problem from design_setup/physics_setup")
-  opt isa OC && println(p.io, "  OC: move $(_g(opt.move)) · ", opt.adapt === nothing ? "fixed (top88)" :
-                        "adaptive per entry ×$(_g(opt.adapt[1]))/×$(_g(opt.adapt[2])), floor $(_g(opt.move_min))")
+  for (line, color) in banner_lines(method, problem)
+    _styled(p, "  " * line * "\n", color)
+  end
   _print_columns(p, schedule)
 end
 
@@ -222,11 +223,19 @@ function _print_failure(p::_Printer, msg, k)
   println(p.io, "failed after $k accepted iterations: ", msg)
 end
 
-# solves: (forward, adjoint, filter) solved in this call, the setup and the final synchronisation included
-function _print_summary(p::_Printer, solves, iterations, events = 0)
+# solves: (forward, adjoint, filter) solved in this call, the setup and the final synchronisation included; `note`: a
+# line of the step (ReactionDiffusion: its solves and factorisations)
+function _print_summary(p::_Printer, solves, iterations, events = 0, note = "")
   p.level >= 1 || return
   t = time() - p.t0
   println(p.io, @sprintf("  solves: forward %d, adjoint %d, filter %d · time %.2f s (%.3f s per iteration)",
                          solves..., t, t / max(iterations, 1)),
           events == 0 ? "" : " · $events rebuild event" * (events == 1 ? "" : "s"))
+  isempty(note) || println(p.io, note)
 end
+
+# the move limit of OC
+banner_lines(m::DensityMethod, problem) =
+  m.optimizer isa OC ? [("OC: move $(_g(m.optimizer.move)) · " * (m.optimizer.adapt === nothing ? "fixed (top88)" :
+                         "adaptive per entry ×$(_g(m.optimizer.adapt[1]))/×$(_g(m.optimizer.adapt[2])), floor $(_g(m.optimizer.move_min))"), :normal)] :
+                       Tuple{String,Symbol}[]
