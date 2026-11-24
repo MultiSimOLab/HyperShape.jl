@@ -138,3 +138,14 @@ solve!(problem, ReactionDiffusion(; τ = 2e-4, sensitivity = :physical); maxiter
 `τ` (the diffusion) and `sensitivity` are the two decisions: `:physical` lets holes appear where the material is
 little used. `Step()` in place of `Ersatz()` and other stopping criteria are options; which to use will be validated
 with more cases. See [Design](@ref) for the step, the exact volume and the other options.
+
+The same run can start from a perforated design: `hole_seed` gives the free values of `φ` with a staggered pattern of
+holes (lengths in the units of the mesh), away from the clamp and from the frozen cells under the load:
+
+```julia
+φ0 = hole_seed(Vφ; radius = 0.05, spacing = 0.2, exclude = "clamp", connect = ("clamp", "load"))
+z  = OptVariables(φ = FieldVariable(Vφ; bounds = (-1.0, 1.0), init = φ0, frozen = 1.0))
+```
+
+With `sensitivity = :physical` the seed is optional (holes still nucleate and merge; useful to study the dependence on
+the start); methods that only move the boundary (`DoubleWell`, next release) need it.

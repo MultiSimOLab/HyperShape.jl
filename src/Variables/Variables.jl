@@ -25,6 +25,7 @@ backend is faster from tens of thousands of cells on, already with one thread, a
 module Variables
 
 using LinearAlgebra
+using Random
 using Gridap
 using Gridap.FESpaces
 using HyperFEM: get_spaces, StaticLinearModel, NothingBC
@@ -33,10 +34,11 @@ import ..Operators: state_version, refresh!, invalidate!
 
 export FieldVariable, OptVariables, DesignFields, PhysicalFields
 export Identity, HelmholtzFilter, TanhProjection, CellMean, PointwiseMap, Step, Ersatz, design_measures
-export single_field_design, frozen_indicator, tag_adjacent_cells!
+export single_field_design, frozen_indicator, tag_adjacent_cells!, hole_seed
 
 include("OptVariables.jl")
 include("Zones.jl")
+include("HoleSeed.jl")
 include("DesignFields.jl")
 include("CellFraction.jl")
 include("Maps.jl")

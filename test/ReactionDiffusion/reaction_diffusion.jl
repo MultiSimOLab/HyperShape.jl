@@ -810,4 +810,23 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     solve!(cd.problem, rd(); maxiter = 1, verbose = 1, io)
     @test occursin("Δt = 0.4 (default: no interface map)", String(take!(io)))
   end
+
+  @testset "22. a start with holes (hole_seed): :physical converges; :design without interface points to it" begin
+    c0 = rd_cantilever(; nx = 40, ny = 20)
+    φ0 = hole_seed(c0.Vφ; radius = 0.05, spacing = 0.2, exclude = "clamp", connect = ("clamp", "load"))
+    c = rd_cantilever(; nx = 40, ny = 20, init = φ0)
+    @test RDM._has_interface(c.z)
+    nv0 = void_components(cell_means(c.θ.χ, c.model), 40, 20)
+    @test nv0 >= 10
+    r = solve!(c.problem, rd(); maxiter = 400, verbose = 0)
+    @test r.status === :converged
+    @test r.history.constraints.volume[end] <= VT
+    @test all(v -> -1 <= v <= 1, get_values(r.z))
+    cs = rd_cantilever(; nx = 40, ny = 20)                                     # from a solid start
+    rs = solve!(cs.problem, rd(); maxiter = 400, verbose = 0)
+    @test r.objective * get_scale(c.C) <= 1.05 * rs.objective * get_scale(cs.C)       # absolute compliances
+    c = rd_cantilever(; nx = 10, ny = 5)
+    @test_throws r"hole_seed, comes with DoubleWell" solve!(c.problem, ReactionDiffusion(; τ = 1e-4, sensitivity = :design); maxiter = 1, verbose = 0)
+  end
+
 end
