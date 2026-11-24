@@ -2,7 +2,8 @@
 # level set (φ ≥ 0 solid) read through the ersatz material of Allaire, Jouve and Toader (Ersatz(): the fraction of each
 # cell where φ ≥ 0); the material is E(χ) = Emin + χ (1 − Emin). Clamped on the left side, unit traction downwards on
 # the middle fifth of the right side, with the cells under the load frozen as solid; volume fraction 0.5, reached
-# from a solid start (1 % of the domain per iteration). Plane stress, E = 1, ν = 0.3.
+# from a solid start (1 % of the domain per iteration). Plane stress, E = 1, ν = 0.3. `interface = Step()` runs the
+# same script with the abrupt step; neither map nor the default stop is a recommendation yet (to be validated).
 #
 # Run: julia --project=examples -t auto examples/cantilever_rd.jl
 using Gridap, HyperFEM, HyperShape
@@ -48,7 +49,7 @@ function run_cantilever_rd(; nx = 120, ny = 60, maxiter = 400, interface = Ersat
   end
   problem = Optimization(z; objective = C, constraints = (volume = Vol,))
   method  = ReactionDiffusion(; τ, sensitivity = :physical)
-  solve!(problem, method; maxiter, verbose, post)       # default stop: ‖Δφ‖∞ < 1e-2 with the volume met, or maxiter
+  solve!(problem, method; maxiter, verbose, post)       # default stop: ‖Δφ‖∞/Δt < 0.1 with the volume met, or maxiter
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

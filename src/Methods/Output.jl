@@ -58,11 +58,13 @@ function _describe_stop(stop)
   stop.stationarity_tol !== nothing && push!(parts, "S < $(stop.stationarity_tol)")
   stop.stationarity_rtol !== nothing && push!(parts, "S/S₁ < $(stop.stationarity_rtol)")
   stop.change_tol !== nothing && push!(parts, "change < $(stop.change_tol)")
+  stop.rate_tol !== nothing && push!(parts, "change/step < $(stop.rate_tol)")
+  stop.phase_tol !== nothing && push!(parts, "phase change < $(stop.phase_tol) |D| over $(stop.phase_window) iterations")
   isempty(parts) ? "maxiter only" : join(parts, " or ")
 end
 
 _active(stop::StopCriteria) = any(x -> x !== nothing, (stop.objective_range, stop.kkt_tol, stop.kkt_rtol, stop.stationarity_tol,
-                                         stop.stationarity_rtol, stop.change_tol))
+                                         stop.stationarity_rtol, stop.change_tol, stop.rate_tol, stop.phase_tol))
 _active(stop) = true                     # a function of the user
 _stage_rule(stop, schedule) = (stop === nothing || schedule === nothing || !_active(stop)) ? "" :
                               schedule.close_early ? " · every stage (close_early)" : " · last stage only"
@@ -189,7 +191,9 @@ function _print_jump(p::_Printer, schedule, stage)
   _print_columns(p, schedule)
 end
 
-const _STOP_TEXT = Dict(:change_tol => "change of z below the tolerance", :kkt_tol => "optimality measure below the tolerance",
+const _STOP_TEXT = Dict(:change_tol => "change of z below the tolerance",
+                        :rate_tol => "rate of change of z (change/step) below the tolerance",
+                        :phase_tol => "fraction of the domain that changes phase below the tolerance over the window", :kkt_tol => "optimality measure below the tolerance",
                         :kkt_rtol => "optimality measure below the tolerance relative to the first iteration",
                         :stationarity_tol => "stationarity measure below the tolerance",
                         :stationarity_rtol => "stationarity measure below the tolerance relative to the first iteration",

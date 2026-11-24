@@ -297,7 +297,7 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
   step); with `close_early = true` also when the stopping criteria are met. The optimiser forgets its memory at each
   jump; the optimisation only stops in the last stage.
 - **Stopping:** `maxiter` is mandatory. `stop` defaults to `StopCriteria(objective_range = 1e-3)` for OC and SiMPL
-  (`default_stop`; `ReactionDiffusion`: `change_tol = 1e-2`, below): the range of the objective over the last 10 iterations of the last stage, relative to the
+  (`default_stop`; `ReactionDiffusion`: `rate_tol = 0.1`, below): the range of the objective over the last 10 iterations of the last stage, relative to the
   objective, below 0.1 %. With a tanh projection `change_tol` and `kkt_tol` are rarely reached; the objective settles
   (half MBB beam 150×50: OC with adaptive move limits stops at iteration 214, 0.4 % above its value at 500 iterations; SiMPL at 210, within 0.3 % of 350 iterations). Other criteria:
   `kkt_tol`, `kkt_rtol` (relative to the first iteration), `stationarity_tol`, `stationarity_rtol` (the measure
@@ -366,15 +366,17 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
   `LUSolver()` by default, shown in the banner); `solve = (A, b, x, ctx, stale) -> x` replaces it (PETSc, an iterative
   solver). The operator is factorised again only when `Δt` or `τ` change (a `Parameter` of a `Continuation`, a
   rejected step). Frozen zones of the design space stay as they are (Neumann conditions for φ elsewhere).
-- **Volume** (`ExactVolume(; max_step, tol, maxiter)`, the default): the multiplier `λ` is the root of
+- **Volume** (`ExactVolume(; max_step, tol, maxiter, constraint)`, the default): the constraint built with `Volume`,
+  wherever it is in the problem (with none or several, `solve!` asks for `ExactVolume(; constraint = :name)`); the
+  multiplier `λ` is the root of
   `G(λ) = g(clamp(φ* − λ φ̌)) − g_k` with `φ̌ = A⁻¹ m` (`Δt` everywhere when no value is frozen): Newton on the
   clipped vector for a linear constraint (vectors only), Newton with the derivative of the constraint for `Ersatz()`,
   regula falsi (Illinois) for `Step()`, always inside the bracket given by the bounds, from the `λ` of the previous
   step. With an interface map the target goes down `max_step = 0.01` of `|D|` per iteration from the start (a solid
   start is not made feasible), with equality; at the final target the constraint is `g ≤ 0` with `λ ≥ 0`. A density
   meets the target from the first iteration. The augmented Lagrangian of the method takes every other constraint.
-  The tolerance `tol = 1e-4` is in units of the scaled constraint (with `Volume`'s default scale `V_max`, 5e-5 |D|
-  for a fraction 0.5). With `Step()` the volume is piecewise constant: the root stops when no node of the clipped
+  The tolerance `tol = 1e-4` is a fraction of `|D|`, like `max_step` (converted with the scale of the constraint: the
+  loop, the history and the table show the scaled value). With `Step()` the volume is piecewise constant: the root stops when no node of the clipped
   design changes side of the interface inside the bracket and ends on the feasible side, below the target by a few
   cells on coarse meshes. Measured on the 2 × 1 cantilever (Mac of the lab, 4 threads, Julia 1.13.0, 2026-11-24):
   `Ersatz()` 1.6 evaluations of the volume per step at 120 × 60; `Step()` 4.2, 4.6 and 4.4 at 20 × 10, 40 × 20 and
@@ -389,10 +391,17 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
   the observed rates fall below 2 for a correct derivative.
 - **Normalisation** (`normalize`): `L1Mean(c)` (default, `C = c |D| / Σ|gᵢ|`, independent of the mesh),
   `L2Norm()` (Kim et al.), `MaxAbs()`, or a function `(g, m, area) -> C`.
-- **Stopping:** `StopCriteria(change_tol = 1e-2)` with the constraints met (`default_stop`): never during the
-  descent of the volume. A criterion on the objective stops too early (the objective settles before the topology).
-  With `Step()` the interface jumps between quadrature points and the change rarely falls below `1e-2`: runs end at
-  `maxiter`, and the banner says so; `Ersatz()` is the recommended interface map.
+- **Stopping:** `StopCriteria(rate_tol = 0.1)` with the constraints met (`default_stop`): the rate of change
+  `‖Δφ‖∞/Δt` below `0.1`, with the `Δt` of the accepted step, so it does not depend on `Δt` and a step shrunk after a
+  rejection does not meet it by being short; never during the descent of the volume. Alternatives:
+  `StopCriteria(change_tol = 1e-2)` (the change alone) and `StopCriteria(phase_tol = 1e-4, phase_window = 5)` (the
+  fraction of the domain whose phase changes, the lumped mass of the nodes where φ changes sign over `|D|`, below the
+  tolerance in each of the last 5 iterations; only with an interface map). A criterion on the objective stops too
+  early (the objective settles before the topology). No interface map (`Step()` or `Ersatz()`) and no stopping
+  criterion is recommended yet: the choice will be validated with more cases (2 × 1 cantilever 120 × 60, Mac of the
+  lab, 4 threads, Julia 1.13.0, 400 iterations: `rate_tol` stops `Step()` at 259 and the density at 177, not
+  `Ersatz()`; with `Δt = 0.05` the density stops at 354, so the rate does not make the stopping iteration independent
+  of `Δt`; `phase_tol = 1e-4` stops `Ersatz()` at 233 and `Step()` at 227).
 - **Rejection:** when the forward problem does not converge at the new design, `RejectStep` halves `Δt` (the operator
   is factorised again, the gradient comes from the snapshot of the oracle) and the nominal `Δt` comes back at the next
   step.

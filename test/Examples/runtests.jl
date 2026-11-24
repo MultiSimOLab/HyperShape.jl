@@ -24,7 +24,7 @@ include(joinpath(@__DIR__, "..", "..", "examples", "cantilever_rd.jl"))
   @testset "Cantilever by reaction–diffusion (examples/cantilever_rd.jl)" begin
     r = run_cantilever_rd(; nx = 40, ny = 20, maxiter = 60, verbose = 0)
     @test r.iterations <= 60 && r.status in (:maxiter, :converged)
-    @test abs(r.history.constraints.volume[end]) <= 1e-4               # the volume reached at iteration 50
+    @test abs(r.history.constraints.volume[end]) <= 2e-4               # the volume (to 1e-4 |D|) reached at iteration 50
     @test r.history.objective[end] < 1 / (1e-3 + 0.5 * (1 - 1e-3))     # better than a uniform material χ = 0.5
   end
   @testset "The README and the Getting started page show examples/mbb.jl" begin

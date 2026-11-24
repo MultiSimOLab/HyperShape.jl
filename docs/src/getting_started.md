@@ -122,7 +122,7 @@ The screen shows a banner with the setup (each default marked), one row per iter
 `examples/cantilever_rd.jl` minimises the compliance of a 2 × 1 cantilever with the reaction–diffusion method. The
 design field is a level set `φ ∈ [−1, 1]` (P1), solid at the start and frozen under the load; the material the weak
 forms read is the fraction of each cell where `φ ≥ 0` (`Ersatz()`); the volume goes down 1 % of the domain per
-iteration until it reaches the target. By default `solve!` stops when `‖Δφ‖∞ < 1e-2` with the volume met, or at
+iteration until it reaches the target. By default `solve!` stops when the rate of change `‖Δφ‖∞/Δt < 0.1` with the volume met, or at
 `maxiter`:
 
 ```julia
@@ -136,4 +136,5 @@ solve!(problem, ReactionDiffusion(; τ = 2e-4, sensitivity = :physical); maxiter
 ```
 
 `τ` (the diffusion) and `sensitivity` are the two decisions: `:physical` lets holes appear where the material is
-little used. See [Design](@ref) for the step, the exact volume and the other options.
+little used. `Step()` in place of `Ersatz()` and other stopping criteria are options; which to use will be validated
+with more cases. See [Design](@ref) for the step, the exact volume and the other options.

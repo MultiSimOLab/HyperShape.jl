@@ -52,21 +52,23 @@ Base.show(io::IO, ::MaxAbs) = print(io, "MaxAbs()")
 # Exact volume
 
 """
-    ExactVolume(; max_step = :auto, tol = 1e-4, maxiter = 50)
+    ExactVolume(; max_step = :auto, tol = 1e-4, maxiter = 50, constraint = nothing)
 
 How [`ReactionDiffusion`](@ref) treats the volume (its default): natively, with a scalar multiplier `λ` found at
 every step so that the clipped design `z = clamp(φ* − λ φ̌, lb, ub)` meets the constraint (`φ*` the design after the
-reaction–diffusion step, `φ̌ = A⁻¹ m` the response of the step to a uniform unit source). It takes the first
-constraint of the problem that is an inequality `g ≤ 0` evaluated without a state (the volume), linear or not; the
-others go to the augmented Lagrangian of the method.
+reaction–diffusion step, `φ̌ = A⁻¹ m` the response of the step to a uniform unit source). It takes the constraint
+built with [`Volume`](@ref HyperShape.Functionals.Volume) (`g ≤ 0`), wherever it is in the problem; with none or with
+several, `solve!` throws: name the one to take with `constraint = :name` (any inequality `g ≤ 0` evaluated without a
+state, linear or not). The other constraints go to the augmented Lagrangian of the method.
 
 - `max_step`: how much the target may go down per iteration, as a fraction of the measure `|D|` of the design
   domain: the target of iteration `k` is `max(V_obj, V_{k−1} − max_step |D|)`, met with equality while it goes down;
   at `V_obj` the constraint is `g ≤ 0` with `λ ≥ 0`. `:auto` (default): `0.01` when the constraint reads the
   material through an interface map (`Step()`, `Ersatz()`), `nothing` otherwise (a density: the target from the
   first iteration). `nothing`: the target from the first iteration. A number in `(0, 1]`.
-- `tol`: tolerance of the root, in the units of the scaled constraint (the loop converges only with the
-  constraint met to it).
+- `tol`: tolerance of the root as a fraction of `|D|`, like `max_step` (`1e-4`: the volume within `1e-4 |D|` of its
+  target), converted to the units of the scaled constraint with its scale; the loop converges only with the
+  constraint met to it.
 - `maxiter`: evaluations of the constraint per step at most.
 
 The root of `G(λ) = g(clamp(φ* − λ φ̌)) − g_k` (non-increasing in λ) starts from the previous `λ`, inside the bracket
@@ -84,17 +86,19 @@ struct ExactVolume
   max_step::Union{Symbol,Nothing,Float64}
   tol::Float64
   maxiter::Int
-  function ExactVolume(; max_step = :auto, tol::Real = 1e-4, maxiter::Integer = 50)
+  constraint::Union{Nothing,Symbol}
+  function ExactVolume(; max_step = :auto, tol::Real = 1e-4, maxiter::Integer = 50, constraint::Union{Nothing,Symbol} = nothing)
     (max_step === :auto || max_step === nothing || (max_step isa Real && 0 < max_step <= 1)) ||
       throw(ArgumentError("ExactVolume: max_step must be :auto, nothing or a fraction of |D| in (0, 1], got $(repr(max_step))"))
     (isfinite(tol) && tol > 0) || throw(ArgumentError("ExactVolume: tol must be positive, got $tol"))
     maxiter >= 2 || throw(ArgumentError("ExactVolume: maxiter must be at least 2, got $maxiter"))
-    new(max_step isa Real ? Float64(max_step) : max_step, Float64(tol), Int(maxiter))
+    new(max_step isa Real ? Float64(max_step) : max_step, Float64(tol), Int(maxiter), constraint)
   end
 end
 
 Base.show(io::IO, v::ExactVolume) =
-  print(io, "ExactVolume(max_step = ", repr(v.max_step), ", tol = ", v.tol, ", maxiter = ", v.maxiter, ")")
+  print(io, "ExactVolume(max_step = ", repr(v.max_step), ", tol = ", v.tol, ", maxiter = ", v.maxiter,
+        v.constraint === nothing ? "" : ", constraint = $(repr(v.constraint))", ")")
 
 # ---------------------------------------------------------------------------------------------------------------
 # The step
@@ -112,6 +116,7 @@ struct RDStep{T,D,N,V,LS,S,F} <: Optimizer
   solve::S              # nothing or (A, b, x, ctx, stale) -> x
   diffusion::F          # nothing or (φ, v) -> ∫(…)dΩ
   degree::Int
+  gtol::Base.RefValue{Float64}   # the tolerance of the volume in units of the scaled constraint (set per problem)
 end
 
 _value(x::Real) = Float64(x)
@@ -146,6 +151,8 @@ mutable struct RDState{NS,C,MT,MM}
   λ::Float64
   shrunk::Bool
   kind::Symbol                  # :none, :linear, :newton or :illinois
+  interface::Bool               # the objective reads the design through an interface map (phases)
+  phase::Float64                # fraction of |D| whose phase changed in the last step (NaN without phases)
   dg::Float64                   # descent of the target per iteration (scaled units; Inf: none)
   ctx::C
   nsolves::Int
@@ -225,7 +232,8 @@ function Optimizers.init(opt::RDStep, z, oracle)
   end
   v() = zeros(n)
   s = RDState(m, K, M, A, Kmap, Mmap, Dmap, kd, area, area^(2 / d), nd == 0 && opt.diffusion === nothing, nd, τ, Δt, Δt,
-              ns, true, v(), v(), v(), v(), v(), v(), v(), v(), 0.0, false, :none, Inf, fo.ctx, 0, 0, 0)
+              ns, true, v(), v(), v(), v(), v(), v(), v(), v(), 0.0, false, :none,
+              _has_interface_map(physical_fields(fo.J)), NaN, Inf, fo.ctx, 0, 0, 0)
   if opt.solve === nothing
     s.nfactor += 1
     _unit_response!(opt, s)
@@ -317,6 +325,7 @@ function _rd_constraint!(opt::RDStep, s::RDState, oracle, fo)
            (θ isa PhysicalFields && !is_differentiable(θ)) ? :illinois : :newton
   ms = opt.volume.max_step === :auto ? (interface ? 0.01 : nothing) : opt.volume.max_step
   s.dg = ms === nothing ? Inf : ms * s.area / get_scale(F)
+  opt.gtol[] = opt.volume.tol * s.area / get_scale(F)
   s
 end
 
@@ -394,6 +403,9 @@ function Optimizers.step!(opt::RDStep, s::RDState, z, oracle, ctx)
     viol = max(0.0, Gλ + gk)
   end
   @. s.δ = z - s.zold
+  # the fraction of the domain that changed phase (the lumped mass of the nodes where φ changed sign)
+  s.phase = s.interface ?
+    sum(Broadcast.instantiate(Broadcast.broadcasted((a, b, w) -> ((a >= 0) != (b >= 0)) ? w : 0.0, s.zold, z, s.m))) / s.area : NaN
   StepInfo{1}(true, f, NaN, NaN, maximum(abs, s.δ), s.Δt, 1, NaN, (viol,), (λ,))
 end
 
@@ -460,11 +472,11 @@ function _multiplier!(opt::RDStep, s::RDState, oracle, gk, lb, ub)
   s0 = 0.02 / s.Δt                              # a shift of 0.02 of φ
   λ, Gλ, status = if s.kind === :linear
     a, V = linear_constraint(oracle, 1)
-    _root(_LinearG(a, V, s, lb, ub, gk), _LinearDG(a, s, lb, ub), s.λ, lo, hi, s0, vol.tol, vol.maxiter, _Closed(s, lb, ub))
+    _root(_LinearG(a, V, s, lb, ub, gk), _LinearDG(a, s, lb, ub), s.λ, lo, hi, s0, opt.gtol[], vol.maxiter, _Closed(s, lb, ub))
   elseif s.kind === :newton
-    _root(_OracleG(oracle, s, lb, ub, gk), _OracleDG(oracle, s, lb, ub), s.λ, lo, hi, s0, vol.tol, vol.maxiter, _Closed(s, lb, ub))
+    _root(_OracleG(oracle, s, lb, ub, gk), _OracleDG(oracle, s, lb, ub), s.λ, lo, hi, s0, opt.gtol[], vol.maxiter, _Closed(s, lb, ub))
   else
-    _root(_OracleG(oracle, s, lb, ub, gk), nothing, s.λ, lo, hi, s0, vol.tol, vol.maxiter, _NoCrossing(s, lb, ub))
+    _root(_OracleG(oracle, s, lb, ub, gk), nothing, s.λ, lo, hi, s0, opt.gtol[], vol.maxiter, _NoCrossing(s, lb, ub))
   end
   status === :nonfinite &&
     throw(OptimizationFailure("ReactionDiffusion: the constraint is not finite at a trial design of the multiplier"))
@@ -575,7 +587,29 @@ Optimizers.objective_changed!(::RDStep, s::RDState) = s
 Optimizers.handles(opt::RDStep, c::ConstraintInfo) =
   opt.volume !== nothing && is_upper(c) && c.hi == 0 && c.design_only && !c.field
 Optimizers.max_native(opt::RDStep) = opt.volume === nothing ? 0 : 1
-Optimizers.constraint_tol(opt::RDStep) = opt.volume === nothing ? Inf : opt.volume.tol
+Optimizers.constraint_tol(opt::RDStep) = opt.volume === nothing ? Inf : isnan(opt.gtol[]) ? opt.volume.tol : opt.gtol[]
+phase_change(::RDStep, s::RDState) = s.phase
+
+# the native constraint of ExactVolume: the one named, or the one built with Volume (exactly one)
+function _auto_native(opt::RDStep, problem, infos, names)
+  opt.volume === nothing && return Int[]
+  want = opt.volume.constraint
+  if want !== nothing
+    i = findfirst(==(want), names)
+    i === nothing && throw(ArgumentError("ExactVolume: constraint = $(repr(want)) is not a constraint of the problem " *
+                                         "(its constraints: $(join(names, ", ")))"))
+    handles(opt, infos[i]) || throw(ArgumentError("ExactVolume: the constraint $want is not an inequality g ≤ 0 " *
+                                                  "evaluated without a state"))
+    return [i]
+  end
+  cand = [i for (i, c) in enumerate(values(problem.constraints)) if is_volume(c.F) && handles(opt, infos[i])]
+  length(cand) == 1 && return cand
+  isempty(cand) && throw(ArgumentError("ReactionDiffusion: ExactVolume treats the constraint built with Volume(…) " *
+    "(g ≤ 0); the problem has none. Add one, name another constraint with ExactVolume(; constraint = :name), or give " *
+    "every constraint to the augmented Lagrangian (volume = nothing, lagrangian = AugmentedLagrangian(…; native = ()))"))
+  throw(ArgumentError("ReactionDiffusion: the problem has $(length(cand)) constraints built with Volume(…) " *
+    "($(join(names[cand], ", "))): choose the one the step treats with ExactVolume(; constraint = :name)"))
+end
 Optimizers.computes_kkt(::RDStep) = false
 _checks_linear_native(::RDStep) = true          # the step may leave a linear volume violated on purpose (max_step)
 Optimizers.memory(::RDStep, s::RDState, z) = (λ = s.λ,)
@@ -585,9 +619,10 @@ function Optimizers.restore_memory!(::RDStep, s::RDState, z, v::NamedTuple)
   s
 end
 
-# ReactionDiffusion stops when maximum(abs, Δz) < 1e-2 and the constraints hold to their tolerances. A criterion on
-# the objective stops too early: the objective settles before the topology does.
-default_stop(::RDStep) = StopCriteria(change_tol = 1e-2)
+# ReactionDiffusion stops when the rate of change maximum(abs, Δz)/Δt < 0.1 (Δt of the accepted step: it does not depend
+# on Δt, nor is it met by a step shrunk after a rejection) and the constraints hold to their tolerances (decision of
+# Jesús, 2026-11-24). A criterion on the objective stops too early: the objective settles before the topology does.
+default_stop(::RDStep) = StopCriteria(rate_tol = 0.1)
 
 summary_note(::Optimizer, state) = ""
 summary_note(::RDStep, s::RDState) =
@@ -624,7 +659,7 @@ the design domain, so `τ` is dimensionless), `φ* = z + δ`, and then `z = clam
 (plus the terms of the augmented Lagrangian of the other constraints) and `C` its normalisation (`normalize`).
 
 The material is read through the maps of the user: a level set (`bounds = (-1.0, 1.0)`, solid start `init = 1.0`) through
-an interface map, `χ = :φ => Ersatz()` (recommended) or `Step()`; or a density (`bounds = (0.0, 1.0)`) through
+an interface map, `χ = :φ => Ersatz()` or `Step()`; or a density (`bounds = (0.0, 1.0)`) through
 `Identity()` and a SIMP interpolation in the weak forms. Frozen zones of the design space (`FieldVariable(…; frozen)`)
 are not variables: the step leaves them as they are.
 
@@ -645,7 +680,7 @@ Optional (each one replaceable, shown in the banner):
   not converge at the new design, back to its value at the next step.
 - `normalize`: [`L1Mean`](@ref)`(c)` (default `c = 1`), [`L2Norm`](@ref)`()`, [`MaxAbs`](@ref)`()`, or a function
   `(g, m, area) -> C` (`g` the derivative, `m` the lumped mass, `area` = `|D|`).
-- `volume`: [`ExactVolume`](@ref)`(; max_step, tol, maxiter)`, or `nothing` (every constraint to the augmented
+- `volume`: [`ExactVolume`](@ref)`(; max_step, tol, maxiter, constraint)`, or `nothing` (every constraint to the augmented
   Lagrangian; needs `lagrangian = AugmentedLagrangian(…; native = ())`).
 - `mass`: `:lumped` (default; the response `φ̌` is positive and `G(λ)` monotone on non-obtuse meshes) or `:consistent`.
 - `void_weight`: `w₀` of `sensitivity = :physical`, default `1e-3`.
@@ -667,9 +702,11 @@ a density `φ₀ = 0.5` with `bounds = (0.0, 1.0)`, SIMP `p = 3`, `Volume(…; s
 Per iteration: one forward solve, one adjoint (none with `SelfAdjoint()`), one assembly of the sensitivity, one
 product `K z` and one solve of the step (no factorisation); the volume costs a few evaluations of the constraint per
 step (vectors only for a density; the map and an integral each with an interface map, plus one derivative per Newton
-iteration with `Ersatz()`; the summary of `solve!` counts them). The default stop is `StopCriteria(change_tol = 1e-2)` with the constraints met ([`default_stop`](@ref)); with
-`Step()` it is rarely met (the interface jumps between nodes) and runs usually end at `maxiter`: `Ersatz()` is
-recommended. The starting design is not made feasible (the volume goes down from a solid start, `max_step` of `|D|` per
+iteration with `Ersatz()`; the summary of `solve!` counts them). The default stop is
+`StopCriteria(rate_tol = 0.1)`, the rate of change `‖Δφ‖∞/Δt` below `0.1`, with the constraints met
+([`default_stop`](@ref)); `StopCriteria(change_tol)` (the change alone) and `StopCriteria(phase_tol)` (the fraction of
+the domain that changes phase, with an interface map) are the alternatives. Neither the interface map nor the
+stopping criterion is a recommendation: the choice will be validated with more cases. The starting design is not made feasible (the volume goes down from a solid start, `max_step` of `|D|` per
 iteration). Checkpoints save the multiplier (a resumed run is the uninterrupted one).
 """
 struct ReactionDiffusion{S<:RDStep,L<:AugmentedLagrangian} <: AbstractMethod
@@ -729,7 +766,7 @@ function _reaction_diffusion(preset; kwargs...)
   vol === nothing && lag.native !== () &&
     throw(ArgumentError("ReactionDiffusion: volume = nothing gives every constraint to the augmented Lagrangian: " *
                         "say it with lagrangian = AugmentedLagrangian(…; native = ())"))
-  step = RDStep(τ, Δt, sens, norm, vol, mass, Float64(w0), ls, solvef, diff, Int(deg))
+  step = RDStep(τ, Δt, sens, norm, vol, mass, Float64(w0), ls, solvef, diff, Int(deg), Ref(NaN))
   ReactionDiffusion(step, lag, preset, sources)
 end
 
@@ -768,6 +805,7 @@ function check_problem(m::ReactionDiffusion, problem)
                         "Float64, 1), conformity = :H1)"))
   (isfinite(b.lb) && isfinite(b.ub)) || throw(ArgumentError("ReactionDiffusion: the bounds of z must be finite"))
   native = _native_split(problem, m.step, m.lagrangian)
+  _set_tolerance!(m.step, problem, native)
   m.step.sensitivity === :design || return nothing
   for (j, (n, F)) in enumerate(pairs((objective = problem.objective, map(c -> c.F, problem.constraints)...)))
     j > 1 && (j - 1) in native && continue      # the native constraint is only evaluated (the root), never differentiated
@@ -782,6 +820,17 @@ function check_problem(m::ReactionDiffusion, problem)
                           "hole can appear. Use sensitivity = :physical, or start from a design with holes"))
   end
   nothing
+end
+
+# the tolerance of the volume in units of the scaled constraint, as soon as its scale is known (the banner shows it)
+function _set_tolerance!(opt::RDStep, problem, native)
+  opt.gtol[] = NaN
+  (opt.volume === nothing || isempty(native)) && return opt
+  s = get_scale(problem.constraints[native[1]].F)
+  isfinite(s) || return opt                    # scale = :initial: set when the step starts
+  Ω = get_triangulation(problem.z.blocks[1].space)
+  opt.gtol[] = opt.volume.tol * sum(∫(1.0)Measure(Ω, 1)) / s
+  opt
 end
 
 _rd_value(x::Real) = _g(x)
@@ -820,13 +869,11 @@ function banner_lines(m::ReactionDiffusion, problem)
       θ = physical_fields(F)
       kind = is_linear(F) ? "Newton on the clipped vector" : _has_step(θ) ? "Illinois" : "Newton"
       ms = opt.volume.max_step === :auto ? (_has_interface_map(θ) ? 0.01 : nothing) : opt.volume.max_step
-      push!(lines, ("$n: native, exact multiplier ($kind, tol $(_g_or_e(opt.volume.tol))), " *
+      push!(lines, ("$n: native" * (opt.volume.constraint === nothing ? " (the Volume)" : " (named)") *
+                    ", exact multiplier ($kind, tol $(_g_or_e(opt.volume.tol)) |D|), " *
                     (ms === nothing ? "target from the first iteration" : "target lowered $(_g(100 * ms)) % of |D| per iteration") *
                     mark(:volume), :normal))
     end
   end
-  F = problem.objective
-  any(G -> _has_step(physical_fields(G)), (F, (c.F for c in problem.constraints)...)) &&
-    push!(lines, ("with Step() the change criterion is rarely met; runs usually end at maxiter; Ersatz() is recommended", :yellow))
   lines
 end
