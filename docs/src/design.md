@@ -142,7 +142,8 @@ z  = OptVariables(φ = FieldVariable(Vφ; bounds = (-1.0, 1.0), init = φ0, froz
   random points at least `spacing` apart with `rng`; there `spacing` is the mean distance from a centre to its
   nearest neighbour: the number of holes starts as that of `:hex` over the region and is corrected after measuring
   that distance, at most twice, so slender parts get fewer holes than their measure suggests; `nholes` fixes the
-  number instead; neighbours are at least `min_distance` apart, by default `2radius + (spacing − 2radius)/2`: after
+  number instead (rounded to whole orbits with a symmetry); so `:cvt` gives fewer holes than `:hex` with the same
+  `spacing`, 46 against 73 on a 2 × 1 plate; neighbours are at least `min_distance` apart, by default `2radius + (spacing − 2radius)/2`: after
   each Lloyd step closer centres are pushed apart; the holes of `:cvt` are inside the region, those of `:hex` may be
   cut by the boundary). The non-nucleating methods of the literature start from
   periodic staggered patterns (Takezawa et al. 2010); with the double-well prototype a staggered seed gave the bridge
@@ -162,8 +163,8 @@ z  = OptVariables(φ = FieldVariable(Vφ; bounds = (-1.0, 1.0), init = φ0, froz
   hole, `ub` beyond `radius + width`), the minimum with `base`; with `bounds = (0.0, 1.0)` it is a density with 0.5 on
   the edge. P0 and P1, any mesh in 2D and 3D; linear cost (a few microseconds per value; `:cvt` times its at most 60
   Lloyd steps per relaxation, up to three relaxations). Sequential. Not periodic across periodic sides. With a
-  design space on part of the model, the cells outside it count as solid for `connect`. An error when everything
-  would be void, a warning above half.
+  design space on part of the model, the cells outside it count as solid for `connect`. An error when every value
+  would be inside a hole, a warning above half (`base` does not count).
 
 Planned: global parameters as blocks (applied voltage, fibre angle), scaling and symmetries in the map `z → x`,
 physical fields that depend on several design fields, material interpolation in the map `x → θ`.

@@ -308,23 +308,30 @@ function _seed_geometry(V, Ω, ::Val{D}) where {D}
   end
   X = Gridap.Arrays.Table(Gridap.Geometry.get_cell_node_ids(Ω))
   nc = length(X)
+  # the vertices (the first nodes of a Lagrangian cell; a geometry of order 2 has more nodes) and the n-cubes, by type
+  polys = Gridap.Geometry.get_polytopes(Ω)
+  nvt = [Gridap.ReferenceFEs.num_vertices(p) for p in polys]
+  cubet = [Gridap.ReferenceFEs.is_n_cube(p) for p in polys]
+  ctype = collect(Gridap.Geometry.get_cell_type(Ω))
   cen = Vector{NTuple{D,Float64}}(undef, nc)
   h = Vector{Float64}(undef, nc)
   lo, hi = ntuple(_ -> Inf, Val(D)), ntuple(_ -> -Inf, Val(D))
   @inbounds for c in 1:nc
     r = X.ptrs[c]:X.ptrs[c+1]-1
     sc, m = ntuple(_ -> 0.0, Val(D)), 0.0
+    nv = first(r) + nvt[ctype[c]] - 1
     for a in r
       p = xn[X.data[a]]
       sc = _add(sc, p)
       lo, hi = min.(lo, p), max.(hi, p)
-      for b in a+1:last(r)
+      a <= nv || continue
+      for b in a+1:nv
         m = max(m, sqrt(_d2(p, xn[X.data[b]])))
       end
     end
     cen[c] = _div(sc, length(r))
     # the longest distance between two vertices; the diagonal of an n-cube divided by √D
-    h[c] = length(r) == 2^D && D > 1 ? m / sqrt(D) : m
+    h[c] = cubet[ctype[c]] && D > 1 ? m / sqrt(D) : m
   end
   dΩ = get_cell_measure(Ω)
   cm = Gridap.Arrays.array_cache(dΩ)
@@ -407,7 +414,7 @@ _maxmove(a, b) = (m = 0.0; for i in eachindex(a); m = max(m, sqrt(_d2(a[i], b[i]
 
 # the mean distance from each point to the nearest other point (at most 3s)
 function _mean_nn(pts::Vector{NTuple{D,Float64}}, lo, hi, s) where {D}
-  length(pts) < 2 && return 3s
+  length(pts) < 2 && return s          # one hole: nothing to correct
   B = _Buckets(lo, hi, s, length(pts))
   for p in pts; _push!(B, p); end
   tot = 0.0
@@ -632,10 +639,17 @@ function _hole_centers(G, radius, spacing, pattern, margin, exclude, rng, origin
     # N holes: the start thinned or completed by farthest points (the boundary layer the start leaves empty; a point
     # gives as many holes as distinct images); Lloyd steps, each followed by the separation of the centres closer than
     # dmin (Lloyd alone packs them closer in thin regions, a tube); then the last separation
-    relax(N) = begin
+    # the start for N holes: thinned or completed by farthest points (the boundary layer the start leaves empty; a point
+    # gives as many holes as distinct images, so with a symmetry the number goes by whole orbits)
+    start(N) = begin
       cs = copy(init)
       sum(nimg, cs; init = 0) > N && (cs = _farthest_subset(cs, N; count = nimg))
       _farthest_fill!(cs, G, S, candf, N, spacing; count = nimg)
+      cs
+    end
+    # Lloyd steps, each followed by the separation of the centres closer than dmin (Lloyd alone packs them closer in thin
+    # regions, a tube); then the last separation. The centres, the mean distance to the nearest neighbour, the holes.
+    relax(cs) = begin
       for _ in 1:60
         prev = copy(cs)
         cs = first(_lloyd(cs, G, S, adm, spacing, dmin, 1))
@@ -643,29 +657,35 @@ function _hole_centers(G, radius, spacing, pattern, margin, exclude, rng, origin
         _maxmove(cs, prev) < 0.05 * G.hmean && break
       end
       _separate!(cs, G, S, dmin, dsep, K, R, Cadm, adm, ρp, tolm; sweeps = 200)
-      cs, _mean_nn(first(_images(cs, S, tolm)), lo, hi, spacing)
+      gen = first(_images(cs, S, tolm))
+      cs, _mean_nn(gen, lo, hi, spacing), length(gen)
     end
+    madm = sum(c -> G.meas[c], adm; init = 0.0)
     if nholes !== nothing
-      first(relax(nholes))
+      # at most one hole per volume of a close packing at dmin (√3/2 dmin² in 2D, dmin³/√2 in 3D)
+      vmin = D == 2 ? sqrt(3) / 2 * dmin^2 : D == 3 ? dmin^3 / sqrt(2) : dmin^D
+      nholes <= max(1, madm / vmin) ||
+        throw(ArgumentError("hole_seed: nholes = $nholes do not fit $(round(dmin, sigdigits = 3)) apart in the region " *
+                            "where holes may go (at most about $(floor(Int, madm / vmin))): reduce nholes or min_distance"))
+      first(relax(start(nholes)))
     else
       # the number of holes for a mean distance to the nearest neighbour ≈ spacing: from the number of :hex over the
-      # admissible region (√3/2 s² per hole in 2D, s³/√2 in 3D), corrected with d̄ ∝ N^(-1/α): α = D at first, then
-      # α measured from the two runs (between 1, a slender part, and D)
+      # admissible region (√3/2 s² per hole in 2D, s³/√2 in 3D), corrected with d̄ ∝ N^(-1/α) on the holes obtained:
+      # α = D at first, then α measured from the two runs (between 1, a slender part, and D). A start with as many
+      # holes as one already relaxed is not relaxed again.
       vhex = D == 2 ? sqrt(3) / 2 * spacing^2 : D == 3 ? spacing^3 / sqrt(2) : spacing^D
-      Ns = [max(1, round(Int, sum(c -> G.meas[c], adm; init = 0.0) / vhex))]
-      runs = [relax(Ns[1])]
+      runs = [relax(start(max(1, round(Int, madm / vhex))))]
       for pass in 1:2
-        d = last(runs[end])
-        abs(d / spacing - 1) <= 0.05 && break
-        α = pass == 1 || last(runs[1]) == last(runs[2]) || Ns[1] == Ns[2] ? Float64(D) :
-            clamp(log(Ns[2] / Ns[1]) / log(last(runs[1]) / last(runs[2])), 1.0, Float64(D))
-        Nn = max(1, round(Int, Ns[end] * (d / spacing)^α))
-        Nn in Ns && break
-        push!(Ns, Nn)
-        push!(runs, relax(Nn))
+        _, d, n = runs[end]
+        (n <= 1 || abs(d / spacing - 1) <= 0.05) && break
+        (_, d1, n1), (_, d2, n2) = runs[1], runs[end]
+        α = pass == 1 || d1 == d2 || n1 == n2 ? Float64(D) : clamp(log(n2 / n1) / log(d1 / d2), 1.0, Float64(D))
+        cs0 = start(max(1, round(Int, n * (d / spacing)^α)))
+        sum(nimg, cs0; init = 0) in last.(runs) && break
+        push!(runs, relax(cs0))
       end
-      k = argmin([abs(last(q) / spacing - 1) for q in runs])
-      @debug "hole_seed :cvt" Ns dmean = last.(runs) chosen = k
+      k = argmin([abs(q[2] / spacing - 1) for q in runs])
+      @debug "hole_seed :cvt" holes = last.(runs) dmean = getindex.(runs, 2) chosen = k
       first(runs[k])
     end
   else
@@ -685,6 +705,10 @@ function _hole_centers(G, radius, spacing, pattern, margin, exclude, rng, origin
     pts
   end
   _, centers, ndrop = _accept_orbits(pts, S, dmin, admissible, spacing, lo, hi)
+  nholes === nothing || length(centers) == nholes ||
+    @warn "hole_seed: nholes = $nholes asked, $(length(centers)) placed" *
+          (length(S.G) > 1 ? " (a symmetry places whole orbits)" : "") *
+          (length(centers) < nholes ? " (they do not all fit $(round(dmin, sigdigits = 3)) apart)" : "")
   pattern in (:hex, :lattice) && _check_lattice(pattern, S, lo, hi, spacing, origin, radius, ndrop, Val(D))
   centers, keep
 end
@@ -772,6 +796,9 @@ function _seed_args(V, radius, spacing, pattern, margin, width, jitter, rng, bou
     throw(ArgumentError("hole_seed: nholes must be a positive integer, got $nholes"))
   min_distance === nothing || (isfinite(min_distance) && min_distance > 2radius) ||
     throw(ArgumentError("hole_seed: min_distance ($min_distance) must be larger than 2 radius ($(2radius)): the holes would overlap"))
+  min_distance === nothing || nholes !== nothing || min_distance <= spacing ||
+    throw(ArgumentError("hole_seed: min_distance ($min_distance) larger than spacing ($spacing), the mean distance " *
+                        "between neighbours: enlarge spacing, or give nholes"))
   r = rng === nothing ? (pattern === :poisson ? Random.Xoshiro(1) : nothing) :
       rng isa Integer ? Random.Xoshiro(rng) : rng isa Random.AbstractRNG ? rng :
       throw(ArgumentError("hole_seed: rng must be nothing, an integer seed or an AbstractRNG, got $(typeof(rng))"))
@@ -837,19 +864,24 @@ Holes of radius `radius` (a length, in the units of the mesh) about `spacing` ap
 - `pattern = :lattice`: square (cubic) lattice of step `spacing`, symmetric in the bounding box (with `jitter` too).
 - `pattern = :cvt`: a centroidal Voronoi tessellation of the cells where a hole may go (Lloyd's relaxation): the
   centres spread evenly over any geometry, away from the excluded zones. `spacing` is the mean distance from a centre
-  to its nearest neighbour (within 5 % where the number of holes allows it): the number of holes starts as that of
-  `:hex` with the same `spacing` over that region (its measure over `√3/2 spacing²` in 2D, `spacing³/√2` in 3D), the
-  mean distance is measured after the relaxation and the number corrected, at most twice (up to three relaxations;
-  the closest run is kept). Slender parts get fewer holes than their measure suggests (a tube 1.5 `spacing` thick:
-  half). `nholes` fixes the number of holes instead (images of a symmetry included; one relaxation). Neighbours are
-  at least `min_distance` apart (default `2radius + (spacing − 2radius)/2`, half the solid of `:hex` between two
-  holes; it must exceed `2radius`): after each Lloyd step the centres closer than that are pushed apart, and an orbit
-  is dropped only where the minimum cannot be met. It starts from the centres of `:hex` (deterministic) or, with `rng`
-  (an integer seed or an `AbstractRNG`), from random points at least `spacing` apart, thinned or completed by farthest
-  points; at most 60 Lloyd steps per relaxation, until no centre moves more than 5 % of the mean cell size. Its
-  centres are inside the region (near a centroid of a cell where a hole may go), not cut by the boundary as those of
-  `:hex` may be. The sequence of Julia's generators may change between versions of Julia: give references without
-  `rng`. `nholes` and `min_distance` are options of `:cvt` only.
+  to its nearest neighbour: the number of holes starts as that of `:hex` with the same `spacing` over that region (its
+  measure over `√3/2 spacing²` in 2D, `spacing³/√2` in 3D), the mean distance is measured after the relaxation and
+  the number corrected from the holes obtained, at most twice (up to three relaxations; the closest run is kept; one
+  hole is not corrected). Measured: 0.96–1.03 `spacing` on a 2 × 1 plate, in a cube and in a torus whose tube is 1.5
+  `spacing` thick, 0.93 on a strip 1.5 `spacing` wide. So `:cvt` gives fewer holes than `:hex` with the same `spacing`
+  (plate 2 × 1: 46 against 73; cube: 58 against 159, which counts the holes cut by the boundary), and slender parts
+  fewer than their measure suggests (the torus: 12 against 24); the void fractions of the two seeds differ.
+  `nholes` fixes the number of holes instead (one relaxation): an error when they cannot fit `min_distance` apart in
+  the region, a warning when fewer are placed; with a symmetry the holes come in whole orbits, so the number is
+  rounded to them (the warning gives the number placed). Neighbours are at least `min_distance` apart (default
+  `2radius + (spacing − 2radius)/2`, half the solid of `:hex` between two holes; above `2radius`, and at most
+  `spacing` unless `nholes` is given): after each Lloyd step the centres closer than that are pushed apart, and an
+  orbit is dropped only where the minimum cannot be met. It starts from the centres of `:hex` (deterministic) or,
+  with `rng` (an integer seed or an `AbstractRNG`), from random points at least `spacing` apart, thinned or completed
+  by farthest points; at most 60 Lloyd steps per relaxation, until no centre moves more than 5 % of the mean cell
+  size. Its centres are inside the region (near a centroid of a cell where a hole may go), not cut by the boundary as
+  those of `:hex` may be. The sequence of Julia's generators may change between versions of Julia: give references
+  without `rng`. `nholes` and `min_distance` are options of `:cvt` only.
 
 `origin` (`:hex`, `:lattice`, and the start of `:cvt`) is a point of the lattice. A hole is kept when the centroid of
 some cell is inside it (meshes that do not fill their bounding box), and holes cut by the boundary are kept (a
@@ -880,8 +912,8 @@ level `(lb + ub)/2` at `d = radius` and `ub` at `d = radius + width` (linear in 
 level set in `(-1, 1)`, a density in `(0, 1)` with `0.5` on the edge of the holes), and is then the minimum with
 `base` (default `ub`; a number, a vector of free values or a function of the coordinates).
 
-Checks: an `ArgumentError` when no hole fits, no value of the field falls inside a hole or every value is below the
-level (all void); warnings when more than half of the values are below the level, when some holes
+Checks: an `ArgumentError` when no hole fits, no value of the field falls inside a hole or every value is inside a
+hole (whatever `base` does); warnings when more than half of the values are inside the holes, when some holes
 contain no value of the field (the mesh does not resolve them: refine or enlarge them), when the solid between two
 holes is thinner than two cells, and when the solid (the cells whose mean value is at least the level, the frozen
 cells with the values `frozen`, by default `ub`) does not join the tags of `connect` (by default `exclude`;
@@ -928,13 +960,14 @@ function hole_seed(V; radius::Real, spacing::Real = 4radius, pattern::Symbol = :
   level = (lb + ub) / 2
   nin > 0 || throw(ArgumentError("hole_seed: no value of the field falls inside a hole (radius = $radius, mean cell " *
                                  "size $(round(hmean, sigdigits = 3))): refine the mesh or enlarge the holes"))
-  nvoid = count(<(level), φ)
-  nvoid < n || throw(ArgumentError("hole_seed: every value of the field is below the level (all void): the holes " *
-                                   "cover the domain (radius = $radius, spacing = $spacing, lengths in the units of " *
-                                   "the mesh): reduce radius or enlarge spacing"))
-  nvoid <= n / 2 ||
-    @warn "hole_seed: $(round(100nvoid / n, digits = 1)) % of the values are below the level (more void than solid): " *
+  # the values inside the holes (not those that base sets below the level)
+  nin < n || throw(ArgumentError("hole_seed: every value of the field is inside a hole: the holes cover the domain " *
+                                 "(radius = $radius, spacing = $spacing, lengths in the units of the mesh): reduce " *
+                                 "radius or enlarge spacing"))
+  nin <= n / 2 ||
+    @warn "hole_seed: $(round(100nin / n, digits = 1)) % of the values are inside the holes (more holes than solid): " *
           "check radius and spacing (radius = $radius, spacing = $spacing, lengths in the units of the mesh)"
+  nvoid = count(<(level), φ)
   empty > 0 &&
     @warn "hole_seed: $empty of $(length(centers)) holes contain no value of the field (radius = $radius, mean cell size $(round(hmean, sigdigits = 3))): refine the mesh or enlarge the holes"
   connected = true

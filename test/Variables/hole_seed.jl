@@ -289,11 +289,13 @@ meannn(c) = sum(minimum(dist(c[i], c[j]) for j in eachindex(c) if j != i) for i 
     # spacing is the mean distance to the nearest neighbour (the number of holes calibrated), also in a slender strip
     # and in a slender bar (3D), where the measure over the area per hole of :hex gives too many; nholes fixes the
     # number (one relaxation), min_distance the minimum
-    for (box, cells, n) in (((0, 2, 0, 1), (80, 40), 2 / (sqrt(3) / 2 * s^2)), ((0, 4, 0, 0.3), (160, 12), 1.2 / (sqrt(3) / 2 * s^2)))
+    # measured: 0.98–1.02 on the rectangle, 0.93 on the strip 1.5 spacing wide (documented)
+    for (box, cells, n, tol) in (((0, 2, 0, 1), (80, 40), 2 / (sqrt(3) / 2 * s^2), (0.95, 1.05)),
+                                 ((0, 4, 0, 0.3), (160, 12), 1.2 / (sqrt(3) / 2 * s^2), (0.9, 1.05)))
       Vb = TestFESpace(CartesianDiscreteModel(box, cells), ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
       for rng in (nothing, 1)
         C = HSV.hole_centers(Vb; radius = r, spacing = s, pattern = :cvt, rng)
-        @test abs(meannn(C) / s - 1) <= 0.1
+        @test tol[1] <= meannn(C) / s <= tol[2]
         @test mindist(C) >= 2r + (s - 2r) / 2 - 1e-12
         @test all(p -> box[1] <= p[1] <= box[2] && box[3] <= p[2] <= box[4], C)
         C = HSV.hole_centers(Vb; radius = r, spacing = s, pattern = :cvt, rng, nholes = round(Int, n))
@@ -381,9 +383,94 @@ meannn(c) = sum(minimum(dist(c[i], c[j]) for j in eachindex(c) if j != i) for i 
 
   @testset "holes as large as the domain: error; mostly void: warning" begin
     c = seed_cantilever(; frozen = false)
-    @test_throws r"every value of the field is below the level" hole_seed(c.Vφ; radius = 3.0)
-    @test_logs (:warn, r"more void than solid") match_mode = :any hole_seed(c.Vφ; radius = 0.3, spacing = 0.61)
-    @test_logs (:warn, r"more void than solid") match_mode = :any hole_seed(c.Vφ; radius = 0.3, spacing = 0.61, pattern = :cvt)
+    @test_throws r"every value of the field is inside a hole" hole_seed(c.Vφ; radius = 3.0)
+    @test_logs (:warn, r"more holes than solid") match_mode = :any hole_seed(c.Vφ; radius = 0.3, spacing = 0.61)
+    @test_logs (:warn, r"more holes than solid") match_mode = :any hole_seed(c.Vφ; radius = 0.3, spacing = 0.61, pattern = :cvt)
+    # base below the level is not void from the holes: a uniform density 0.4 or level set -0.2 with holes (failed in 8bc0ff8)
+    φ = @test_logs hole_seed(c.Vφ; radius = 0.05, spacing = 0.25, bounds = (0.0, 1.0), base = 0.4)
+    @test all(v -> 0 <= v <= 0.4, φ) && any(==(0.0), φ)
+    φ = @test_logs hole_seed(c.Vφ; radius = 0.05, spacing = 0.25, base = -0.2)
+    @test all(v -> -1 <= v <= -0.2, φ) && any(==(-1.0), φ)
+  end
+
+  @testset ":cvt: nholes that do not fit, symmetry, one hole, min_distance above spacing" begin
+    c = seed_cantilever(; nx = 80, ny = 40, frozen = false)
+    @test_throws r"nholes = 5000 do not fit" HSV.hole_centers(c.Vφ; radius = 0.05, spacing = 0.2, pattern = :cvt, nholes = 5000)
+    # close to the bound (≈ 102 at 0.15 in 2 × 1): placed, at the minimum, in a reasonable time
+    t = @elapsed (C = HSV.hole_centers(c.Vφ; radius = 0.05, spacing = 0.2, pattern = :cvt, nholes = 100))
+    @test length(C) == 100 && mindist(C) >= 0.15 - 1e-12 && t < 60            # 1300 took 48 s and 5000 did not end before
+    sq = CartesianDiscreteModel((-1, 1, -1, 1), (40, 40))
+    Vs = TestFESpace(sq, ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
+    C = @test_logs (:warn, r"nholes = 10 asked, \d+ placed \(a symmetry places whole orbits\)") HSV.hole_centers(Vs;
+          radius = 0.08, spacing = 0.4, pattern = :cvt, nholes = 10, symmetry = (point = (0, 0), order = 4))
+    @test length(C) % 4 in (0, 1) && all(p -> near((-p[2], p[1]), C), C)
+    # a domain of the size of spacing: one hole, not corrected (was 3, measured as "3 spacing" apart)
+    Vo = TestFESpace(CartesianDiscreteModel((0, 0.2, 0, 0.2), (20, 20)), ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
+    @test length(HSV.hole_centers(Vo; radius = 0.05, spacing = 0.2, pattern = :cvt)) == 1
+    @test_throws r"min_distance .* larger than spacing" hole_seed(c.Vφ; radius = 0.05, spacing = 0.2, pattern = :cvt, min_distance = 0.3)
+    @test length(HSV.hole_centers(c.Vφ; radius = 0.05, spacing = 0.2, pattern = :cvt, min_distance = 0.3, nholes = 10)) == 10
+  end
+
+  @testset "symmetry internals: generic direction, centres onto axes" begin
+    # a plane that contains the first generic direction (3, 2): another direction is chosen
+    for sym in ((point = (0, 0), normal = (2.0, -3.0)), (point = (0, 0, 0), normal = (0.5345224838248488, -0.8017837257372732, 0.0)))
+      D = length(sym.point)
+      S = HSV._symmetry_group(sym, Val(D), 1.0)
+      g = S.G[2]
+      Aw = ntuple(i -> sum(g.A[i][j] * S.w[j] for j in 1:D), D)
+      @test dist(Aw, S.w) >= 0.1
+    end
+    # near an axis of order 4 and near the crossing of two planes the centre goes onto the axis (the fixed set of the
+    # subgroup), not to the mean of some of its images
+    S = HSV._symmetry_group((point = (0, 0), order = 4), Val(2), 1.0)
+    @test dist(HSV._snap(S, (0.01, 0.03), 0.1), (0.0, 0.0)) < 1e-12
+    S = HSV._symmetry_group(((point = (0, 0), normal = (1, 0)), (point = (0, 0), normal = (0, 1))), Val(2), 1.0)
+    @test dist(HSV._snap(S, (0.02, 0.03), 0.1), (0.0, 0.0)) < 1e-12
+    @test dist(HSV._snap(S, (0.02, 0.5), 0.1), (0.0, 0.5)) < 1e-12            # near one plane only: onto it
+    S = HSV._symmetry_group((point = (0, 0, 0), axis = (0, 0, 1), order = 4), Val(3), 1.0)
+    @test dist(HSV._snap(S, (0.01, 0.02, 0.3), 0.1), (0.0, 0.0, 0.3)) < 1e-12
+  end
+
+  @testset "meshes: periodic, mixed, geometry of order 2" begin
+    for (V, r) in ((TestFESpace(CartesianDiscreteModel((0, 1, 0, 1), (20, 20); isperiodic = (true, false)),
+                                ReferenceFE(lagrangian, Float64, 1); conformity = :H1), 0.08),
+                   (TestFESpace(CartesianDiscreteModel((0, 1, 0, 1), (20, 20); isperiodic = (true, true)),
+                                ReferenceFE(lagrangian, Float64, 0); conformity = :L2), 0.08))
+      φ = quiet(() -> hole_seed(V; radius = r, spacing = 3r))
+      @test length(φ) == num_free_dofs(V) && any(<(0), φ) && any(>(0), φ)
+    end
+    n = 16
+    id(i, j) = i + 1 + j * (n + 1)
+    coords = [Point(i / n, j / n) for j in 0:n for i in 0:n]
+    cells, types = Vector{Int}[], Int8[]
+    for j in 0:n-1, i in 0:n-1                                   # quadrilaterals on the left, triangles on the right
+      if i < n ÷ 2
+        push!(cells, [id(i, j), id(i + 1, j), id(i, j + 1), id(i + 1, j + 1)]); push!(types, 1)
+      else
+        push!(cells, [id(i, j), id(i + 1, j), id(i, j + 1)]); push!(types, 2)
+        push!(cells, [id(i + 1, j), id(i, j + 1), id(i + 1, j + 1)]); push!(types, 2)
+      end
+    end
+    grid = Gridap.Geometry.UnstructuredGrid(coords, Gridap.Arrays.Table(cells), [Gridap.ReferenceFEs.QUAD4, Gridap.ReferenceFEs.TRI3], types)
+    mm = Gridap.Geometry.UnstructuredDiscreteModel(grid)
+    for order in (0, 1)
+      V = TestFESpace(mm, ReferenceFE(lagrangian, Float64, order); conformity = order == 0 ? :L2 : :H1)
+      φ = quiet(() -> hole_seed(V; radius = 0.08, spacing = 0.3, pattern = :cvt))
+      @test length(φ) == num_free_dofs(V) && any(<(0), φ)
+      G = HSV._seed_geometry(V)
+      @test G.hmax ≈ sqrt(2) / n && minimum(G.h) ≈ 1 / n                   # triangles: hypotenuse; squares: side
+    end
+    # QUAD9 (geometry of order 2): the cell size from the vertices, 1/16 (was √2/16 from the 9 nodes)
+    reffe = Gridap.ReferenceFEs.LagrangianRefFE(Float64, QUAD, 2)
+    ξ = Gridap.ReferenceFEs.get_node_coordinates(reffe)
+    id2(i, j) = i + 1 + j * (2n + 1)
+    coords = [Point(i / (2n), j / (2n)) for j in 0:2n for i in 0:2n]
+    cells = [[id2(2i + round(Int, 2p[1]), 2j + round(Int, 2p[2])) for p in ξ] for j in 0:n-1 for i in 0:n-1]
+    m2 = Gridap.Geometry.UnstructuredDiscreteModel(Gridap.Geometry.UnstructuredGrid(coords, Gridap.Arrays.Table(cells), [reffe], fill(Int8(1), n^2)))
+    V = TestFESpace(m2, ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
+    G = HSV._seed_geometry(V)
+    @test G.hmean ≈ 1 / n && all(c -> dist(c, (0.5, 0.5)) < 1, G.cen)
+    @test any(<(0), @test_logs hole_seed(V; radius = 0.1, spacing = 0.36))     # no "thinner than two cells" warning (0.16 > 2/16)
   end
 
   @testset "cost: linear, no allocation per value" begin
@@ -398,6 +485,11 @@ meannn(c) = sum(minimum(dist(c[i], c[j]) for j in eachindex(c) if j != i) for i 
       @test a2 / a1 < 5
       @test (a2 - a1) / (num_free_dofs(V2) - num_free_dofs(V1)) < (pattern === :hex ? 600 : 3000)
     end
+    # :cvt with rng and holes ∝ cells (radius 2.5 cells): the farthest-point fill is linear (memory ratio ≈ 4)
+    hole_seed(V1; radius = 0.05, pattern = :cvt, rng = 1); hole_seed(V2; radius = 0.025, pattern = :cvt, rng = 1)
+    a1 = @allocated hole_seed(V1; radius = 0.05, pattern = :cvt, rng = 1)
+    a2 = @allocated hole_seed(V2; radius = 0.025, pattern = :cvt, rng = 1)
+    @test a2 / a1 < 6
   end
 
   @testset "exported, no clash with Gridap and HyperFEM" begin
