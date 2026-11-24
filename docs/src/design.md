@@ -373,14 +373,20 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
   step. With an interface map the target goes down `max_step = 0.01` of `|D|` per iteration from the start (a solid
   start is not made feasible), with equality; at the final target the constraint is `g ≤ 0` with `λ ≥ 0`. A density
   meets the target from the first iteration. The augmented Lagrangian of the method takes every other constraint.
-  Measured on the 2 × 1 cantilever (120 × 60): the volume within `1e-4 |D|` at every iteration, 2–3 evaluations of
-  the volume per step on average.
+  The tolerance `tol = 1e-4` is in units of the scaled constraint (with `Volume`'s default scale `V_max`, 5e-5 |D|
+  for a fraction 0.5). With `Step()` the volume is piecewise constant: the root stops when no node of the clipped
+  design changes side of the interface inside the bracket and ends on the feasible side, below the target by a few
+  cells on coarse meshes. Measured on the 2 × 1 cantilever (Mac of the lab, 4 threads, Julia 1.13.0, 2026-11-24):
+  `Ersatz()` 1.6 evaluations of the volume per step at 120 × 60; `Step()` 4.2, 4.6 and 4.4 at 20 × 10, 40 × 20 and
+  120 × 60 (100 iterations).
 - **Sensitivity** (mandatory): `:physical` differentiates with respect to the material, the interface map taken as
   the identity weighted by the material, `(w₀ + (1 − w₀) χ) ∂j/∂χ` (`void_weight = w₀ = 1e-3`): holes nucleate where
   the material is little used. The exact derivative through the map would refill the void (in the prototype the
   design oscillated, J = 16–70 against 2.4). `:design` is the exact derivative with respect to φ (with `Ersatz()`,
   nonzero only on the cut cells: no nucleation, so the start needs an interface). Without an interface map both are
-  the same. `check_consistency` always checks the exact derivative.
+  the same. `check_consistency` always checks the exact derivative; with `Ersatz()` give it steps below the default,
+  `check_consistency(…; h0 = 1e-3)`: larger steps cross the kinks of the cell fractions (a node changing sign) and
+  the observed rates fall below 2 for a correct derivative.
 - **Normalisation** (`normalize`): `L1Mean(c)` (default, `C = c |D| / Σ|gᵢ|`, independent of the mesh),
   `L2Norm()` (Kim et al.), `MaxAbs()`, or a function `(g, m, area) -> C`.
 - **Stopping:** `StopCriteria(change_tol = 1e-2)` with the constraints met (`default_stop`): never during the
@@ -397,9 +403,12 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
   window = 1, progress = Inf, μmax = 2.0)`, `native = ()`); the keywords given replace those of the preset, and the
   banner marks them.
 - **Per iteration:** one forward solve, one adjoint (none with `SelfAdjoint()`), one assembly of the sensitivity, one
-  product `K z` and one substitution of the step, no factorisation; the volume costs 2–5 evaluations (vectors for a
+  product `K z` and one substitution of the step, no factorisation; the volume costs a few evaluations (vectors for a
   density; the interface map and one integral for a level set). The closing summary adds the solves of the step,
   the factorisations and the evaluations of the volume.
+- **Allocations:** the arithmetic of the step and a linear volume allocate nothing (one substitution of UMFPACK
+  aside); each evaluation of a nonlinear volume reserves about 70 kB and each derivative of `Ersatz()` about 130 kB
+  (Gridap's integration), independent of the mesh.
 - **Not yet:** the presets of Otomori, Yamada and Choi, Dirichlet conditions for φ on lines of nodes, hole seeding
   for `sensitivity = :design`, 3D validation.
 

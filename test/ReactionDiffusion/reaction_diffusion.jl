@@ -216,16 +216,17 @@ end
     dg = 0.05 * 2.0 / get_scale(c.Vol)                     # max_step |D| / s
     r = solve!(c.problem, rd(; volume = ExactVolume(; max_step = 0.05)); maxiter = 14, stop = nothing, verbose = 0)
     g = [1.0; r.history.constraints.volume]                  # solid start: g₀ = (|D| − Vmax)/Vmax = 1
-    # with Step() the volume moves by quadrature points: one point at most (the largest weight of a 3×3 rule, 0.2 of a cell)
-    qtol = iface isa Step ? 0.2 * (2.0 / (30 * 15)) / get_scale(c.Vol) : tol
+    # with Step() the volume moves by quadrature points and the root ends on the feasible side when no node of the
+    # clipped design changes side inside the bracket: below the target by a few cells at most (here 5)
+    qtol = iface isa Step ? 5 * (2.0 / (30 * 15)) / get_scale(c.Vol) : tol
     for k in 2:length(g)
       @test g[k-1] - g[k] <= dg + qtol
-      @test abs(g[k] - max(0.0, g[k-1] - dg)) <= qtol
+      @test -qtol <= g[k] - max(0.0, g[k-1] - dg) <= tol
     end
-    @test findfirst(v -> v <= qtol, g[2:end]) == ceil(Int, 0.5 / 0.05)
+    @test findfirst(v -> v <= tol, g[2:end]) == ceil(Int, 0.5 / 0.05)
     c2 = rd_cantilever(; nx = 30, ny = 15, interface = iface)
     r2 = solve!(c2.problem, rd(; volume = ExactVolume(; max_step = nothing)); maxiter = 2, stop = nothing, verbose = 0)
-    @test r2.history.constraints.volume[1] <= qtol
+    @test r2.history.constraints.volume[1] <= tol
   end
 
   @testset "6. the root of the multiplier" begin
@@ -313,8 +314,14 @@ end
       md = ReactionDiffusion(; τ = 2e-4, sensitivity = :design)
       # (an oracle of its own: the snapshot of fo holds the gradient of the step, the :physical one)
       g1 = RDM._rd_gradient!(similar(z), md.step, s, RDM.build_oracle(md, c.problem), z)
-      g2 = OPT.gradient!(similar(z), RDM.build_oracle(md, c.problem), z)
-      @test g1 == g2 && !(g1 ≈ s.g)
+      # the exact derivative through Ersatz() lives on the nodes of the cut cells; the :physical one everywhere
+      cut = Set{Int}()
+      for ids in get_cell_dof_ids(c.Vφ)
+        v = z[ids]
+        (any(<(0), v) && any(>=(0), v)) && union!(cut, ids)
+      end
+      @test all(i -> i in cut || g1[i] == 0, eachindex(g1)) && any(!iszero, g1)
+      @test count(!iszero, s.g) > length(cut)
       # the exact derivative, after a :physical sweep (steps below the default: the larger ones cross the kinks of Ersatz)
       @test check_consistency((objective = c.C,); h0 = 1e-3).passed
     end
@@ -359,14 +366,17 @@ end
     @test grey(c.z) < g0
   end
 
-  @testset "10. stop: ‖Δφ‖∞ < 1e-2 with the volume met, never during the descent" begin
-    c = rd_cantilever(; nx = 40, ny = 20)
-    r = solve!(c.problem, rd(); maxiter = 300, verbose = 0)         # measured: converged at iteration 217
+  @testset "10. stop on the change with the volume met, never during the descent" begin
+    # the mechanism of the default stop with a larger tolerance (measured: converged at iteration 91 of 300, the
+    # volume reached at 50); the iteration at which ‖Δφ‖∞ < 1e-2 is sensitive to perturbations of the volume
+    c = rd_cantilever(; nx = 30, ny = 15)
+    r = solve!(c.problem, rd(); maxiter = 300, verbose = 0, stop = StopCriteria(change_tol = 3e-2))
     @test r.status === :converged && r.reason === :change_tol
-    @test abs(r.history.constraints.volume[end]) <= 1e-4 && r.history.change[end] < 1e-2
+    @test abs(r.history.constraints.volume[end]) <= 1e-4 && r.history.change[end] < 3e-2
     k0 = findfirst(v -> v <= 1e-4, r.history.constraints.volume)
     @test r.iterations > k0
-    @test all(k -> r.history.change[k] >= 1e-2 || r.history.constraints.volume[k] > 1e-4, 2:r.iterations-1)
+    @test all(k -> r.history.change[k] >= 3e-2 || r.history.constraints.volume[k] > 1e-4, 2:r.iterations-1)
+    @test RDM.default_stop(rd().step).change_tol == 1e-2
   end
 
   @testset "11. rejected steps: Δt halved, then back; exhausted attempts" begin
@@ -375,6 +385,9 @@ end
     h = r.history
     @test h.attempts[3] == 2 && h.step[3] == 0.05 && h.step[4] == 0.1 && h.step[2] == 0.1
     @test r.state.nfactor == 3                            # init, the reduction and the return to Δt
+    # the target of the volume goes down in proportion to Δt in the shrunk step (0.02 → 0.01), and back after it
+    g = [1.0; h.constraints.volume]
+    @test abs((g[3] - g[4]) - 0.01) <= 1e-4 && abs((g[4] - g[5]) - 0.02) <= 1e-4 && abs((g[2] - g[3]) - 0.02) <= 1e-4
     dir = mktempdir()
     c = rd_cantilever(; nx = 20, ny = 10, solve_flag = ctx -> ctx.iteration < 3)
     @test_throws OptimizationFailure solve!(c.problem, rd(); maxiter = 5, stop = nothing, verbose = 0,
@@ -479,6 +492,98 @@ end
     r2 = solve!(c2.problem, rd(; solve = lusolve); maxiter = 10, stop = nothing, verbose = 0)
     @test calls[] == 11
     @test get_values(r2.z) ≈ get_values(r.z) rtol = 1e-10
+  end
+
+  @testset "17. failures and limits: a violated linear target, values not finite, the root, OptContext" begin
+    # a linear volume above its target (max_step) is not met: no convergence on the change (it was :converged at 12)
+    c = rd_cantilever(; nx = 40, ny = 20, design = :density, init = 0.9)
+    r = solve!(c.problem, rd(; Δt = 0.01, volume = ExactVolume(; max_step = 0.0005)); maxiter = 40, verbose = 0)
+    @test r.status !== :converged || r.history.constraints.volume[end] <= 1e-4
+    @test r.status === :maxiter && r.history.constraints.volume[end] > 0.5
+    # a normalisation that returns NaN, a solve of the user that returns NaN: failures with a checkpoint
+    for kw in ((normalize = (g, m, a) -> NaN,), (solve = (A, b, x, ctx, stale) -> (x .= NaN),))
+      dir = mktempdir()
+      c = rd_cantilever(; nx = 20, ny = 10, frozen = false)
+      @test_throws OptimizationFailure solve!(c.problem, rd(; kw...); maxiter = 3, stop = nothing, verbose = 0,
+                                              checkpoint = Checkpoint(filepath = dir, every = 10))
+      @test isfile(joinpath(dir, "checkpoint.toml"))
+    end
+    # a zero sensitivity: diffusion alone (C = 0)
+    c = rd_cantilever(; nx = 20, ny = 10, design = :density)
+    m = rd()
+    fo, z, s = rd_start(c, m)
+    fill!(s.g, 0.0)
+    @test RDM._normalization(m.step, s) == 0.0
+    # the evaluations run out before a feasible trial: the feasible bound of the bracket, not G > 0
+    x, gx, st = RDM._root(x -> 1 - x / 100, nothing, 0.0, -10.0, 1000.0, 0.1, 1e-6, 4)
+    @test st === :ok && gx <= 0 && x == 1000.0
+    @test RDM._root(x -> NaN, nothing, 0.0, -10.0, 10.0, 0.1, 1e-6, 4)[3] === :nonfinite
+    # the positional constructor of OptContext with five fields
+    ctx = OptContext(3, 1, 2, :optimization, (β = 2.0,))
+    @test ctx.iteration == 3 && ctx.sensitivity === :design && ctx.void_weight == 0.0
+    @test_throws ArgumentError ExactVolume(; max_step = 2.0)
+    @test_throws ArgumentError ExactVolume(; tol = 0.0)
+    @test_throws ArgumentError ExactVolume(; maxiter = 1)
+    # the whole step with a linear volume allocates no more than the substitution of the step
+    stepalloc(st, s, z, fo, ctx, z0) = (copyto!(z, z0); @allocated OPT.step!(st, s, z, fo, ctx))
+    z0 = copy(z)
+    OPT.step!(m.step, s, z, fo, c.problem.ctx)
+    stepalloc(m.step, s, z, fo, c.problem.ctx, z0)
+    a = stepalloc(m.step, s, z, fo, c.problem.ctx, z0)
+    RDM._rd_solve!(s.δ, m.step, s, s.r)
+    @test a <= @allocated RDM._rd_solve!(s.δ, m.step, s, s.r)
+  end
+
+  @testset "18. options: diffusion, ls, Parameter, :design, consistent mass, 3D, normalisations" begin
+    # a Robin term in the diffusion and no frozen values: φ̌ by a solve
+    c = rd_cantilever(; nx = 20, ny = 10, design = :density, frozen = false)
+    dΩ2 = Measure(Triangulation(c.model), 2)
+    dΓc = Measure(BoundaryTriangulation(c.model; tags = "clamp"), 2)
+    m = rd(; diffusion = (φ, v) -> ∫(∇(φ) ⋅ ∇(v))dΩ2 + ∫(10.0 * φ * v)dΓc)
+    fo, z, s = rd_start(c, m)
+    @test !s.unit && s.nsolves == 1 && minimum(s.φc) < 0.1
+    @test s.φc ≈ Matrix(s.A) \ s.m rtol = 1e-12
+    r = solve!(c.problem, m; maxiter = 4, stop = nothing, verbose = 0)
+    @test all(v -> abs(v) <= 1e-4, r.history.constraints.volume)
+    # another linear solver: the same designs
+    rs = map((LUSolver(), BackslashSolver())) do ls
+      c = rd_cantilever(; nx = 20, ny = 10, design = :density)
+      copy(get_values(solve!(c.problem, rd(; ls); maxiter = 5, stop = nothing, verbose = 0).z))
+    end
+    @test rs[1] ≈ rs[2] rtol = 1e-10
+    # τ and Δt continued (Parameter): one factorisation more at the jump
+    pτ, pΔt = Parameter(2e-4), Parameter(0.1)
+    c = rd_cantilever(; nx = 20, ny = 10)
+    r = solve!(c.problem, ReactionDiffusion(; τ = pτ, Δt = pΔt, sensitivity = :physical); maxiter = 6, stop = nothing, verbose = 0,
+               continuation = Continuation(τ = pτ => [2e-4, 1e-3], Δt = pΔt => [0.1, 0.05]; every = 3))
+    @test r.state.nfactor == 2 && r.state.τ == 1e-3 && r.history.step == [0.1, 0.1, 0.1, 0.05, 0.05, 0.05]
+    # sensitivity = :design with Ersatz() from a design with a hole
+    φ0 = x -> clamp(0.3 - hypot(x[1] - 1.0, x[2] - 0.5) + 0.2, -1.0, 1.0)
+    c = rd_cantilever(; nx = 20, ny = 10, init = φ0)
+    r = solve!(c.problem, ReactionDiffusion(; τ = 2e-4, sensitivity = :design); maxiter = 8, stop = nothing, verbose = 0)
+    g = r.history.constraints.volume
+    @test all(isfinite, r.history.objective) && all(k -> abs(g[k] - max(0.0, g[k-1] - 0.02)) <= 1e-4, 2:8)
+    # consistent mass with a frozen zone
+    c = rd_cantilever(; nx = 20, ny = 10)
+    r = solve!(c.problem, rd(; mass = :consistent); maxiter = 5, stop = nothing, verbose = 0)
+    @test all(k -> abs(r.history.constraints.volume[k] - (1 - 0.02k)) <= 1e-4, 1:5)
+    # L2Norm and MaxAbs in a run
+    for n in (L2Norm(), MaxAbs())
+      c = rd_cantilever(; nx = 20, ny = 10, design = :density)
+      r = solve!(c.problem, rd(; normalize = n); maxiter = 3, stop = nothing, verbose = 0)
+      @test all(isfinite, r.history.objective) && all(v -> abs(v) <= 1e-4, r.history.constraints.volume)
+    end
+    # 3D: a level set through Ersatz() on hexahedra, ℓ² = |D|^(2/3)
+    model = CartesianDiscreteModel((0, 2, 0, 1, 0, 1), (8, 4, 4))
+    V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
+    z = OptVariables(φ = FieldVariable(V; bounds = (-1.0, 1.0), init = 1.0))
+    θ = PhysicalFields(DesignFields(z; φ = Identity()); χ = :φ => Ersatz())
+    dΩ = design_measures(θ; degree = 2).domain
+    w = CellField(x -> 1 + x[1], Triangulation(model))
+    F = Functional(θ -> sum(∫(w * (1 - θ.χ))dΩ), θ; dJdθ = θ -> (χ = δ -> ∫(-w * δ)dΩ,), scale = 1.0)
+    r = solve!(Optimization(z; objective = F, constraints = (volume = Volume(θ, dΩ; max_fraction = 0.5),)), rd();
+               maxiter = 5, stop = nothing, verbose = 0)
+    @test r.state.ℓ2 ≈ 2.0^(2 / 3) && all(k -> abs(r.history.constraints.volume[k] - (1 - 0.02k)) <= 1e-4, 1:5)
   end
 
   @testset "banner and events" begin

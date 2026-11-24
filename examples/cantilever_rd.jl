@@ -48,7 +48,7 @@ function run_cantilever_rd(; nx = 120, ny = 60, maxiter = 400, interface = Ersat
   end
   problem = Optimization(z; objective = C, constraints = (volume = Vol,))
   method  = ReactionDiffusion(; τ, sensitivity = :physical)
-  solve!(problem, method; maxiter, verbose, post)       # stop: ‖Δφ‖∞ < 1e-2 with the volume met (default)
+  solve!(problem, method; maxiter, verbose, post)       # default stop: ‖Δφ‖∞ < 1e-2 with the volume met, or maxiter
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

@@ -122,7 +122,8 @@ The screen shows a banner with the setup (each default marked), one row per iter
 `examples/cantilever_rd.jl` minimises the compliance of a 2 × 1 cantilever with the reaction–diffusion method. The
 design field is a level set `φ ∈ [−1, 1]` (P1), solid at the start and frozen under the load; the material the weak
 forms read is the fraction of each cell where `φ ≥ 0` (`Ersatz()`); the volume goes down 1 % of the domain per
-iteration until it reaches the target, and the run stops when the design no longer changes:
+iteration until it reaches the target. By default `solve!` stops when `‖Δφ‖∞ < 1e-2` with the volume met, or at
+`maxiter`:
 
 ```julia
 z  = OptVariables(φ = FieldVariable(Vφ; bounds = (-1.0, 1.0), init = 1.0, frozen = 1.0))

@@ -15,11 +15,13 @@ ecosystem, and uses HyperFEM's computational models as black boxes for the forwa
   design variables, the functionals, the sensitivities and the optimisation loop. The defaults (the solve of a
   linear model, stopping criteria, metric, maps, continued parameters, monitors) can be replaced from the script.
 - **Analytical derivatives** throughout, verified with Taylor tests (`check_consistency`).
-- **One abstraction** meant for density, reaction–diffusion and level-set methods (density methods today).
+- **One abstraction** meant for density, reaction–diffusion and level-set methods (density and reaction–diffusion
+  methods today).
 - Designed for large problems: in-place operations, user-supplied solvers, compiled threaded assembly, fast output
   written in another thread.
 
-Phase 0 (density methods for linear problems) is implemented and reproduces top88 and the SiMPL paper; see the
+Phase 0 (density methods for linear problems) is implemented and reproduces top88 and the SiMPL paper; the
+reaction–diffusion method (a level set through an interface map, or a density) is implemented too; see the
 [documentation](https://multisimolab.github.io/HyperShape.jl/dev/) and the [roadmap](https://multisimolab.github.io/HyperShape.jl/dev/roadmap/).
 
 ## Example

@@ -1255,11 +1255,14 @@ _violations(al::AugmentedLagrangianOracle, vals) = ntuple(i -> violation(al.info
 
 # with a nonlinear native constraint, convergence needs it met to the tolerance of the optimiser; the constraints of
 # the augmented Lagrangian, to its tolerance
+# (OC and SiMPL meet a linear native constraint at every step; a step that may leave it violated on purpose, as
+# ReactionDiffusion with a target lowered per iteration, says so with `_checks_linear_native`)
+_checks_linear_native(::Optimizer) = false
 _constraints_met(o::FunctionalOracle, info, opt, viols) =
-  !any(i -> o.a[i] === nothing, 1:num_constraints(o)) || violation(info) <= constraint_tol(opt)
+  (!_checks_linear_native(opt) && !any(i -> o.a[i] === nothing, 1:num_constraints(o))) || violation(info) <= constraint_tol(opt)
 function _constraints_met(al::AugmentedLagrangianOracle, info, opt, viols)
   fo = al.inner
-  any(i -> fo.a[i] === nothing, al.native) && violation(info) > constraint_tol(opt) && return false
+  (_checks_linear_native(opt) || any(i -> fo.a[i] === nothing, al.native)) && violation(info) > constraint_tol(opt) && return false
   all(i -> viols[i] <= al.tol, al.absorbed)
 end
 

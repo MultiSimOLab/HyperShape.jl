@@ -62,6 +62,9 @@ function OptContext(phase::Symbol = :setup)
   phase in PHASES || throw(ArgumentError("OptContext: phase must be one of $(join(PHASES, ", "))"))
   OptContext(0, 0, 0, phase, NamedTuple(), :design, 0.0)
 end
+# the positional form of the five fields before `sensitivity` and `void_weight`
+OptContext(iteration::Integer, attempt::Integer, trial::Integer, phase::Symbol, continuation::NamedTuple) =
+  OptContext(iteration, attempt, trial, phase, continuation, :design, 0.0)
 
 Base.setproperty!(::OptContext, s::Symbol, v) =
   throw(ArgumentError("OptContext is read-only: HyperShape updates it"))

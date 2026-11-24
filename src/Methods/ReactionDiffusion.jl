@@ -1,6 +1,6 @@
 # Reaction–diffusion method: an implicit step of a reaction–diffusion equation for a level set (or a density), with
 # the volume met exactly at every step by a scalar multiplier (Choi et al. 2011, Yamada et al. 2010, Otomori et al.
-# 2015, Kim et al. 2020, Cui et al. 2016 for the exact multiplier).
+# 2015, Kim et al. 2020, Cui et al. 2023 for the exact multiplier).
 
 # ---------------------------------------------------------------------------------------------------------------
 # Normalisation of the sensitivity
@@ -71,10 +71,14 @@ others go to the augmented Lagrangian of the method.
 
 The root of `G(λ) = g(clamp(φ* − λ φ̌)) − g_k` (non-increasing in λ) starts from the previous `λ`, inside the bracket
 given by the bounds (all values at the upper or at the lower bound): a linear constraint (a density) by Newton on the
-clipped vector (only vectors, no solve; the algorithm of Cui et al. 2016); a nonlinear one with a derivative
+clipped vector (only vectors, no solve; the algorithm of Cui et al. 2023); a nonlinear one with a derivative
 (`Ersatz()`) by Newton with the derivative of the constraint, guarded by the bracket; `Step()` by regula falsi
-(Illinois), which ends on the feasible side when the tolerance cannot be met (a piecewise-constant volume). Each
-evaluation of a nonlinear constraint updates the maps and integrates (no state is solved).
+(Illinois), which also ends when no value of the clipped design changes side of the interface `φ = 0` inside the
+bracket, on the feasible side (the volume of `Step()` is piecewise constant and the tolerance can be out of reach on
+coarse meshes). If the evaluations run out before a feasible trial is seen, the step takes the bound of the bracket
+where every value is at its lower bound. Each evaluation of a nonlinear constraint updates the maps and integrates
+(no state is solved, but the integral reserves memory: about 70 kB per evaluation and 130 kB per derivative with
+`Ersatz()`, independent of the mesh); a linear one costs vector operations only, without allocations.
 """
 struct ExactVolume
   max_step::Union{Symbol,Nothing,Float64}
@@ -113,11 +117,11 @@ end
 _value(x::Real) = Float64(x)
 _value(p::Parameter) = p[]
 
-mutable struct RDState{NS,C}
+mutable struct RDState{NS,C,MT,MM}
   m::Vector{Float64}            # lumped mass (free rows)
-  K::Any                        # diffusion matrix (free × free)
-  M::Any                        # consistent mass, or nothing
-  A::Any                        # operator of the step, mass/Δt + τ ℓ² K
+  K::MT                         # diffusion matrix (free × free)
+  M::MM                         # consistent mass, or nothing
+  A::MT                         # operator of the step, mass/Δt + τ ℓ² K
   Kmap::Vector{Int}             # positions of the entries of K, M and the diagonal in A.nzval
   Mmap::Vector{Int}
   Dmap::Vector{Int}
@@ -278,6 +282,8 @@ function _unit_response!(opt::RDStep, s::RDState)
   else
     _rd_solve!(s.φc, opt, s, s.m)
   end
+  all(isfinite, s.φc) ||
+    throw(OptimizationFailure("ReactionDiffusion: the solve of the step gave values that are not finite (the response φ̌ to a uniform source)"))
   minimum(s.φc) > 0 || throw(ArgumentError("ReactionDiffusion: the response of the step to a uniform source has " *
                                            "non-positive values (minimum $(minimum(s.φc))); use mass = :lumped"))
   s
@@ -333,13 +339,23 @@ end
 function _rd_gradient!(g, opt::RDStep, s::RDState, oracle, z)
   ctx = s.ctx
   (opt.sensitivity === :physical && ctx isa OptContext) || return gradient!(g, oracle, z)
-  set_context!(ctx, :void_weight, opt.void_weight)
-  set_context!(ctx, :sensitivity, :physical)
+  # setfield! with constant names: no allocation (set_context! converts to the type of a field found at run time)
+  setfield!(ctx, :void_weight, opt.void_weight)
+  setfield!(ctx, :sensitivity, :physical)
   try
     gradient!(g, oracle, z)
   finally
-    set_context!(ctx, :sensitivity, :design)
+    setfield!(ctx, :sensitivity, :design)
   end
+end
+
+# the normalisation C of the sensitivity: 0 only for a zero sensitivity (diffusion alone); not finite otherwise: a failure
+function _normalization(opt::RDStep, s::RDState)
+  C = opt.normalize(s.g, s.m, s.area)
+  isfinite(C) && return Float64(C)
+  all(iszero, s.g) && return 0.0
+  throw(OptimizationFailure("ReactionDiffusion: the normalisation of the sensitivity (" *
+                            (opt.normalize isa Function ? "function of the user" : string(opt.normalize)) * ") returned $C"))
 end
 
 # r = −τℓ²(K z + k_d) − C g, φ* = z + A⁻¹ r (the arithmetic of the step, without allocations, and one solve)
@@ -358,18 +374,20 @@ function Optimizers.step!(opt::RDStep, s::RDState, z, oracle, ctx)
   isfinite(f) || return StepInfo{1}(false, f, NaN, NaN, 0.0, s.Δt, 1, NaN, (0.0,), (NaN,))
   _rd_gradient!(s.g, opt, s, oracle, z)
   g0 = s.kind === :none ? 0.0 : constraint(oracle, 1, z)
-  C = opt.normalize(s.g, s.m, s.area)
-  isfinite(C) || (C = 0.0)                     # a zero sensitivity: diffusion only
+  C = _normalization(opt, s)
   _rd_rhs!(s, z, C)
   _rd_solve!(s.δ, opt, s, s.r)
   @. s.φs = z + s.δ
+  all(isfinite, s.φs) ||
+    throw(OptimizationFailure("ReactionDiffusion: the solve of the step gave values that are not finite"))
   copyto!(s.zold, z)
   lb, ub = bounds(oracle)
   if s.kind === :none
     @. z = clamp(s.φs, lb, ub)
     λ, viol = NaN, 0.0
   else
-    gk = isfinite(s.dg) ? max(0.0, g0 - s.dg) : 0.0
+    # the target, lowered at most dg; a step shrunk after a rejection lowers it in proportion to Δt
+    gk = isfinite(s.dg) ? max(0.0, g0 - s.dg * s.Δt / s.Δt_nom) : 0.0
     λ, Gλ = _multiplier!(opt, s, oracle, gk, lb, ub)
     @. z = clamp(s.φs - λ * s.φc, lb, ub)
     s.λ = λ
@@ -380,10 +398,10 @@ function Optimizers.step!(opt::RDStep, s::RDState, z, oracle, ctx)
 end
 
 # G(λ) = g(clamp(φ* − λ φ̌)) − g_k: a linear constraint (vectors only) or one evaluated by the oracle
-struct _LinearG{A,L,U}
+struct _LinearG{A,L,U,S}
   a::A
   V::Float64
-  s::RDState
+  s::S
   lb::L
   ub::U
   gk::Float64
@@ -395,9 +413,9 @@ function (G::_LinearG)(λ)
   dot(G.a, s.zt) - G.V - G.gk
 end
 
-struct _OracleG{O,L,U}
+struct _OracleG{O,L,U,S}
   oracle::O
-  s::RDState
+  s::S
   lb::L
   ub::U
   gk::Float64
@@ -413,17 +431,17 @@ end
 _clipped_slope(a, s::RDState, lb, ub) =
   -sum(Broadcast.instantiate(Broadcast.broadcasted((ai, c, t, l, u) -> (l < t < u) ? ai * c : 0.0, a, s.φc, s.zt, lb, ub)))
 
-struct _LinearDG{A,L,U}
+struct _LinearDG{A,L,U,S}
   a::A
-  s::RDState
+  s::S
   lb::L
   ub::U
 end
 (D::_LinearDG)(λ) = _clipped_slope(D.a, D.s, D.lb, D.ub)
 
-struct _OracleDG{O,L,U}
+struct _OracleDG{O,L,U,S}
   oracle::O
-  s::RDState
+  s::S
   lb::L
   ub::U
 end
@@ -442,12 +460,14 @@ function _multiplier!(opt::RDStep, s::RDState, oracle, gk, lb, ub)
   s0 = 0.02 / s.Δt                              # a shift of 0.02 of φ
   λ, Gλ, status = if s.kind === :linear
     a, V = linear_constraint(oracle, 1)
-    _root(_LinearG(a, V, s, lb, ub, gk), _LinearDG(a, s, lb, ub), s.λ, lo, hi, s0, vol.tol, vol.maxiter, maximum(s.φc))
+    _root(_LinearG(a, V, s, lb, ub, gk), _LinearDG(a, s, lb, ub), s.λ, lo, hi, s0, vol.tol, vol.maxiter, _Closed(s, lb, ub))
   elseif s.kind === :newton
-    _root(_OracleG(oracle, s, lb, ub, gk), _OracleDG(oracle, s, lb, ub), s.λ, lo, hi, s0, vol.tol, vol.maxiter, maximum(s.φc))
+    _root(_OracleG(oracle, s, lb, ub, gk), _OracleDG(oracle, s, lb, ub), s.λ, lo, hi, s0, vol.tol, vol.maxiter, _Closed(s, lb, ub))
   else
-    _root(_OracleG(oracle, s, lb, ub, gk), nothing, s.λ, lo, hi, s0, vol.tol, vol.maxiter, maximum(s.φc))
+    _root(_OracleG(oracle, s, lb, ub, gk), nothing, s.λ, lo, hi, s0, vol.tol, vol.maxiter, _NoCrossing(s, lb, ub))
   end
+  status === :nonfinite &&
+    throw(OptimizationFailure("ReactionDiffusion: the constraint is not finite at a trial design of the multiplier"))
   status === :infeasible &&
     throw(ArgumentError("ReactionDiffusion: the constraint cannot be met within the bounds: with every free value at " *
                         "its lower bound it is still violated by $(@sprintf("%.3g", Gλ + gk)) (scaled)" *
@@ -455,17 +475,37 @@ function _multiplier!(opt::RDStep, s::RDState, oracle, gk, lb, ub)
   λ, Gλ
 end
 
-# _root(G, dG, x0, lo, hi, s0, tol, maxit, xscale = 1) -> (x, G(x), status)
+# When the bracket [a, b] of the multiplier is closed. For a continuous G (linear, Ersatz()) a safeguard: the trial
+# designs differ by less than 1e-12 of the range of the bounds. For Step() (G piecewise constant, the tolerance often
+# out of reach on coarse meshes): no value of the clipped design changes side of the interface φ = 0 between a and b.
+struct _Closed{S}
+  s::S
+  range::Float64
+end
+_Closed(s, lb, ub) = _Closed(s, Float64(minimum(Broadcast.instantiate(Broadcast.broadcasted(-, ub, lb)))))
+(c::_Closed)(a, b) = (b - a) * maximum(c.s.φc) <= 1e-12 * c.range
+
+struct _NoCrossing{S,L,U}
+  s::S
+  lb::L
+  ub::U
+end
+(c::_NoCrossing)(a, b) =
+  !any(Broadcast.instantiate(Broadcast.broadcasted((p, q, l, u) -> (clamp(p - a * q, l, u) >= 0) != (clamp(p - b * q, l, u) >= 0),
+                                                   c.s.φs, c.s.φc, c.lb, c.ub)))
+
+# _root(G, dG, x0, lo, hi, s0, tol, maxit, closed) -> (x, G(x), status)
 # Root of a non-increasing `G` on `[lo, hi]` from `x0`: Newton with `dG` (if not `nothing`) while it stays inside the
 # bracket, regula falsi (Illinois) otherwise; while only one side of the root is known, steps of `s0`, doubled each
-# time, towards the other one (at most to `lo` or `hi`). Ends when `|G| ≤ tol`, after `maxit` evaluations, or when the
-# bracket closes (`(b − a) xscale ≤ 1e-9`: the trial designs differ by less than that); a tolerance that cannot be met
-# (a piecewise-constant `G`) ends on the feasible side (`G ≤ 0`). `status`: `:ok`; `:infeasible` when `G(hi) > tol`;
-# `:upper` when `G(lo) < -tol` (then `x = lo`).
-function _root(G, dG, x0, lo, hi, s0, tol, maxit, xscale = 1.0)
+# time, towards the other one (at most to `lo` or `hi`). Ends when `|G| ≤ tol`, after `maxit` evaluations, or when
+# `closed(a, b)`; a tolerance that is not met ends on the feasible side (`G ≤ 0`; the bound `hi`, where every value is
+# at its lower bound, if no feasible trial was seen). `status`: `:ok`; `:infeasible` when `G(hi) > tol`; `:upper`
+# when `G(lo) < -tol` (then `x = lo`); `:nonfinite` when `G` is not finite.
+function _root(G, dG, x0, lo, hi, s0, tol, maxit, closed = (a, b) -> b - a <= 1e-14 * max(1.0, abs(a), abs(b)))
   x = clamp(x0, lo, hi)
   gx = G(x)
   nev = 1
+  isfinite(gx) || return x, gx, :nonfinite
   abs(gx) <= tol && return x, gx, :ok
   a, fa, b, fb = gx > 0 ? (x, gx, hi, NaN) : (lo, NaN, x, gx)
   st = s0
@@ -500,6 +540,7 @@ function _root(G, dG, x0, lo, hi, s0, tol, maxit, xscale = 1.0)
     x = xn
     gx = G(x)
     nev += 1
+    isfinite(gx) || return x, gx, :nonfinite
     abs(gx) <= tol && return x, gx, :ok
     if gx > 0
       a, fa = x, gx
@@ -510,12 +551,14 @@ function _root(G, dG, x0, lo, hi, s0, tol, maxit, xscale = 1.0)
       (!newton && side == -1 && !isnan(fa)) && (fa /= 2)
       side = -1
     end
-    (!isnan(fa) && !isnan(fb) && (b - a) * xscale <= 1e-9) && break     # the trials differ by less than 1e-9
+    (!isnan(fa) && !isnan(fb) && closed(a, b)) && break
   end
   gx > 0 && x >= hi && return x, gx, :infeasible
-  if gx > tol && !isnan(fb)                    # end on the feasible side
+  if gx > tol                                  # end on the feasible side (b = hi if no feasible trial was seen)
     x = b
     gx = G(x)
+    isfinite(gx) || return x, gx, :nonfinite
+    gx > tol && return x, gx, :infeasible
   end
   x, gx, :ok
 end
@@ -534,6 +577,7 @@ Optimizers.handles(opt::RDStep, c::ConstraintInfo) =
 Optimizers.max_native(opt::RDStep) = opt.volume === nothing ? 0 : 1
 Optimizers.constraint_tol(opt::RDStep) = opt.volume === nothing ? Inf : opt.volume.tol
 Optimizers.computes_kkt(::RDStep) = false
+_checks_linear_native(::RDStep) = true          # the step may leave a linear volume violated on purpose (max_step)
 Optimizers.memory(::RDStep, s::RDState, z) = (λ = s.λ,)
 function Optimizers.restore_memory!(::RDStep, s::RDState, z, v::NamedTuple)
   keys(v) == (:λ,) || throw(ArgumentError("ReactionDiffusion: the saved memory has entries $(keys(v)), expected (:λ,)"))
@@ -541,13 +585,8 @@ function Optimizers.restore_memory!(::RDStep, s::RDState, z, v::NamedTuple)
   s
 end
 
-"""
-    default_stop(::RDStep)
-
-[`ReactionDiffusion`](@ref) stops when `maximum(abs, Δz) < 1e-2` and the constraints hold to their tolerances
-(`StopCriteria(change_tol = 1e-2)`). A criterion on the objective stops too early: the objective settles before the
-topology does.
-"""
+# ReactionDiffusion stops when maximum(abs, Δz) < 1e-2 and the constraints hold to their tolerances. A criterion on
+# the objective stops too early: the objective settles before the topology does.
 default_stop(::RDStep) = StopCriteria(change_tol = 1e-2)
 
 summary_note(::Optimizer, state) = ""
@@ -597,7 +636,9 @@ Mandatory (modelling decisions):
   derivative through the map would refill the void (its value there is large: weak material, large strains); `:design`
   the exact derivative with respect to φ (with `Ersatz()`, nonzero only on the cells cut by the interface: no holes are
   nucleated, so the starting design must have an interface; `Step()` has none). Without an interface map in the chain
-  (a density) both are the same.
+  (a density) both are the same. [`check_consistency`](@ref HyperShape.Checks.check_consistency) always checks the
+  exact derivative; with `Ersatz()` give it steps smaller than the default (`h0 = 1e-3`): larger ones cross the
+  kinks of the cell fractions (a node changing sign) and the observed rates fall below 2 for a correct derivative.
 
 Optional (each one replaceable, shown in the banner):
 - `Δt`: pseudo-time step (number or `Parameter`), default `0.1`; halved by `RejectStep` when the forward problem does
@@ -624,9 +665,9 @@ lagrangian = AugmentedLagrangian(Bertsekas(μ0 = 0.2, growth = 1.025, window = 1
 a density `φ₀ = 0.5` with `bounds = (0.0, 1.0)`, SIMP `p = 3`, `Volume(…; scale = |Ω|)`.
 
 Per iteration: one forward solve, one adjoint (none with `SelfAdjoint()`), one assembly of the sensitivity, one
-product `K z` and one solve of the step (no factorisation); the volume costs 2–5 evaluations (vectors only for a
-density; the map and an integral each with an interface map, plus one derivative per Newton iteration with
-`Ersatz()`). The default stop is `StopCriteria(change_tol = 1e-2)` with the constraints met ([`default_stop`](@ref)); with
+product `K z` and one solve of the step (no factorisation); the volume costs a few evaluations of the constraint per
+step (vectors only for a density; the map and an integral each with an interface map, plus one derivative per Newton
+iteration with `Ersatz()`; the summary of `solve!` counts them). The default stop is `StopCriteria(change_tol = 1e-2)` with the constraints met ([`default_stop`](@ref)); with
 `Step()` it is rarely met (the interface jumps between nodes) and runs usually end at `maxiter`: `Ersatz()` is
 recommended. The starting design is not made feasible (the volume goes down from a solid start, `max_step` of `|D|` per
 iteration). Checkpoints save the multiplier (a resumed run is the uninterrupted one).
@@ -727,7 +768,6 @@ function check_problem(m::ReactionDiffusion, problem)
                         "Float64, 1), conformity = :H1)"))
   (isfinite(b.lb) && isfinite(b.ub)) || throw(ArgumentError("ReactionDiffusion: the bounds of z must be finite"))
   native = _native_split(problem, m.step, m.lagrangian)
-  cs = values(problem.constraints)
   m.step.sensitivity === :design || return nothing
   for (j, (n, F)) in enumerate(pairs((objective = problem.objective, map(c -> c.F, problem.constraints)...)))
     j > 1 && (j - 1) in native && continue      # the native constraint is only evaluated (the root), never differentiated
