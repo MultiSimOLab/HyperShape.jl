@@ -60,11 +60,14 @@ function _describe_stop(stop)
   stop.change_tol !== nothing && push!(parts, "change < $(stop.change_tol)")
   stop.rate_tol !== nothing && push!(parts, "change/step < $(stop.rate_tol)")
   stop.phase_tol !== nothing && push!(parts, "phase change < $(stop.phase_tol) |D| over $(stop.phase_window) iterations")
-  isempty(parts) ? "maxiter only" : join(parts, " or ")
+  stop.material_tol !== nothing && push!(parts, "material change < $(stop.material_tol) over $(stop.material_window) iterations")
+  isempty(parts) ? "maxiter only" : stop.combine === :all ?
+    join(parts, " and ") * ", with the constraints met in the windows" : join(parts, " or ")
 end
 
 _active(stop::StopCriteria) = any(x -> x !== nothing, (stop.objective_range, stop.kkt_tol, stop.kkt_rtol, stop.stationarity_tol,
-                                         stop.stationarity_rtol, stop.change_tol, stop.rate_tol, stop.phase_tol))
+                                         stop.stationarity_rtol, stop.change_tol, stop.rate_tol, stop.phase_tol,
+                                         stop.material_tol))
 _active(stop) = true                     # a function of the user
 _stage_rule(stop, schedule) = (stop === nothing || schedule === nothing || !_active(stop)) ? "" :
                               schedule.close_early ? " · every stage (close_early)" : " · last stage only"
@@ -193,7 +196,9 @@ end
 
 const _STOP_TEXT = Dict(:change_tol => "change of z below the tolerance",
                         :rate_tol => "rate of change of z (change/step) below the tolerance",
-                        :phase_tol => "fraction of the domain that changes phase below the tolerance over the window", :kkt_tol => "optimality measure below the tolerance",
+                        :phase_tol => "fraction of the domain that changes phase below the tolerance over the window",
+                        :material_tol => "change of the material below the tolerance over the window",
+                        :all => "all the stopping criteria met", :kkt_tol => "optimality measure below the tolerance",
                         :kkt_rtol => "optimality measure below the tolerance relative to the first iteration",
                         :stationarity_tol => "stationarity measure below the tolerance",
                         :stationarity_rtol => "stationarity measure below the tolerance relative to the first iteration",

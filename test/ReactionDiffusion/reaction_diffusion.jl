@@ -147,6 +147,13 @@ function HyperShape.Methods.monitor_value(f::FrozenCheck)
   e
 end
 
+# a monitor that keeps the design at every accepted iteration
+struct ZTrack
+  z::OptVariables
+  zs::Vector{Vector{Float64}}
+end
+HyperShape.Methods.monitor_value(t::ZTrack) = (push!(t.zs, copy(get_values(t.z))); 0.0)
+
 # a monitor that keeps the sign pattern of the level set at every accepted iteration
 struct SignTrack
   z::OptVariables
@@ -160,7 +167,7 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     c = rd_cantilever(; nx = 20, ny = 10, frozen = false, simplex)
     m = rd(; mass)
     fo, z, s = rd_start(c, m)
-    @test all(==(0.1), s.φc) && s.nsolves == 0 && s.nfactor == 1
+    @test s.Δt == 0.2 && all(==(s.Δt), s.φc) && s.nsolves == 0 && s.nfactor == 1    # Δt = 0.2 by default with Ersatz()
     @test maximum(abs, s.A * s.φc .- s.m) <= 1e-13 * maximum(s.m)
   end
 
@@ -201,13 +208,13 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     kd = assemble_vector(v -> ∫(∇(FEFunction(U, zeros(num_free_dofs(U)))) ⋅ ∇(v))dΩ, Vt)
     area = sum(∫(1.0)dΩ)
     τℓ² = 2e-4 * area
-    A = Matrix(Diagonal(mv) / 0.1 + τℓ² * K)
+    A = Matrix(Diagonal(mv) / 0.4 + τℓ² * K)                     # Δt = 0.4 by default for a density
     C = area / sum(abs, g)
     φs = z0 .+ A \ (-τℓ² .* (K * z0 .+ kd) .- C .* g)
     φc = A \ mv
     λ = info.multipliers[1]
     @test z ≈ clamp.(φs .- λ .* φc, 0.0, 1.0) atol = 1e-12
-    @test info.accepted && info.step == 0.1 && info.change ≈ maximum(abs, z .- z0)
+    @test info.accepted && info.step == 0.4 && info.change ≈ maximum(abs, z .- z0)
     @test get_dirichlet_dof_values(U) == dv0
     @test abs(OPT.constraint(fo, 1, z)) <= VT
   end
@@ -376,28 +383,31 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     @test grey(c.z) < g0
   end
 
-  @testset "10. stop on the change with the volume met, never during the descent" begin
-    # the mechanism of the default stop with a larger tolerance (measured: converged at iteration 91 of 300, the
-    # volume reached at 50); the iteration at which ‖Δφ‖∞ < 1e-2 is sensitive to perturbations of the volume
+  @testset "10. the default stop: volume, material and objective, never during the descent" begin
+    # measured: 30×15 Ersatz() converged at iteration 124 of 300 (the volume reached at 25)
     c = rd_cantilever(; nx = 30, ny = 15)
-    r = solve!(c.problem, rd(); maxiter = 300, verbose = 0, stop = StopCriteria(change_tol = 3e-2))
-    @test r.status === :converged && r.reason === :change_tol
-    @test abs(r.history.constraints.volume[end]) <= VT && r.history.change[end] < 3e-2
-    k0 = findfirst(v -> v <= VT, r.history.constraints.volume)
-    @test r.iterations > k0
-    @test all(k -> r.history.change[k] >= 3e-2 || r.history.constraints.volume[k] > VT, 2:r.iterations-1)
-    @test RDM.default_stop(rd().step).rate_tol == 0.1 && RDM.default_stop(rd().step).change_tol === nothing
+    r = solve!(c.problem, rd(); maxiter = 300, verbose = 0)
+    h = r.history
+    @test r.status === :converged && r.reason === :all && r.iterations <= 200
+    @test abs(h.constraints.volume[end]) <= VT
+    k0 = findfirst(v -> v <= VT, h.constraints.volume)
+    @test 25 <= k0 <= 27 && r.iterations >= k0 + 9          # the windows (10 for the objective) after the volume
+    w = h.objective[end-9:end]
+    @test (maximum(w) - minimum(w)) <= 1e-3 * maximum(abs, w)
+    st = RDM.default_stop(rd().step)
+    @test st.material_tol == 2e-3 && st.material_window == 5 && st.objective_range == 1e-3 && st.window == 10 &&
+          st.combine === :all && st.rate_tol === nothing && st.change_tol === nothing
   end
 
   @testset "11. rejected steps: Δt halved, then back; exhausted attempts" begin
     c = rd_cantilever(; nx = 20, ny = 10, solve_flag = ctx -> !(ctx.iteration == 3 && ctx.attempt == 1))
     r = solve!(c.problem, rd(); maxiter = 5, stop = nothing, verbose = 0)
     h = r.history
-    @test h.attempts[3] == 2 && h.step[3] == 0.05 && h.step[4] == 0.1 && h.step[2] == 0.1
+    @test h.attempts[3] == 2 && h.step[3] == 0.1 && h.step[4] == 0.2 && h.step[2] == 0.2
     @test r.state.nfactor == 3                            # init, the reduction and the return to Δt
-    # the target of the volume goes down in proportion to Δt in the shrunk step (0.02 → 0.01), and back after it
+    # the target of the volume goes down in proportion to Δt in the shrunk step (0.04 → 0.02), and back after it
     g = [1.0; h.constraints.volume]
-    @test abs((g[3] - g[4]) - 0.01) <= VT && abs((g[4] - g[5]) - 0.02) <= VT && abs((g[2] - g[3]) - 0.02) <= VT
+    @test abs((g[3] - g[4]) - 0.02) <= VT && abs((g[4] - g[5]) - 0.04) <= VT && abs((g[2] - g[3]) - 0.04) <= VT
     dir = mktempdir()
     c = rd_cantilever(; nx = 20, ny = 10, solve_flag = ctx -> ctx.iteration < 3)
     @test_throws OptimizationFailure solve!(c.problem, rd(); maxiter = 5, stop = nothing, verbose = 0,
@@ -551,7 +561,7 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     dΓc = Measure(BoundaryTriangulation(c.model; tags = "clamp"), 2)
     m = rd(; diffusion = (φ, v) -> ∫(∇(φ) ⋅ ∇(v))dΩ2 + ∫(10.0 * φ * v)dΓc)
     fo, z, s = rd_start(c, m)
-    @test !s.unit && s.nsolves == 1 && minimum(s.φc) < 0.1
+    @test !s.unit && s.nsolves == 1 && minimum(s.φc) < s.Δt
     @test s.φc ≈ Matrix(s.A) \ s.m rtol = 1e-12
     r = solve!(c.problem, m; maxiter = 4, stop = nothing, verbose = 0)
     @test all(v -> abs(v) <= VT, r.history.constraints.volume)
@@ -572,12 +582,12 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     c = rd_cantilever(; nx = 20, ny = 10, init = φ0)
     r = solve!(c.problem, ReactionDiffusion(; τ = 2e-4, sensitivity = :design); maxiter = 8, stop = nothing, verbose = 0)
     g = r.history.constraints.volume
-    @test all(isfinite, r.history.objective) && all(k -> abs(g[k] - max(0.0, g[k-1] - 0.02)) <= VT, 2:8)
+    @test all(isfinite, r.history.objective) && all(k -> abs(g[k] - max(0.0, g[k-1] - 0.04)) <= VT, 2:8)
     # consistent mass with a frozen zone
     c = rd_cantilever(; nx = 20, ny = 10)
     r = solve!(c.problem, rd(; mass = :consistent); maxiter = 5, stop = nothing, verbose = 0)
     g = [1.0; r.history.constraints.volume]                      # each target from the volume reached before it
-    @test all(k -> abs(g[k] - (g[k-1] - 0.02)) <= VT, 2:6)
+    @test all(k -> abs(g[k] - (g[k-1] - 0.04)) <= VT, 2:6)              # 0.02 |D| per iteration
     # L2Norm and MaxAbs in a run
     for n in (L2Norm(), MaxAbs())
       c = rd_cantilever(; nx = 20, ny = 10, design = :density)
@@ -595,25 +605,30 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     r = solve!(Optimization(z; objective = F, constraints = (volume = Volume(θ, dΩ; max_fraction = 0.5),)), rd();
                maxiter = 5, stop = nothing, verbose = 0)
     g = [1.0; r.history.constraints.volume]
-    @test r.state.ℓ2 ≈ 2.0^(2 / 3) && all(k -> abs(g[k] - (g[k-1] - 0.02)) <= VT, 2:6)
+    @test r.state.ℓ2 ≈ 2.0^(2 / 3) && all(k -> abs(g[k] - (g[k-1] - 0.04)) <= VT, 2:6)
   end
 
   @testset "19. stop by the rate and by the phase; the tolerance in |D|; which constraint is the volume" begin
-    # (b) the default: ‖Δφ‖∞/Δt < 0.1 with the volume met (measured: 30×15 converged at iteration 235)
+    # the rate ‖Δφ‖∞/Δt < 0.1, an option (measured: 30×15 with Δt = 0.1 and max_step = 0.01, iteration 235)
+    slow = (Δt = 0.1, volume = ExactVolume(; max_step = 0.01))
     c = rd_cantilever(; nx = 30, ny = 15)
-    r = solve!(c.problem, rd(); maxiter = 400, verbose = 0)
+    r = solve!(c.problem, rd(; slow...); maxiter = 400, verbose = 0, stop = StopCriteria(rate_tol = 0.1))
     h = r.history
     @test r.status === :converged && r.reason === :rate_tol && h.change[end] / h.step[end] < 0.1
     @test r.iterations > 50 && abs(h.constraints.volume[end]) <= VT
-    # the same stopping iteration with Δt = 0.05 is what the criterion is meant for, and it is not what happens:
-    # measured on 2026-11-24, Δt = 0.05 does not stop in 400 iterations (30×15 and 40×20; Δt = 0.1 stops at 235, 226)
-    c2 = rd_cantilever(; nx = 30, ny = 15)
-    r2 = solve!(c2.problem, rd(; Δt = 0.05); maxiter = 400, verbose = 0)
-    @test_broken r2.status === :converged && abs(r2.iterations - r.iterations) <= 0.25 * r.iterations
+    # the default stop at the same evolution time t = kΔt for Δt = 0.4 and 0.2 (a density, 40×20; measured: 32 and
+    # 58 iterations, t = 12.8 and 11.6)
+    ts = map((0.4, 0.2)) do Δt
+      c = rd_cantilever(; nx = 40, ny = 20, design = :density)
+      r = solve!(c.problem, rd(; Δt); maxiter = 300, verbose = 0)
+      @test r.status === :converged
+      r.iterations * Δt
+    end
+    @test abs(ts[1] - ts[2]) <= 0.25 * ts[1]
     # (c) the phase: no node changes sign in 5 iterations (measured: 30×15 at iteration 65)
     c = rd_cantilever(; nx = 30, ny = 15)
     tr = SignTrack(c.z, BitVector[])
-    r = solve!(c.problem, rd(); maxiter = 400, verbose = 0, stop = StopCriteria(phase_tol = 1e-4), monitors = (signs = tr,))
+    r = solve!(c.problem, rd(; slow...); maxiter = 400, verbose = 0, stop = StopCriteria(phase_tol = 1e-4), monitors = (signs = tr,))
     @test r.status === :converged && r.reason === :phase_tol && r.iterations > 50
     @test all(k -> tr.signs[k] == tr.signs[end], length(tr.signs)-5:length(tr.signs))       # a stable topology
     cd = rd_cantilever(; nx = 20, ny = 10, design = :density)
@@ -648,17 +663,60 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
                                                              verbose = 0)
   end
 
+  @testset "20. the change of the material: against Gridap's cell integrals, stops with a stable topology" begin
+    for (design, iface) in ((:levelset, Ersatz()), (:levelset, Step()), (:density, Ersatz()))
+      φ1 = design === :levelset ? (x -> clamp(0.3 - hypot(x[1] - 1.0, x[2] - 0.5) + 0.2, -1.0, 1.0)) :
+                                  (x -> 0.2 + 0.6 * abs(sin(3x[1] + x[2])))
+      φ2 = design === :levelset ? (x -> clamp(0.35 - hypot(x[1] - 0.9, x[2] - 0.5) + 0.2, -1.0, 1.0)) :
+                                  (x -> 0.3 + 0.5 * abs(sin(2x[1] + x[2])))
+      c = rd_cantilever(; nx = 20, ny = 10, design, interface = iface, init = φ1)
+      fo, z, s = rd_start(c, rd())
+      V0 = FESpace(c.model, ReferenceFE(lagrangian, Float64, 0); conformity = :L2)
+      cells() = (HyperShape.update_fields!(c.θ, c.problem.ctx); collect(assemble_vector(v -> ∫(c.θ.χ * v)c.dΩ.domain, V0)))
+      set_values!(c.z, z)
+      m1 = cells()
+      @test s.meter.prev ≈ m1 atol = 1e-14
+      z .= get_free_dof_values(interpolate(φ2, c.z.blocks[1].space))
+      set_values!(c.z, z)
+      m2 = cells()
+      st = rd().step
+      M = RDM.material_change(st, s)
+      @test M ≈ sum(abs.(m2 .- m1)) / sum(m2) rtol = 1e-12
+      @test (@allocated RDM.material_change(st, s)) == 0
+    end
+    # the default stop leaves a stable topology: the same void components in the last 10 designs
+    c = rd_cantilever(; nx = 30, ny = 15)
+    tr = ZTrack(c.z, Vector{Float64}[])
+    r = solve!(c.problem, rd(); maxiter = 300, verbose = 0, monitors = (z = tr,))
+    @test r.status === :converged && r.reason === :all
+    me = r.state.meter
+    holes = map(tr.zs[end-9:end]) do zk
+      RDM._cell_material!(me.cur, me, zk)
+      void_components(me.cur ./ me.W, 30, 15)
+    end
+    @test all(==(holes[end]), holes) && holes[end] >= 1
+    # a method without the change of the material
+    cd = rd_cantilever(; nx = 20, ny = 10, design = :density)
+    @test_throws r"material_tol needs" solve!(cd.problem, DensityMethod(OC()); maxiter = 2, verbose = 0,
+                                              stop = StopCriteria(material_tol = 1e-3))
+  end
+
   @testset "banner and events" begin
     c = rd_cantilever(; nx = 20, ny = 10, interface = Step())
     io = IOBuffer()
     solve!(c.problem, rd(); maxiter = 2, verbose = 1, io)
     s = String(take!(io))
-    @test occursin("method: sensitivity = :physical (void weight 0.001 (default))", s)
+    @test occursin("method: sensitivity = :physical (void weight 0.001 (default)) · Δt = 0.2 (default: interface map)", s)
     @test occursin("lumped mass (default)", s) && occursin("LUSolver (default)", s) && occursin("L1Mean(1) (default)", s)
-    @test occursin("volume: native (the Volume), exact multiplier (Illinois, tol 1e-04 |D|), target lowered 1 % of |D| per iteration (default)", s)
+    @test occursin("volume: native (the Volume), exact multiplier (Illinois, tol 1e-04 |D|), target lowered 2 % of |D| per iteration (default)", s)
     @test !occursin("Step() the change criterion", s) && !occursin("recommended", s)
     @test occursin("the starting design violates the constraint volume by 1 (scaled); it is not made feasible", s)
     @test occursin("reaction–diffusion: 3 solves of the step, 1 factorisation,", s)
-    @test occursin("stop: change/step < 0.1 (default)", s)
+    @test occursin("material change < 0.002 over 5 iterations, with the constraints met in the windows (default)", s)
+    @test occursin("relative objective range < 0.001 over 10 iterations and", s)
+    cd = rd_cantilever(; nx = 20, ny = 10, design = :density)
+    io = IOBuffer()
+    solve!(cd.problem, rd(); maxiter = 1, verbose = 1, io)
+    @test occursin("Δt = 0.4 (default: no interface map)", String(take!(io)))
   end
 end

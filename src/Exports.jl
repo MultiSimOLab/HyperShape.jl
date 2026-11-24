@@ -113,6 +113,7 @@ end
 @_public Methods banner_lines
 @_public Methods feasible_start
 @_public Methods phase_change
+@_public Methods material_change
 @_public Methods Discretization
 @_public Methods RebuildCheck
 @_public Methods needs_setup

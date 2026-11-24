@@ -63,7 +63,7 @@ state, linear or not). The other constraints go to the augmented Lagrangian of t
 
 - `max_step`: how much the target may go down per iteration, as a fraction of the measure `|D|` of the design
   domain: the target of iteration `k` is `max(V_obj, V_{k−1} − max_step |D|)`, met with equality while it goes down;
-  at `V_obj` the constraint is `g ≤ 0` with `λ ≥ 0`. `:auto` (default): `0.01` when the constraint reads the
+  at `V_obj` the constraint is `g ≤ 0` with `λ ≥ 0`. `:auto` (default): `0.02` when the constraint reads the
   material through an interface map (`Step()`, `Ersatz()`), `nothing` otherwise (a density: the target from the
   first iteration). `nothing`: the target from the first iteration. A number in `(0, 1]`.
 - `tol`: tolerance of the root as a fraction of `|D|`, like `max_step` (`1e-4`: the volume within `1e-4 |D|` of its
@@ -106,7 +106,7 @@ Base.show(io::IO, v::ExactVolume) =
 # The optimiser of ReactionDiffusion (internal): the implicit step, the operator and the multiplier.
 struct RDStep{T,D,N,V,LS,S,F} <: Optimizer
   τ::T                  # a number or a Parameter
-  Δt::D                 # a number or a Parameter
+  Δt::D                 # a number, a Parameter or :auto
   sensitivity::Symbol
   normalize::N
   volume::V             # ExactVolume or nothing
@@ -117,12 +117,13 @@ struct RDStep{T,D,N,V,LS,S,F} <: Optimizer
   diffusion::F          # nothing or (φ, v) -> ∫(…)dΩ
   degree::Int
   gtol::Base.RefValue{Float64}   # the tolerance of the volume in units of the scaled constraint (set per problem)
+  Δt_auto::Base.RefValue{Float64}  # Δt = :auto resolved for the problem (0.2 with an interface map, 0.4 without)
 end
 
 _value(x::Real) = Float64(x)
 _value(p::Parameter) = p[]
 
-mutable struct RDState{NS,C,MT,MM}
+mutable struct RDState{NS,C,MT,MM,ME}
   m::Vector{Float64}            # lumped mass (free rows)
   K::MT                         # diffusion matrix (free × free)
   M::MM                         # consistent mass, or nothing
@@ -153,6 +154,8 @@ mutable struct RDState{NS,C,MT,MM}
   kind::Symbol                  # :none, :linear, :newton or :illinois
   interface::Bool               # the objective reads the design through an interface map (phases)
   phase::Float64                # fraction of |D| whose phase changed in the last step (NaN without phases)
+  meter::ME                     # the material read by the Volume, cell by cell (nothing if not available)
+  zref::Vector{Float64}         # the design vector of the loop (the one given to init)
   dg::Float64                   # descent of the target per iteration (scaled units; Inf: none)
   ctx::C
   nsolves::Int
@@ -224,6 +227,7 @@ function Optimizers.init(opt::RDStep, z, oracle)
   A = M === nothing ? _union_pattern(K) : _union_pattern(K, M)
   Kmap, Dmap = _positions(A, K), _diagonal_positions(A)
   Mmap = M === nothing ? Int[] : _positions(A, M)
+  _resolve_Δt!(opt, (fo.J, (c.F for c in fo.cons)...))
   τ, Δt = _check_τΔt(opt)
   ns = nothing
   if opt.solve === nothing
@@ -233,7 +237,7 @@ function Optimizers.init(opt::RDStep, z, oracle)
   v() = zeros(n)
   s = RDState(m, K, M, A, Kmap, Mmap, Dmap, kd, area, area^(2 / d), nd == 0 && opt.diffusion === nothing, nd, τ, Δt, Δt,
               ns, true, v(), v(), v(), v(), v(), v(), v(), v(), 0.0, false, :none,
-              _has_interface_map(physical_fields(fo.J)), NaN, Inf, fo.ctx, 0, 0, 0)
+              _has_interface_map(physical_fields(fo.J)), NaN, _material_meter(fo, z), z, Inf, fo.ctx, 0, 0, 0)
   if opt.solve === nothing
     s.nfactor += 1
     _unit_response!(opt, s)
@@ -244,8 +248,17 @@ function Optimizers.init(opt::RDStep, z, oracle)
   s
 end
 
+# Δt = :auto: 0.2 when a functional reads the design through an interface map, 0.4 otherwise (decision of Jesús,
+# 2026-11-24, from the study of the stopping iterations on the cantilever)
+function _resolve_Δt!(opt::RDStep, Fs)
+  opt.Δt === :auto || return opt
+  opt.Δt_auto[] = any(F -> _has_interface_map(physical_fields(F)), Fs) ? 0.2 : 0.4
+  opt
+end
+_Δt_value(opt::RDStep) = opt.Δt === :auto ? opt.Δt_auto[] : _value(opt.Δt)
+
 function _check_τΔt(opt)
-  τ, Δt = _value(opt.τ), _value(opt.Δt)
+  τ, Δt = _value(opt.τ), _Δt_value(opt)
   (isfinite(τ) && τ >= 0) || throw(ArgumentError("ReactionDiffusion: τ must be ≥ 0, got $τ"))
   (isfinite(Δt) && Δt > 0) || throw(ArgumentError("ReactionDiffusion: Δt must be positive, got $Δt"))
   τ, Δt
@@ -323,7 +336,7 @@ function _rd_constraint!(opt::RDStep, s::RDState, oracle, fo)
   interface = _has_interface_map(θ)
   s.kind = linear_constraint(oracle, 1) !== nothing ? :linear :
            (θ isa PhysicalFields && !is_differentiable(θ)) ? :illinois : :newton
-  ms = opt.volume.max_step === :auto ? (interface ? 0.01 : nothing) : opt.volume.max_step
+  ms = opt.volume.max_step === :auto ? (interface ? 0.02 : nothing) : opt.volume.max_step
   s.dg = ms === nothing ? Inf : ms * s.area / get_scale(F)
   opt.gtol[] = opt.volume.tol * s.area / get_scale(F)
   s
@@ -331,6 +344,92 @@ end
 
 _has_interface_map(θ) = θ isa PhysicalFields && (has_ersatz(θ) || !is_differentiable(θ))
 _has_step(θ) = θ isa PhysicalFields && !is_differentiable(θ)
+
+# The material that the Volume constraint reads, cell by cell, from the nodal values of the design (no solve, no
+# allocation): ∫_K χ dΩ with the quadrature of the measure of the Volume for Identity() (a density) and Step(), and
+# |K| times the fraction of Ersatz(). The frozen zones are their nodal values (the image of the frozen value).
+mutable struct _MaterialMeter{S}
+  kind::Symbol                  # :identity, :step or :ersatz
+  stage::S                      # the ErsatzStage (nothing otherwise)
+  data::Vector{Int32}           # cell dof ids of the design field (flat): positive free, negative Dirichlet
+  ptrs::Vector{Int32}
+  dv::Vector{Float64}           # the Dirichlet (frozen) values
+  N::Array{Float64,3}           # shape functions at the quadrature points, q × a × cell
+  w::Matrix{Float64}            # quadrature weights times |det J|, q × cell
+  W::Vector{Float64}            # cell measures
+  cur::Vector{Float64}
+  prev::Vector{Float64}
+end
+
+# the meter of the problem of `fo`: its Volume constraint (exactly one) read through Identity(), Step() or Ersatz()
+function _material_meter(fo, z)
+  vols = [c.F for c in fo.cons if is_volume(c.F)]
+  length(vols) == 1 || return nothing
+  F = vols[1]
+  θ = F.θ
+  j = findfirst(==(F.J.field), getfield(θ, :names))
+  chain = Tuple(st for st in getfield(θ, :chains)[j] if !(st isa MaskStage))
+  core = Tuple(st for st in chain if !(st isa IdentityStage))
+  kind = isempty(core) ? :identity : (length(core) == 1 && core[1] isa StepStage) ? :step :
+         (length(core) == 1 && core[1] isa ErsatzStage) ? :ersatz : :none
+  kind === :none && return nothing
+  U = fo.z.blocks[1].space
+  ids = Gridap.Arrays.Table(get_cell_dof_ids(U))
+  quad = F.J.dΩ.quad
+  Ω = get_triangulation(U)
+  x = Gridap.CellData.get_cell_points(quad)
+  Nc = get_fe_basis(_test_space(U))(x)
+  Jc = Gridap.Arrays.lazy_map(Gridap.Arrays.evaluate, Gridap.Arrays.lazy_map(∇, Gridap.Geometry.get_cell_map(Ω)),
+                              Gridap.CellData.get_data(x))
+  wq = quad.cell_weight
+  nc = length(ids)
+  nq, na = size(Nc[1])
+  N = Array{Float64,3}(undef, nq, na, nc)
+  w = Matrix{Float64}(undef, nq, nc)
+  for c in 1:nc
+    N[:, :, c] .= Nc[c]
+    w[:, c] .= wq[c] .* Gridap.TensorValues.meas.(Jc[c])
+  end
+  me = _MaterialMeter(kind, kind === :ersatz ? core[1] : nothing, Vector{Int32}(ids.data), Vector{Int32}(ids.ptrs),
+                      collect(Float64, get_dirichlet_dof_values(U)), N, w, vec(sum(w; dims = 1)), zeros(nc), zeros(nc))
+  _cell_material!(me.prev, me, z)                 # the material of the starting design
+  me
+end
+
+@inline _nodal(data, z, dv, j) = (d = data[j]; d > 0 ? z[d] : dv[-d])
+
+function _cell_material!(out, me::_MaterialMeter, z)
+  data, ptrs, N, w = me.data, me.ptrs, me.N, me.w
+  nq, na = size(N, 1), size(N, 2)
+  @inbounds for c in eachindex(out)
+    if me.kind === :ersatz
+      st = me.stage
+      out[c] = me.W[c] * _fraction(st, _cell_values(st, z, me.dv, c), c)[1]
+      continue
+    end
+    p = ptrs[c]
+    acc = 0.0
+    for q in 1:nq
+      φq = 0.0
+      for a in 1:na
+        φq += N[q, a, c] * _nodal(data, z, me.dv, p + a - 1)
+      end
+      acc += w[q, c] * (me.kind === :step ? (φq >= 0 ? 1.0 : 0.0) : φq)
+    end
+    out[c] = acc
+  end
+  out
+end
+
+# M_k = Σ_K |∫_K χ_k − ∫_K χ_{k−1}| / ∫ χ_k, and χ_k becomes the previous one
+_material_change!(::Nothing, z) = NaN
+function _material_change!(me::_MaterialMeter, z)
+  _cell_material!(me.cur, me, z)
+  num = sum(Broadcast.instantiate(Broadcast.broadcasted((a, b) -> abs(a - b), me.cur, me.prev)))
+  den = sum(me.cur)
+  copyto!(me.prev, me.cur)
+  den > 0 ? num / den : NaN
+end
 
 # τ or Δt continued (Parameter), a rejected step, or the nominal Δt back after one
 function _sync_parameters!(opt::RDStep, s::RDState, retry::Bool)
@@ -589,6 +688,7 @@ Optimizers.handles(opt::RDStep, c::ConstraintInfo) =
 Optimizers.max_native(opt::RDStep) = opt.volume === nothing ? 0 : 1
 Optimizers.constraint_tol(opt::RDStep) = opt.volume === nothing ? Inf : isnan(opt.gtol[]) ? opt.volume.tol : opt.gtol[]
 phase_change(::RDStep, s::RDState) = s.phase
+material_change(::RDStep, s::RDState) = _material_change!(s.meter, s.zref)
 
 # the native constraint of ExactVolume: the one named, or the one built with Volume (exactly one)
 function _auto_native(opt::RDStep, problem, infos, names)
@@ -619,10 +719,11 @@ function Optimizers.restore_memory!(::RDStep, s::RDState, z, v::NamedTuple)
   s
 end
 
-# ReactionDiffusion stops when the rate of change maximum(abs, Δz)/Δt < 0.1 (Δt of the accepted step: it does not depend
-# on Δt, nor is it met by a step shrunk after a rejection) and the constraints hold to their tolerances (decision of
-# Jesús, 2026-11-24). A criterion on the objective stops too early: the objective settles before the topology does.
-default_stop(::RDStep) = StopCriteria(rate_tol = 0.1)
+# ReactionDiffusion stops when the constraints are met, the material changes less than 2e-3 (relative) in each of the
+# last 5 iterations and the objective varies less than 1e-3 (relative range) over the last 10, the windows counted with
+# the constraints met (decision of Jesús, 2026-11-24, from the study of stopping criteria on the cantilever)
+default_stop(::RDStep) = StopCriteria(material_tol = 2e-3, material_window = 5, objective_range = 1e-3, window = 10,
+                                      combine = :all)
 
 summary_note(::Optimizer, state) = ""
 summary_note(::RDStep, s::RDState) =
@@ -634,7 +735,7 @@ Base.show(io::IO, ::RDStep) = print(io, "RDStep")
 # ---------------------------------------------------------------------------------------------------------------
 # The method
 
-const _RD_DEFAULTS = (Δt = 0.1, normalize = L1Mean(), volume = ExactVolume(), mass = :lumped, void_weight = 1e-3,
+const _RD_DEFAULTS = (Δt = :auto, normalize = L1Mean(), volume = ExactVolume(), mass = :lumped, void_weight = 1e-3,
                       ls = LUSolver(), solve = nothing, diffusion = nothing, degree = 2, lagrangian = AugmentedLagrangian())
 
 const _RD_PRESETS = Dict{Symbol,NamedTuple}(
@@ -643,7 +744,7 @@ const _RD_PRESETS = Dict{Symbol,NamedTuple}(
                                                 native = ())))
 
 """
-    ReactionDiffusion(; τ, sensitivity, Δt = 0.1, normalize = L1Mean(), volume = ExactVolume(), mass = :lumped,
+    ReactionDiffusion(; τ, sensitivity, Δt = :auto, normalize = L1Mean(), volume = ExactVolume(), mass = :lumped,
                       void_weight = 1e-3, ls = LUSolver(), solve = nothing, diffusion = nothing, degree = 2,
                       lagrangian = AugmentedLagrangian())
     ReactionDiffusion(preset::Symbol; τ, sensitivity, kwargs...)
@@ -676,7 +777,9 @@ Mandatory (modelling decisions):
   kinks of the cell fractions (a node changing sign) and the observed rates fall below 2 for a correct derivative.
 
 Optional (each one replaceable, shown in the banner):
-- `Δt`: pseudo-time step (number or `Parameter`), default `0.1`; halved by `RejectStep` when the forward problem does
+- `Δt`: pseudo-time step (number or `Parameter`); `:auto` (default) is `0.2` when the problem reads the design through
+  an interface map and `0.4` otherwise (shown in the banner). With a smaller `Δt` the topology depends on the path: the
+  design passes through metastable plateaus and the diffusion keeps merging holes long after it looks converged; halved by `RejectStep` when the forward problem does
   not converge at the new design, back to its value at the next step.
 - `normalize`: [`L1Mean`](@ref)`(c)` (default `c = 1`), [`L2Norm`](@ref)`()`, [`MaxAbs`](@ref)`()`, or a function
   `(g, m, area) -> C` (`g` the derivative, `m` the lumped mass, `area` = `|D|`).
@@ -702,10 +805,11 @@ a density `φ₀ = 0.5` with `bounds = (0.0, 1.0)`, SIMP `p = 3`, `Volume(…; s
 Per iteration: one forward solve, one adjoint (none with `SelfAdjoint()`), one assembly of the sensitivity, one
 product `K z` and one solve of the step (no factorisation); the volume costs a few evaluations of the constraint per
 step (vectors only for a density; the map and an integral each with an interface map, plus one derivative per Newton
-iteration with `Ersatz()`; the summary of `solve!` counts them). The default stop is
-`StopCriteria(rate_tol = 0.1)`, the rate of change `‖Δφ‖∞/Δt` below `0.1`, with the constraints met
-([`default_stop`](@ref)); `StopCriteria(change_tol)` (the change alone) and `StopCriteria(phase_tol)` (the fraction of
-the domain that changes phase, with an interface map) are the alternatives. Neither the interface map nor the
+iteration with `Ersatz()`; the summary of `solve!` counts them). The default stop
+([`default_stop`](@ref)) needs the constraints met, the change of the material `∫|χ_k − χ_{k−1}| / ∫χ_k` below `2e-3`
+in each of the last 5 iterations and the relative range of the objective below `1e-3` over the last 10, the windows
+counted with the constraints met; `StopCriteria(rate_tol)`, `change_tol` and `phase_tol` are options. `√(τ|D|)` is the
+length of the diffusion (a perimeter energy), not a minimum thickness: bars of one or two cells can remain. Neither the interface map nor the
 stopping criterion is a recommendation: the choice will be validated with more cases. The starting design is not made feasible (the volume goes down from a solid start, `max_step` of `|D|` per
 iteration). Checkpoints save the multiplier (a resumed run is the uninterrupted one).
 """
@@ -740,7 +844,7 @@ function _reaction_diffusion(preset; kwargs...)
   val(k) = haskey(kwargs, k) ? kwargs[k] : haskey(p, k) ? p[k] : _RD_DEFAULTS[k]
   τ, sens, Δt = kwargs[:τ], kwargs[:sensitivity], val(:Δt)
   for (n, x, pos) in ((:τ, τ, false), (:Δt, Δt, true))
-    x isa Parameter && continue
+    (x isa Parameter || (n === :Δt && x === :auto)) && continue
     (x isa Real && isfinite(x) && (pos ? x > 0 : x >= 0)) ||
       throw(ArgumentError("ReactionDiffusion: $n must be a number $(pos ? "> 0" : "≥ 0") or a Parameter, got $(repr(x))"))
   end
@@ -766,7 +870,7 @@ function _reaction_diffusion(preset; kwargs...)
   vol === nothing && lag.native !== () &&
     throw(ArgumentError("ReactionDiffusion: volume = nothing gives every constraint to the augmented Lagrangian: " *
                         "say it with lagrangian = AugmentedLagrangian(…; native = ())"))
-  step = RDStep(τ, Δt, sens, norm, vol, mass, Float64(w0), ls, solvef, diff, Int(deg), Ref(NaN))
+  step = RDStep(τ, Δt, sens, norm, vol, mass, Float64(w0), ls, solvef, diff, Int(deg), Ref(NaN), Ref(NaN))
   ReactionDiffusion(step, lag, preset, sources)
 end
 
@@ -806,6 +910,7 @@ function check_problem(m::ReactionDiffusion, problem)
   (isfinite(b.lb) && isfinite(b.ub)) || throw(ArgumentError("ReactionDiffusion: the bounds of z must be finite"))
   native = _native_split(problem, m.step, m.lagrangian)
   _set_tolerance!(m.step, problem, native)
+  _resolve_Δt!(m.step, (problem.objective, (c.F for c in problem.constraints)...))
   m.step.sensitivity === :design || return nothing
   for (j, (n, F)) in enumerate(pairs((objective = problem.objective, map(c -> c.F, problem.constraints)...)))
     j > 1 && (j - 1) in native && continue      # the native constraint is only evaluated (the root), never differentiated
@@ -848,7 +953,9 @@ function banner_lines(m::ReactionDiffusion, problem)
   ℓ2 = area^(2 / num_cell_dims(Ω))
   lines = Tuple{String,Symbol}[]
   sens = opt.sensitivity === :physical ? ":physical (void weight $(_g(opt.void_weight))$(mark(:void_weight)))" : ":design"
-  push!(lines, ("method: sensitivity = $sens · Δt = $(_rd_value(opt.Δt))$(mark(:Δt)) · τ = $(_rd_value(opt.τ)) " *
+  Δtl = opt.Δt === :auto ? _g(opt.Δt_auto[]) * " (default: " * (opt.Δt_auto[] == 0.2 ? "interface map)" : "no interface map)") :
+        _rd_value(opt.Δt) * mark(:Δt)
+  push!(lines, ("method: sensitivity = $sens · Δt = $Δtl · τ = $(_rd_value(opt.τ)) " *
                 "(× ℓ² = $(_g(ℓ2))) · clip [$(_g(b.lb)), $(_g(b.ub))]", :normal))
   solver = opt.solve === nothing ? "$(nameof(typeof(opt.ls)))$(mark(:ls))" : "solve function of the user"
   nfrozen = b.zone === nothing ? 0 : b.zone.ndofs
@@ -868,7 +975,7 @@ function banner_lines(m::ReactionDiffusion, problem)
       F = problem.constraints[native[1]].F
       θ = physical_fields(F)
       kind = is_linear(F) ? "Newton on the clipped vector" : _has_step(θ) ? "Illinois" : "Newton"
-      ms = opt.volume.max_step === :auto ? (_has_interface_map(θ) ? 0.01 : nothing) : opt.volume.max_step
+      ms = opt.volume.max_step === :auto ? (_has_interface_map(θ) ? 0.02 : nothing) : opt.volume.max_step
       push!(lines, ("$n: native" * (opt.volume.constraint === nothing ? " (the Volume)" : " (named)") *
                     ", exact multiplier ($kind, tol $(_g_or_e(opt.volume.tol)) |D|), " *
                     (ms === nothing ? "target from the first iteration" : "target lowered $(_g(100 * ms)) % of |D| per iteration") *

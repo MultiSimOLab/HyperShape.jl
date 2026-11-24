@@ -297,7 +297,7 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
   step); with `close_early = true` also when the stopping criteria are met. The optimiser forgets its memory at each
   jump; the optimisation only stops in the last stage.
 - **Stopping:** `maxiter` is mandatory. `stop` defaults to `StopCriteria(objective_range = 1e-3)` for OC and SiMPL
-  (`default_stop`; `ReactionDiffusion`: `rate_tol = 0.1`, below): the range of the objective over the last 10 iterations of the last stage, relative to the
+  (`default_stop`; `ReactionDiffusion`: material, objective and constraints, below): the range of the objective over the last 10 iterations of the last stage, relative to the
   objective, below 0.1 %. With a tanh projection `change_tol` and `kkt_tol` are rarely reached; the objective settles
   (half MBB beam 150×50: OC with adaptive move limits stops at iteration 214, 0.4 % above its value at 500 iterations; SiMPL at 210, within 0.3 % of 350 iterations). Other criteria:
   `kkt_tol`, `kkt_rtol` (relative to the first iteration), `stationarity_tol`, `stationarity_rtol` (the measure
@@ -372,7 +372,7 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
   `G(λ) = g(clamp(φ* − λ φ̌)) − g_k` with `φ̌ = A⁻¹ m` (`Δt` everywhere when no value is frozen): Newton on the
   clipped vector for a linear constraint (vectors only), Newton with the derivative of the constraint for `Ersatz()`,
   regula falsi (Illinois) for `Step()`, always inside the bracket given by the bounds, from the `λ` of the previous
-  step. With an interface map the target goes down `max_step = 0.01` of `|D|` per iteration from the start (a solid
+  step. With an interface map the target goes down `max_step = 0.02` of `|D|` per iteration from the start (a solid
   start is not made feasible), with equality; at the final target the constraint is `g ≤ 0` with `λ ≥ 0`. A density
   meets the target from the first iteration. The augmented Lagrangian of the method takes every other constraint.
   The tolerance `tol = 1e-4` is a fraction of `|D|`, like `max_step` (converted with the scale of the constraint: the
@@ -391,17 +391,25 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
   the observed rates fall below 2 for a correct derivative.
 - **Normalisation** (`normalize`): `L1Mean(c)` (default, `C = c |D| / Σ|gᵢ|`, independent of the mesh),
   `L2Norm()` (Kim et al.), `MaxAbs()`, or a function `(g, m, area) -> C`.
-- **Stopping:** `StopCriteria(rate_tol = 0.1)` with the constraints met (`default_stop`): the rate of change
-  `‖Δφ‖∞/Δt` below `0.1`, with the `Δt` of the accepted step, so it does not depend on `Δt` and a step shrunk after a
-  rejection does not meet it by being short; never during the descent of the volume. Alternatives:
-  `StopCriteria(change_tol = 1e-2)` (the change alone) and `StopCriteria(phase_tol = 1e-4, phase_window = 5)` (the
-  fraction of the domain whose phase changes, the lumped mass of the nodes where φ changes sign over `|D|`, below the
-  tolerance in each of the last 5 iterations; only with an interface map). A criterion on the objective stops too
-  early (the objective settles before the topology). No interface map (`Step()` or `Ersatz()`) and no stopping
-  criterion is recommended yet: the choice will be validated with more cases (2 × 1 cantilever 120 × 60, Mac of the
-  lab, 4 threads, Julia 1.13.0, 400 iterations: `rate_tol` stops `Step()` at 259 and the density at 177, not
-  `Ersatz()`; with `Δt = 0.05` the density stops at 354, so the rate does not make the stopping iteration independent
-  of `Δt`; `phase_tol = 1e-4` stops `Ersatz()` at 233 and `Step()` at 227).
+- **Stopping** (`default_stop`): the constraints met **and** the material changed in each of the last 5 iterations,
+  `M_k = ∫|χ_k − χ_{k−1}| / ∫χ_k < 2e-3` (`χ` the field the `Volume` reads, cell by cell), **and** the relative range
+  of the objective over the last 10 iterations below `1e-3`; the windows count only iterations with the constraints
+  met, never the descent of the volume (`StopCriteria(material_tol = 2e-3, objective_range = 1e-3, combine = :all)`).
+  `M_k` is computed by the step from the nodal values, without solves or allocations. Options:
+  `StopCriteria(rate_tol = 0.1)` (`‖Δφ‖∞/Δt`), `change_tol` (`‖Δφ‖∞`) and `phase_tol` with `phase_window` (the lumped
+  mass of the nodes where φ changes sign over `|D|`, only with an interface map).
+- **Defaults of the evolution:** `Δt = 0.2` and `max_step = 0.02` of `|D|` per iteration with an interface map,
+  `Δt = 0.4` and the target from the first iteration for a density (the banner says which). On the 2 × 1 cantilever
+  they reach a stable topology in a few tens of iterations (study of 24 runs on 120 × 60 and 240 × 120 meshes). The
+  topology of reaction–diffusion depends on the path: with a smaller `Δt` the design passes through metastable
+  plateaus (9–16 holes, the objective and the material steady for 20 iterations or more) and the diffusion keeps
+  merging holes long after the design looks converged; any reasonable criterion then stops on a plateau (a clean
+  design, with an objective equal or better, but not the one of iteration 400). Neither the interface map (`Step()`
+  or `Ersatz()`) nor the stopping criterion is a recommendation yet: the choice will be validated with more cases.
+- **Diffusion and thickness:** `√(τ |D|)` (0.02 for `τ = 2e-4` on a 2 × 1 domain, 1.2 cells of a 120 × 60 mesh) is the
+  length of a gradient (perimeter) energy, not a minimum thickness: bars of one or two cells are expensive but
+  admissible, and they disappear only as the perimeter decreases, slowly. The 5th percentile of the thickness grows
+  with `τ`, the minimum does not; a minimum size needs a filter or a constraint, which the method does not have.
 - **Rejection:** when the forward problem does not converge at the new design, `RejectStep` halves `Δt` (the operator
   is factorised again, the gradient comes from the snapshot of the oracle) and the nominal `Δt` comes back at the next
   step.
@@ -512,8 +520,8 @@ A default never removes generality: everything it sets can be replaced from the 
 | `RejectStep(shrink = 0.5, max_attempts = 5)` | `solve!(…; on_failure)` | `on_failure = RejectStep(…)` |
 | `default_stop(optimizer)` | `solve!(…; stop)` | `stop = StopCriteria(…)`, `stop = nothing` or `stop = (info, history, ctx) -> Bool` |
 | `Euclidean()` (only for the stationarity measure) | `DensityMethod(OC())` | `metric = LumpedMass(dΩ)`, a vector of weights or an object with `metric_weights(m, z)` |
-| `ls = LUSolver()`, `mass = :lumped`, `normalize = L1Mean()`, `volume = ExactVolume()`, `Δt = 0.1`, `void_weight = 1e-3`, `lagrangian = AugmentedLagrangian()` | `ReactionDiffusion` | the keyword of the same name; `solve = (A, b, x, ctx, stale) -> x` for any other solver; `diffusion = (φ, v) -> ∫(…)dΩ` |
-| `max_step = :auto` (`0.01` of `|D|` with an interface map), `tol = 1e-4` | `ExactVolume` | the keyword of the same name |
+| `ls = LUSolver()`, `mass = :lumped`, `normalize = L1Mean()`, `volume = ExactVolume()`, `Δt = :auto` (0.2 with an interface map, 0.4 without), `void_weight = 1e-3`, `lagrangian = AugmentedLagrangian()` | `ReactionDiffusion` | the keyword of the same name; `solve = (A, b, x, ctx, stale) -> x` for any other solver; `diffusion = (φ, v) -> ∫(…)dΩ` |
+| `max_step = :auto` (`0.02` of `|D|` with an interface map), `tol = 1e-4` (of `|D|`) | `ExactVolume` | the keyword of the same name |
 | maps `Identity`, `HelmholtzFilter`, `TanhProjection`, `CellMean` | `PhysicalFields`, `single_field_design` | `PointwiseMap(f, df; parameters)` |
 | continued objects `TanhProjection` (β), `OC` (move) | `Continuation` | any `Parameter` read by the user's forms or maps |
 | monitor `Grey` | `solve!(…; monitors)` | any object with `monitor_value(m)` |
