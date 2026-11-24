@@ -75,9 +75,11 @@ The root of `G(λ) = g(clamp(φ* − λ φ̌)) − g_k` (non-increasing in λ) s
 given by the bounds (all values at the upper or at the lower bound): a linear constraint (a density) by Newton on the
 clipped vector (only vectors, no solve; the algorithm of Cui et al. 2023); a nonlinear one with a derivative
 (`Ersatz()`) by Newton with the derivative of the constraint, guarded by the bracket; `Step()` by regula falsi
-(Illinois), which also ends when no value of the clipped design changes side of the interface `φ = 0` inside the
-bracket, on the feasible side (the volume of `Step()` is piecewise constant and the tolerance can be out of reach on
-coarse meshes). If the evaluations run out before a feasible trial is seen, the step takes the bound of the bracket
+(Illinois) on the volume computed by the material meter of the step (the same quadrature as the `Volume`, from the
+nodal values: exact, cheap and without allocations), until at most one quadrature point changes side inside the
+bracket; it ends on its feasible side (the volume of `Step()` is piecewise constant, and on coarse meshes the jump of
+one point can be larger than `tol`). Without the meter (a `Volume` over part of the domain, another constraint) the
+evaluations of `Step()` go through the constraint, until the trials differ by less than 1e-9. If the evaluations run out before a feasible trial is seen, the step takes the bound of the bracket
 where every value is at its lower bound. Each evaluation of a nonlinear constraint updates the maps and integrates
 (no state is solved, but the integral reserves memory: about 70 kB per evaluation and 130 kB per derivative with
 `Ersatz()`, independent of the mesh); a linear one costs vector operations only, without allocations.
@@ -161,6 +163,9 @@ mutable struct RDState{NS,C,MT,MM,ME}
   nsolves::Int
   nfactor::Int
   nvol::Int
+  nmeter::Int                   # evaluations of the volume by the material meter (Step())
+  vref::Float64                 # V_max + r of the native Volume (its value from the meter: (∫χ − vref)/vscale)
+  vscale::Float64
 end
 
 # the union of the patterns of the matrices and the diagonal, with zero values
@@ -237,7 +242,7 @@ function Optimizers.init(opt::RDStep, z, oracle)
   v() = zeros(n)
   s = RDState(m, K, M, A, Kmap, Mmap, Dmap, kd, area, area^(2 / d), nd == 0 && opt.diffusion === nothing, nd, τ, Δt, Δt,
               ns, true, v(), v(), v(), v(), v(), v(), v(), v(), 0.0, false, :none,
-              _has_interface_map(physical_fields(fo.J)), NaN, _material_meter(fo, z), z, Inf, fo.ctx, 0, 0, 0)
+              _has_interface_map(physical_fields(fo.J)), NaN, _material_meter(fo, z), z, Inf, fo.ctx, 0, 0, 0, 0, NaN, NaN)
   if opt.solve === nothing
     s.nfactor += 1
     _unit_response!(opt, s)
@@ -336,6 +341,14 @@ function _rd_constraint!(opt::RDStep, s::RDState, oracle, fo)
   interface = _has_interface_map(θ)
   s.kind = linear_constraint(oracle, 1) !== nothing ? :linear :
            (θ isa PhysicalFields && !is_differentiable(θ)) ? :illinois : :newton
+  # Step() with the Volume of the meter: the root evaluates the volume with the meter (exact, no allocation), so it
+  # can bracket the jump of a single quadrature point
+  me = s.meter
+  if s.kind === :illinois && me !== nothing && me.kind === :step && me.fid == objectid(F)
+    s.kind = :meter
+    s.vref = F.J.vmax + _reference(fo.cons[i])
+    s.vscale = get_scale(F)
+  end
   ms = opt.volume.max_step === :auto ? (interface ? 0.02 : nothing) : opt.volume.max_step
   s.dg = ms === nothing ? Inf : ms * s.area / get_scale(F)
   opt.gtol[] = opt.volume.tol * s.area / get_scale(F)
@@ -347,51 +360,86 @@ _has_step(θ) = θ isa PhysicalFields && !is_differentiable(θ)
 
 # The material that the Volume constraint reads, cell by cell, from the nodal values of the design (no solve, no
 # allocation): ∫_K χ dΩ with the quadrature of the measure of the Volume for Identity() (a density) and Step(), and
-# |K| times the fraction of Ersatz(). The frozen zones are their nodal values (the image of the frozen value).
+# |K| times the fraction of Ersatz(). The frozen zones are their nodal values (the image of the frozen value). Only
+# when the Volume integrates over the cells of the design space, in their order, with one reference cell; the shape
+# functions are those of the reference cell at its quadrature points (one matrix), the weights times |det J| one
+# vector per cell (Identity() and Step(); Ersatz() keeps only the cell measures).
 mutable struct _MaterialMeter{S}
   kind::Symbol                  # :identity, :step or :ersatz
+  fid::UInt                     # objectid of the Volume measured
   stage::S                      # the ErsatzStage (nothing otherwise)
   data::Vector{Int32}           # cell dof ids of the design field (flat): positive free, negative Dirichlet
   ptrs::Vector{Int32}
   dv::Vector{Float64}           # the Dirichlet (frozen) values
-  N::Array{Float64,3}           # shape functions at the quadrature points, q × a × cell
-  w::Matrix{Float64}            # quadrature weights times |det J|, q × cell
+  N::Matrix{Float64}            # shape functions of the reference cell at the quadrature points, q × a (empty: Ersatz)
+  w::Matrix{Float64}            # quadrature weights times |det J|, q × cell (empty: Ersatz)
   W::Vector{Float64}            # cell measures
   cur::Vector{Float64}
   prev::Vector{Float64}
 end
 
-# the meter of the problem of `fo`: its Volume constraint (exactly one) read through Identity(), Step() or Ersatz()
-function _material_meter(fo, z)
-  vols = [c.F for c in fo.cons if is_volume(c.F)]
-  length(vols) == 1 || return nothing
-  F = vols[1]
+# the cells of Ωv are those of ΩU, in the same order
+function _same_cells(Ωv, ΩU)
+  Ωv === ΩU && return true
+  num_cells(Ωv) == num_cells(ΩU) || return false
+  try
+    D = num_cell_dims(ΩU)
+    collect(Gridap.Geometry.get_glue(Ωv, Val(D)).tface_to_mface) == collect(Gridap.Geometry.get_glue(ΩU, Val(D)).tface_to_mface) &&
+      get_background_model(Ωv) === get_background_model(ΩU)
+  catch
+    false
+  end
+end
+
+# the kind of meter of the Volume F (:identity, :step, :ersatz) and the Ersatz stage, or (:none, nothing)
+function _meter_kind(F)
   θ = F.θ
   j = findfirst(==(F.J.field), getfield(θ, :names))
   chain = Tuple(st for st in getfield(θ, :chains)[j] if !(st isa MaskStage))
   core = Tuple(st for st in chain if !(st isa IdentityStage))
-  kind = isempty(core) ? :identity : (length(core) == 1 && core[1] isa StepStage) ? :step :
-         (length(core) == 1 && core[1] isa ErsatzStage) ? :ersatz : :none
-  kind === :none && return nothing
+  isempty(core) && return :identity, nothing
+  length(core) == 1 && core[1] isa StepStage && return :step, nothing
+  length(core) == 1 && core[1] isa ErsatzStage && return :ersatz, core[1]
+  :none, nothing
+end
+
+# the Volume of the meter among the functionals of a problem (exactly one, over the design domain), or nothing
+function _meter_volume(Fs, U)
+  vols = [F for F in Fs if is_volume(F)]
+  length(vols) == 1 || return nothing
+  F = vols[1]
+  first(_meter_kind(F)) === :none && return nothing
+  _same_cells(F.J.dΩ.quad.trian, get_triangulation(U)) || return nothing
+  length(unique(Gridap.Geometry.get_cell_type(get_triangulation(U)))) == 1 || return nothing
+  F
+end
+
+# the meter of the problem of `fo` (nothing when its Volume cannot be measured this way: see _meter_volume)
+function _material_meter(fo, z)
   U = fo.z.blocks[1].space
+  F = _meter_volume(Tuple(c.F for c in fo.cons), U)
+  F === nothing && return nothing
+  kind, stage = _meter_kind(F)
   ids = Gridap.Arrays.Table(get_cell_dof_ids(U))
   quad = F.J.dΩ.quad
   Ω = get_triangulation(U)
+  nc = length(ids)
   x = Gridap.CellData.get_cell_points(quad)
-  Nc = get_fe_basis(_test_space(U))(x)
   Jc = Gridap.Arrays.lazy_map(Gridap.Arrays.evaluate, Gridap.Arrays.lazy_map(∇, Gridap.Geometry.get_cell_map(Ω)),
                               Gridap.CellData.get_data(x))
   wq = quad.cell_weight
-  nc = length(ids)
-  nq, na = size(Nc[1])
-  N = Array{Float64,3}(undef, nq, na, nc)
-  w = Matrix{Float64}(undef, nq, nc)
-  for c in 1:nc
-    N[:, :, c] .= Nc[c]
-    w[:, c] .= wq[c] .* Gridap.TensorValues.meas.(Jc[c])
+  W = [sum(wq[c] .* Gridap.TensorValues.meas.(Jc[c])) for c in 1:nc]
+  if kind === :ersatz
+    N, w = zeros(0, 0), zeros(0, 0)
+  else
+    N = Matrix{Float64}(get_fe_basis(_test_space(U))(x)[1])     # the same reference cell everywhere
+    w = Matrix{Float64}(undef, size(N, 1), nc)
+    for c in 1:nc
+      w[:, c] .= wq[c] .* Gridap.TensorValues.meas.(Jc[c])
+    end
   end
-  me = _MaterialMeter(kind, kind === :ersatz ? core[1] : nothing, Vector{Int32}(ids.data), Vector{Int32}(ids.ptrs),
-                      collect(Float64, get_dirichlet_dof_values(U)), N, w, vec(sum(w; dims = 1)), zeros(nc), zeros(nc))
+  me = _MaterialMeter(kind, objectid(F), stage, Vector{Int32}(ids.data), Vector{Int32}(ids.ptrs),
+                      collect(Float64, get_dirichlet_dof_values(U)), N, w, W, zeros(nc), zeros(nc))
   _cell_material!(me.prev, me, z)                 # the material of the starting design
   me
 end
@@ -412,7 +460,7 @@ function _cell_material!(out, me::_MaterialMeter, z)
     for q in 1:nq
       φq = 0.0
       for a in 1:na
-        φq += N[q, a, c] * _nodal(data, z, me.dv, p + a - 1)
+        φq += N[q, a] * _nodal(data, z, me.dv, p + a - 1)
       end
       acc += w[q, c] * (me.kind === :step ? (φq >= 0 ? 1.0 : 0.0) : φq)
     end
@@ -538,6 +586,60 @@ function (G::_OracleG)(λ)
   constraint(G.oracle, 1, s.zt) - G.gk
 end
 
+# G of Step() from the material meter: the volume of the clipped trial, quadrature point by quadrature point (the cell
+# materials go to me.cur, which material_change recomputes)
+struct _MeterG{M,L,U,S}
+  me::M
+  s::S
+  lb::L
+  ub::U
+  gk::Float64
+end
+function (G::_MeterG)(λ)
+  s = G.s
+  @. s.zt = clamp(s.φs - λ * s.φc, G.lb, G.ub)
+  s.nmeter += 1
+  (sum(_cell_material!(G.me.cur, G.me, s.zt)) - s.vref) / s.vscale - G.gk
+end
+
+# the bracket [a, b] of Step() is closed when at most one quadrature point of the Volume changes side between the trials
+# of a and b (the jump of G is then that of one point: b is the feasible end), or when the trials differ by less than
+# 1e-12 (several points that change side at the same λ)
+struct _QuadClosed{M,L,U,S}
+  me::M
+  s::S
+  lb::L
+  ub::U
+end
+function (c::_QuadClosed)(a, b)
+  me, s = c.me, c.s
+  (b - a) * maximum(s.φc) <= 1e-12 && return true
+  crossings = 0
+  data, ptrs, N = me.data, me.ptrs, me.N
+  nq, na = size(N, 1), size(N, 2)
+  @inbounds for k in 1:length(ptrs)-1               # ptrs has one entry more than the cells
+    p = ptrs[k]
+    for q in 1:nq
+      φa = 0.0
+      φb = 0.0
+      for i in 1:na
+        d = data[p+i-1]
+        if d > 0
+          φa += N[q, i] * clamp(s.φs[d] - a * s.φc[d], _bound(c.lb, d), _bound(c.ub, d))
+          φb += N[q, i] * clamp(s.φs[d] - b * s.φc[d], _bound(c.lb, d), _bound(c.ub, d))
+        else
+          φa += N[q, i] * me.dv[-d]
+          φb += N[q, i] * me.dv[-d]
+        end
+      end
+      ((φa >= 0) != (φb >= 0)) && (crossings += 1) > 1 && return false
+    end
+  end
+  true
+end
+_bound(b::Real, d) = b
+_bound(b::AbstractVector, d) = b[d]
+
 # −Σ aᵢ φ̌ᵢ over the values not clipped at the last trial
 _clipped_slope(a, s::RDState, lb, ub) =
   -sum(Broadcast.instantiate(Broadcast.broadcasted((ai, c, t, l, u) -> (l < t < u) ? ai * c : 0.0, a, s.φc, s.zt, lb, ub)))
@@ -574,8 +676,14 @@ function _multiplier!(opt::RDStep, s::RDState, oracle, gk, lb, ub)
     _root(_LinearG(a, V, s, lb, ub, gk), _LinearDG(a, s, lb, ub), s.λ, lo, hi, s0, opt.gtol[], vol.maxiter, _Closed(s, lb, ub))
   elseif s.kind === :newton
     _root(_OracleG(oracle, s, lb, ub, gk), _OracleDG(oracle, s, lb, ub), s.λ, lo, hi, s0, opt.gtol[], vol.maxiter, _Closed(s, lb, ub))
+  elseif s.kind === :meter
+    # cheap and exact evaluations: as many as needed to bracket one quadrature point (at most 200)
+    _root(_MeterG(s.meter, s, lb, ub, gk), nothing, s.λ, lo, hi, s0, opt.gtol[], max(vol.maxiter, 200),
+          _QuadClosed(s.meter, s, lb, ub))
   else
-    _root(_OracleG(oracle, s, lb, ub, gk), nothing, s.λ, lo, hi, s0, opt.gtol[], vol.maxiter, _NoCrossing(s, lb, ub))
+    # Step() without the meter (a Volume over part of the domain, or another constraint): the width of the bracket
+    _root(_OracleG(oracle, s, lb, ub, gk), nothing, s.λ, lo, hi, s0, opt.gtol[], vol.maxiter,
+          (a, b) -> (b - a) * maximum(s.φc) <= 1e-9)
   end
   status === :nonfinite &&
     throw(OptimizationFailure("ReactionDiffusion: the constraint is not finite at a trial design of the multiplier"))
@@ -587,23 +695,13 @@ function _multiplier!(opt::RDStep, s::RDState, oracle, gk, lb, ub)
 end
 
 # When the bracket [a, b] of the multiplier is closed. For a continuous G (linear, Ersatz()) a safeguard: the trial
-# designs differ by less than 1e-12 of the range of the bounds. For Step() (G piecewise constant, the tolerance often
-# out of reach on coarse meshes): no value of the clipped design changes side of the interface φ = 0 between a and b.
+# designs differ by less than 1e-12 of the range of the bounds. For Step(), see _QuadClosed.
 struct _Closed{S}
   s::S
   range::Float64
 end
 _Closed(s, lb, ub) = _Closed(s, Float64(minimum(Broadcast.instantiate(Broadcast.broadcasted(-, ub, lb)))))
 (c::_Closed)(a, b) = (b - a) * maximum(c.s.φc) <= 1e-12 * c.range
-
-struct _NoCrossing{S,L,U}
-  s::S
-  lb::L
-  ub::U
-end
-(c::_NoCrossing)(a, b) =
-  !any(Broadcast.instantiate(Broadcast.broadcasted((p, q, l, u) -> (clamp(p - a * q, l, u) >= 0) != (clamp(p - b * q, l, u) >= 0),
-                                                   c.s.φs, c.s.φc, c.lb, c.ub)))
 
 # _root(G, dG, x0, lo, hi, s0, tol, maxit, closed) -> (x, G(x), status)
 # Root of a non-increasing `G` on `[lo, hi]` from `x0`: Newton with `dG` (if not `nothing`) while it stays inside the
@@ -689,6 +787,7 @@ Optimizers.max_native(opt::RDStep) = opt.volume === nothing ? 0 : 1
 Optimizers.constraint_tol(opt::RDStep) = opt.volume === nothing ? Inf : isnan(opt.gtol[]) ? opt.volume.tol : opt.gtol[]
 phase_change(::RDStep, s::RDState) = s.phase
 material_change(::RDStep, s::RDState) = _material_change!(s.meter, s.zref)
+material_available(::RDStep, s::RDState) = s.meter !== nothing
 
 # the native constraint of ExactVolume: the one named, or the one built with Volume (exactly one)
 function _auto_native(opt::RDStep, problem, infos, names)
@@ -704,9 +803,10 @@ function _auto_native(opt::RDStep, problem, infos, names)
   end
   cand = [i for (i, c) in enumerate(values(problem.constraints)) if is_volume(c.F) && handles(opt, infos[i])]
   length(cand) == 1 && return cand
-  isempty(cand) && throw(ArgumentError("ReactionDiffusion: ExactVolume treats the constraint built with Volume(…) " *
-    "(g ≤ 0); the problem has none. Add one, name another constraint with ExactVolume(; constraint = :name), or give " *
-    "every constraint to the augmented Lagrangian (volume = nothing, lagrangian = AugmentedLagrangian(…; native = ()))"))
+  isempty(cand) && throw(ArgumentError("ReactionDiffusion: ExactVolume (the default of volume) treats the constraint " *
+    "built with Volume(…) (g ≤ 0), and the problem has none. To go on: add a Volume constraint; or name another " *
+    "constraint g ≤ 0 with ExactVolume(; constraint = :name); or, for a problem without a volume (or without " *
+    "constraints), use ReactionDiffusion(…; volume = nothing, lagrangian = AugmentedLagrangian(; native = ()))"))
   throw(ArgumentError("ReactionDiffusion: the problem has $(length(cand)) constraints built with Volume(…) " *
     "($(join(names[cand], ", "))): choose the one the step treats with ExactVolume(; constraint = :name)"))
 end
@@ -728,7 +828,7 @@ default_stop(::RDStep) = StopCriteria(material_tol = 2e-3, material_window = 5, 
 summary_note(::Optimizer, state) = ""
 summary_note(::RDStep, s::RDState) =
   "  reaction–diffusion: $(s.nsolves) solves of the step, $(s.nfactor) factorisation" * (s.nfactor == 1 ? "" : "s") *
-  ", $(s.nvol) evaluations of the constraint"
+  ", $(s.nvol) evaluations of the constraint" * (s.nmeter == 0 ? "" : ", $(s.nmeter) of the volume by the material meter")
 
 Base.show(io::IO, ::RDStep) = print(io, "RDStep")
 
@@ -811,7 +911,9 @@ in each of the last 5 iterations and the relative range of the objective below `
 counted with the constraints met; `StopCriteria(rate_tol)`, `change_tol` and `phase_tol` are options. `√(τ|D|)` is the
 length of the diffusion (a perimeter energy), not a minimum thickness: bars of one or two cells can remain. Neither the interface map nor the
 stopping criterion is a recommendation: the choice will be validated with more cases. The starting design is not made feasible (the volume goes down from a solid start, `max_step` of `|D|` per
-iteration). Checkpoints save the multiplier (a resumed run is the uninterrupted one).
+iteration). Checkpoints save the multiplier and the windows of the stop (a resumed run is the uninterrupted one).
+`gtol` and the resolved `Δt` live in the method: one method object serves one `solve!` at a time (not concurrent
+runs).
 """
 struct ReactionDiffusion{S<:RDStep,L<:AugmentedLagrangian} <: AbstractMethod
   step::S
@@ -962,6 +1064,11 @@ function banner_lines(m::ReactionDiffusion, problem)
   push!(lines, ("step operator: $(opt.mass) mass$(mark(:mass)) + " *
                 (opt.diffusion === nothing ? "∇φ⋅∇v" : "diffusion of the user") * " · $solver" *
                 (nfrozen == 0 ? "" : " · $nfrozen frozen values"), :normal))
+  U = b.space
+  if _meter_volume((problem.objective, (c.F for c in problem.constraints)...), U) === nothing
+    push!(lines, ("material meter: none (no Volume over the design domain read through Identity(), Step() or Ersatz()): " *
+                  "the default stop uses the constraints and the objective range", :normal))
+  end
   push!(lines, ("normalize: " * (opt.normalize isa Function ? "function of the user" : string(opt.normalize)) * mark(:normalize), :normal))
   if opt.volume === nothing
     push!(lines, ("volume: not treated by the step (volume = nothing$(mark(:volume))): every constraint goes to the " *

@@ -376,11 +376,16 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
   start is not made feasible), with equality; at the final target the constraint is `g ≤ 0` with `λ ≥ 0`. A density
   meets the target from the first iteration. The augmented Lagrangian of the method takes every other constraint.
   The tolerance `tol = 1e-4` is a fraction of `|D|`, like `max_step` (converted with the scale of the constraint: the
-  loop, the history and the table show the scaled value). With `Step()` the volume is piecewise constant: the root stops when no node of the clipped
-  design changes side of the interface inside the bracket and ends on the feasible side, below the target by a few
-  cells on coarse meshes. Measured on the 2 × 1 cantilever (Mac of the lab, 4 threads, Julia 1.13.0, 2026-11-24):
-  `Ersatz()` 1.6 evaluations of the volume per step at 120 × 60; `Step()` 4.2, 4.6 and 4.4 at 20 × 10, 40 × 20 and
-  120 × 60 (100 iterations).
+  loop, the history and the table show the scaled value). With `Step()` the volume is piecewise constant: the root evaluates it with the material meter
+  of the step (the quadrature of the `Volume` from the nodal values: exact, no constraint evaluation, no allocation)
+  until at most one quadrature point changes side inside the bracket, and ends on its feasible side: the best
+  feasible volume at the resolution of the quadrature points (checked against a sweep of λ). On coarse meshes the jump
+  of one point exceeds `tol`. Measured on the 2 × 1 cantilever, 400 iterations (Mac of the lab, 4 threads, Julia
+  1.13.0, 2026-11-24): `Ersatz()` 1.6 evaluations of the constraint per step at 120 × 60; `Step()` none through the
+  constraint and 44, 31, 16, 4.2 and 3.8 evaluations of the meter at 20 × 10, 30 × 15, 40 × 20, 60 × 30 and 120 × 60;
+  after the descent the volume of `Step()` stays within `tol` at 60 × 30 and 120 × 60 (0.2 and 0.7 cells below at
+  most) and goes down to 1.2–3.5 cells below on 30 × 15 and 20 × 10, where the quadrature points of a cell change
+  together (before: up to 20 cells below, with 3.5–3.7 evaluations of the constraint per step).
 - **Sensitivity** (mandatory): `:physical` differentiates with respect to the material, the interface map taken as
   the identity weighted by the material, `(w₀ + (1 − w₀) χ) ∂j/∂χ` (`void_weight = w₀ = 1e-3`): holes nucleate where
   the material is little used. The exact derivative through the map would refill the void (in the prototype the
@@ -413,8 +418,8 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
 - **Rejection:** when the forward problem does not converge at the new design, `RejectStep` halves `Δt` (the operator
   is factorised again, the gradient comes from the snapshot of the oracle) and the nominal `Δt` comes back at the next
   step.
-- **Checkpoint:** the multiplier is the memory of the step (`memory`): a resumed run is the uninterrupted one bit for
-  bit.
+- **Checkpoint:** the multiplier is the memory of the step (`memory`) and the windows of the stopping criteria are
+  saved too: a resumed run is the uninterrupted one bit for bit and stops at the same iteration.
 - **Presets:** `ReactionDiffusion(:kim2020; τ, sensitivity)` sets the parameters of Kim et al. (2020): `L2Norm()`,
   consistent mass, the volume in the augmented Lagrangian with their rule (`Bertsekas(μ0 = 0.2, growth = 1.025,
   window = 1, progress = Inf, μmax = 2.0)`, `native = ()`); the keywords given replace those of the preset, and the
@@ -422,7 +427,13 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
 - **Per iteration:** one forward solve, one adjoint (none with `SelfAdjoint()`), one assembly of the sensitivity, one
   product `K z` and one substitution of the step, no factorisation; the volume costs a few evaluations (vectors for a
   density; the interface map and one integral for a level set). The closing summary adds the solves of the step,
-  the factorisations and the evaluations of the volume.
+  the factorisations and the evaluations of the volume (through the constraint and by the material meter).
+- **Coarse meshes with `Step()`:** the default stop is not met on the 20 × 10, 30 × 15 and 40 × 20 cantilevers in 400
+  iterations (the material keeps changing by quadrature points, `M_k` of 1e-2 to 4e-2), while `Ersatz()` stops at 56,
+  124 and 99 and the density at 35, 51 and 32; at 60 × 30 `Step()` stops at 123 and at 120 × 60 at 65. A run that
+  reaches `maxiter` with the material still changing says so at the end. Without a meter (no `Volume` over the design
+  domain read through `Identity()`, `Step()` or `Ersatz()`) the default stop uses the constraints and the objective
+  range, and the banner says so.
 - **Allocations:** the arithmetic of the step and a linear volume allocate nothing (one substitution of UMFPACK
   aside); each evaluation of a nonlinear volume reserves about 70 kB and each derivative of `Ersatz()` about 130 kB
   (Gridap's integration), independent of the mesh.

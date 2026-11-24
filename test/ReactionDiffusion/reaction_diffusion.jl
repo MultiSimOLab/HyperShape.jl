@@ -233,9 +233,9 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     dg = 0.05 * 2.0 / get_scale(c.Vol)                     # max_step |D| / s
     r = solve!(c.problem, rd(; volume = ExactVolume(; max_step = 0.05)); maxiter = 14, stop = nothing, verbose = 0)
     g = [1.0; r.history.constraints.volume]                  # solid start: g₀ = (|D| − Vmax)/Vmax = 1
-    # with Step() the volume moves by quadrature points and the root ends on the feasible side when no node of the
-    # clipped design changes side inside the bracket: below the target by a few cells (measured: up to 6.4 cells here)
-    qtol = iface isa Step ? 8 * (2.0 / (30 * 15)) / get_scale(c.Vol) : tol
+    # with Step() the volume jumps by quadrature points: the root ends on the feasible side of the jump of one point
+    # (measured: within 0.6 cells of 30×15 below the target; see 6c for the root against a sweep of λ)
+    qtol = iface isa Step ? 1.0 * (2.0 / (30 * 15)) / get_scale(c.Vol) : tol
     for k in 2:length(g)
       @test g[k-1] - g[k] <= dg + qtol
       @test -qtol <= g[k] - max(0.0, g[k-1] - dg) <= tol
@@ -374,7 +374,11 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
       @test J * get_scale(c.C) <= 1.1 * rd_oc.objective * get_scale(cd.C)
       @test void_components(cell_means(c.θ.χ, c.model), nx, ny) >= 1
       @test all(v -> -1 <= v <= 1, get_values(r.z)) && frozen_ok[]
-      @test abs(r.history.constraints.volume[end]) <= (iface isa Step ? 1e-3 : VT)
+      # the volume at every iteration after the descent (measured with Step(): at most 0.2 cells below)
+      g = r.history.constraints.volume
+      k0 = findfirst(v -> abs(v) <= VT, g)
+      cell = (2.0 / (nx * ny)) / get_scale(c.Vol)
+      @test all(v -> -(iface isa Step ? cell : VT) <= v <= VT, g[k0:end])
     end
     c = rd_cantilever(; nx, ny, design = :density)
     grey(z) = (ρ = cell_means(c.θ.χ, c.model); 4 * sum(ρ .* (1 .- ρ)) / length(ρ))
@@ -609,13 +613,24 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
   end
 
   @testset "19. stop by the rate and by the phase; the tolerance in |D|; which constraint is the volume" begin
-    # the rate ‖Δφ‖∞/Δt < 0.1, an option (measured: 30×15 with Δt = 0.1 and max_step = 0.01, iteration 235)
-    slow = (Δt = 0.1, volume = ExactVolume(; max_step = 0.01))
-    c = rd_cantilever(; nx = 30, ny = 15)
-    r = solve!(c.problem, rd(; slow...); maxiter = 400, verbose = 0, stop = StopCriteria(rate_tol = 0.1))
-    h = r.history
-    @test r.status === :converged && r.reason === :rate_tol && h.change[end] / h.step[end] < 0.1
-    @test r.iterations > 50 && abs(h.constraints.volume[end]) <= VT
+    # the rate ‖Δφ‖∞/step and the window of the phase, on a history written by hand (the iteration at which a run
+    # meets them is sensitive to perturbations of the volume)
+    h = RDM.OptHistory(10)
+    for k in 1:6
+      RDM._record!(h, (k, 1.0, NaN, NaN, 0.1, 0.2, 1, 1, 0, 0), (), (), (), ())
+    end
+    inf(change, step) = OPT.StepInfo{1}(true, 1.0, NaN, NaN, change, step, 1, NaN, (0.0,), (NaN,))
+    @test RDM._stop_reason(StopCriteria(rate_tol = 0.1), inf(0.019, 0.2), h, 0) === :rate_tol
+    @test RDM._stop_reason(StopCriteria(rate_tol = 0.1), inf(0.021, 0.2), h, 0) === nothing
+    @test RDM._stop_reason(StopCriteria(rate_tol = 0.1), inf(0.019, 0.2), h, 5) === nothing     # first iteration of a stage
+    sp = StopCriteria(phase_tol = 1e-3, phase_window = 3)
+    @test RDM._stop_check(sp, inf(1.0, 0.2), h, 0, [5e-3, 1e-4, 2e-4, 3e-4], nothing, 0) === :phase_tol
+    @test RDM._stop_check(sp, inf(1.0, 0.2), h, 0, [1e-4, 2e-3, 2e-4, 3e-4], nothing, 0) === nothing
+    @test RDM._stop_check(sp, inf(1.0, 0.2), h, 0, [1e-4, 2e-4], nothing, 0) === nothing        # the window is not full
+    sm = StopCriteria(material_tol = 1e-3, material_window = 2, objective_range = 1e-3, window = 4, combine = :all)
+    @test RDM._stop_check(sm, inf(1.0, 0.2), h, 0, nothing, [1e-4, 2e-4], 4) === :all
+    @test RDM._stop_check(sm, inf(1.0, 0.2), h, 0, nothing, [1e-4, 2e-4], 3) === nothing     # the objective window not met
+    @test RDM._stop_check(sm, inf(1.0, 0.2), h, 0, nothing, [2e-3, 2e-4], 4) === nothing
     # the default stop at the same evolution time t = kΔt for Δt = 0.4 and 0.2 (a density, 40×20; measured: 32 and
     # 58 iterations, t = 12.8 and 11.6)
     ts = map((0.4, 0.2)) do Δt
@@ -625,12 +640,14 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
       r.iterations * Δt
     end
     @test abs(ts[1] - ts[2]) <= 0.25 * ts[1]
-    # (c) the phase: no node changes sign in 5 iterations (measured: 30×15 at iteration 65)
-    c = rd_cantilever(; nx = 30, ny = 15)
-    tr = SignTrack(c.z, BitVector[])
-    r = solve!(c.problem, rd(; slow...); maxiter = 400, verbose = 0, stop = StopCriteria(phase_tol = 1e-4), monitors = (signs = tr,))
-    @test r.status === :converged && r.reason === :phase_tol && r.iterations > 50
-    @test all(k -> tr.signs[k] == tr.signs[end], length(tr.signs)-5:length(tr.signs))       # a stable topology
+    # phase_change: the lumped mass of the nodes whose φ changes sign, over |D|
+    φh = x -> clamp(0.3 - hypot(x[1] - 1.0, x[2] - 0.5) + 0.2, -1.0, 1.0)
+    c = rd_cantilever(; nx = 20, ny = 10, init = φh)
+    m = rd()
+    fo, z, s = rd_start(c, m)
+    OPT.step!(m.step, s, z, fo, c.problem.ctx)
+    @test RDM.phase_change(m.step, s) ≈ sum(((s.zold .>= 0) .!= (z .>= 0)) .* s.m) / s.area rtol = 1e-14
+    @test RDM.phase_change(m.step, s) > 0
     cd = rd_cantilever(; nx = 20, ny = 10, design = :density)
     @test_throws r"phase_tol needs a method whose design goes through an interface map" solve!(cd.problem, rd(); maxiter = 3,
                                                                                          verbose = 0, stop = StopCriteria(phase_tol = 1e-4))
@@ -699,6 +716,80 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     cd = rd_cantilever(; nx = 20, ny = 10, design = :density)
     @test_throws r"material_tol needs" solve!(cd.problem, DensityMethod(OC()); maxiter = 2, verbose = 0,
                                               stop = StopCriteria(material_tol = 1e-3))
+  end
+
+  @testset "21. second review: subdomain Volume, no meter, Step() root, memory, resume, messages" begin
+    # a Volume over half of the design domain: no meter (it used to throw a BoundsError in init); the default stop
+    # falls back to the constraints and the objective range, and says so
+    c = rd_cantilever(; nx = 20, ny = 10, design = :density)
+    left = [x[1] < 1.0 for x in (sum(cc) / length(cc) for cc in get_cell_coordinates(Triangulation(c.model)))]
+    Vl = Volume(c.θ, Measure(Triangulation(c.model, left), 2); max_fraction = 0.5)
+    io = IOBuffer()
+    r = solve!(Optimization(c.z; objective = c.C, constraints = (volume = Vl,)), rd(); maxiter = 30, verbose = 1, io)
+    out = String(take!(io))
+    @test r.state.meter === nothing && occursin("material meter: none", out) && occursin("the default stop uses the constraints", out)
+    @test r.status === :converged || r.status === :maxiter
+    # no meter either: a named constraint without any Volume, no constraint at all, a Volume through a projection
+    c = rd_cantilever(; nx = 20, ny = 10, left_cap = 0.2)
+    r = solve!(Optimization(c.z; objective = c.C, constraints = (left = c.problem.constraints.left,)),
+               rd(; volume = ExactVolume(; constraint = :left)); maxiter = 5, verbose = 0)
+    @test r.iterations == 5 && r.state.meter === nothing
+    c = rd_cantilever(; nx = 20, ny = 10, design = :density)
+    r = solve!(Optimization(c.z; objective = c.C), rd(; volume = nothing, lagrangian = AugmentedLagrangian(; native = ()));
+               maxiter = 3, verbose = 0)
+    @test r.iterations == 3
+    c = rd_cantilever(; nx = 20, ny = 10, design = :density)
+    θp = PhysicalFields(c.x; ρ = :φ => TanhProjection(β = 2.0, η = 0.5))
+    Vp = Volume(θp, c.dΩ.domain; max_fraction = 0.5)
+    r = solve!(Optimization(c.z; objective = c.C, constraints = (volume = Vp,)), rd(); maxiter = 5, verbose = 0)
+    @test r.iterations == 5 && r.state.meter === nothing
+    # an explicit material_tol without a meter is still an error, before the first iteration
+    c = rd_cantilever(; nx = 20, ny = 10, design = :density)
+    Vp = Volume(PhysicalFields(c.x; ρ = :φ => TanhProjection(β = 2.0, η = 0.5)), c.dΩ.domain; max_fraction = 0.5)
+    @test_throws r"material_tol needs" solve!(Optimization(c.z; objective = c.C, constraints = (volume = Vp,)), rd();
+                                              maxiter = 2, verbose = 0, stop = StopCriteria(material_tol = 1e-3))
+    # no Volume with the default ExactVolume: the message says how to go on
+    c = rd_cantilever(; nx = 10, ny = 5)
+    @test_throws r"To go on: add a Volume constraint.*volume = nothing" solve!(Optimization(c.z; objective = c.C), rd(); maxiter = 1, verbose = 0)
+    # Step(): the root of the meter gives the best feasible volume at the resolution of the quadrature points (a sweep
+    # of 4001 values of λ), without evaluating the constraint through the oracle
+    c = rd_cantilever(; nx = 20, ny = 10, interface = Step())
+    m = rd()
+    solve!(c.problem, m; maxiter = 30, stop = nothing, verbose = 0)
+    fo, z, s = rd_start(c, m)
+    @test s.kind === :meter
+    for _ in 1:3
+      nv = s.nvol
+      info = OPT.step!(m.step, s, z, fo, c.problem.ctx)
+      @test s.nvol == nv                                       # no evaluation through the oracle in the root
+      λ = info.multipliers[1]
+      lb, ub = OPT.bounds(fo)
+      G = RDM._MeterG(s.meter, s, lb, ub, 0.0)
+      gλ = G(λ)
+      sweep = [G(x) for x in range(max(0.0, λ - 0.5), λ + 0.5; length = 4001)]     # λ ≥ 0 at the final target
+      @test gλ <= OPT.constraint_tol(m.step) && gλ >= maximum(filter(<=(0.0), sweep)) - 1e-14
+      @test gλ ≈ OPT.constraint(fo, 1, clamp.(s.φs .- λ .* s.φc, lb, ub)) atol = 1e-12     # the meter is the Volume
+    end
+    # the meter keeps one matrix of shape functions (none with Ersatz()) and the weights per cell
+    @test size(s.meter.N) == (9, 4) && size(s.meter.w) == (9, 200)
+    c = rd_cantilever(; nx = 20, ny = 10)
+    fo, z, s = rd_start(c, rd())
+    @test isempty(s.meter.N) && isempty(s.meter.w) && length(s.meter.W) == 200
+    # Step() on a coarse mesh: the default stop is not met in 30 iterations, and the end says so
+    c = rd_cantilever(; nx = 20, ny = 10, interface = Step())
+    io = IOBuffer()
+    r = solve!(c.problem, rd(); maxiter = 40, verbose = 1, io)
+    @test r.status === :maxiter && occursin("maxiter with the material still changing", String(take!(io)))
+    # a resumed run stops where the uninterrupted one does (the windows of the stop are in the checkpoint)
+    c = rd_cantilever(; nx = 30, ny = 15)
+    r0 = solve!(c.problem, rd(); maxiter = 300, verbose = 0)
+    k = r0.iterations
+    dir = mktempdir()
+    c1 = rd_cantilever(; nx = 30, ny = 15)
+    solve!(c1.problem, rd(); maxiter = k - 3, stop = nothing, verbose = 0, checkpoint = Checkpoint(filepath = dir, every = k - 3))
+    c2 = rd_cantilever(; nx = 30, ny = 15)
+    r2 = solve!(c2.problem, rd(); maxiter = 300, verbose = 0, resume = dir)
+    @test r0.status === :converged && r2.iterations == k && get_values(r2.z) == get_values(r0.z)
   end
 
   @testset "banner and events" begin
