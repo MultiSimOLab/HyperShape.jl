@@ -238,10 +238,10 @@ accept or reject, continuation, stopping, checkpoint); only the step is specific
 | Method | Design field | Step |
 |---|---|---|
 | `DensityMethod(optimizer; metric)` | density in [0, 1] | any `Optimizer` (`OC`, `SiMPL`) |
-| `ReactionDiffusion` (phase 2) | level set in [−1, 1] | one linear solve, then clipping |
+| `ReactionDiffusion(; τ, sensitivity)` | level set in [−1, 1] through `Ersatz()` or `Step()`, or density in [0, 1] | one linear solve (factorised once), clipping, exact multiplier of the volume |
 | `LevelSet` (phase 2) | signed distance | velocity extension, advection, reinitialisation |
 
-Implemented: `Optimization` and `DensityMethod` with the common loop.
+Implemented: `Optimization`, `DensityMethod` and `ReactionDiffusion` with the common loop.
 
 ```julia
 Vol = Volume(θ, dΩ; max_fraction = 0.5)   # physical (projected) density: nonlinear in z; Volume(x, dΩ; …) is linear
@@ -296,8 +296,8 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
 - **Continuation:** explicit list of values per stage, a jump every `every` iterations (or when the optimiser finds no
   step); with `close_early = true` also when the stopping criteria are met. The optimiser forgets its memory at each
   jump; the optimisation only stops in the last stage.
-- **Stopping:** `maxiter` is mandatory. `stop` defaults to `StopCriteria(objective_range = 1e-3)` for every optimiser
-  (`default_stop`): the range of the objective over the last 10 iterations of the last stage, relative to the
+- **Stopping:** `maxiter` is mandatory. `stop` defaults to `StopCriteria(objective_range = 1e-3)` for OC and SiMPL
+  (`default_stop`; `ReactionDiffusion`: material, objective and constraints, below): the range of the objective over the last 10 iterations of the last stage, relative to the
   objective, below 0.1 %. With a tanh projection `change_tol` and `kkt_tol` are rarely reached; the objective settles
   (half MBB beam 150×50: OC with adaptive move limits stops at iteration 214, 0.4 % above its value at 500 iterations; SiMPL at 210, within 0.3 % of 350 iterations). Other criteria:
   `kkt_tol`, `kkt_rtol` (relative to the first iteration), `stationarity_tol`, `stationarity_rtol` (the measure
@@ -306,8 +306,9 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
   oscillates or whose physical volume keeps growing may still end at `maxiter`.
 - **Grey monitor:** `solve!(…; monitors = (grey = Grey(θ, dΩ),))` adds the measure of grey `4/|Ω| ∫ρ(1 − ρ)` to the history, the
   table and the closing line. It is fixed mostly by β, so it is a measure of quality, not a stopping criterion.
-- **Context:** `OptContext` (iteration, attempt, trial, phase, continuation values) reaches every solve function of
-  the user; phases `:setup`, `:check`, `:optimization` and `:linesearch`.
+- **Context:** `OptContext` (iteration, attempt, trial, phase, continuation values, sensitivity mode) reaches every
+  solve function of the user; phases `:setup`, `:check`, `:optimization` and `:linesearch`; `sensitivity` is
+  `:physical` only while `ReactionDiffusion(…; sensitivity = :physical)` computes the sensitivity of its step.
 - **Checkpoint:** `checkpoint.toml`, `z_<k>.bin` and `history_<k>.csv` in a folder; resume with
   `solve!(…; resume = "results/ckpt")` (the folder; or the result of `load_checkpoint`). OC (adaptive move limits, correction shift) and SiMPL (latent variable, Barzilai–Borwein memory, multiplier, shift) save their memory (`memory`/`restore_memory!`, a named tuple of numbers and design vectors), and the offsets of the linear constraints are kept (unless the user changed the bound or the scale), so a run resumed from an accepted iteration gives the designs of the uninterrupted one bit for bit (its first iteration repeats one forward solve). The state of a run is an `OptState` (`problem.state[]` after `solve!`; `resume = problem.state[]` continues without files); after an exception or an interruption the memory of the optimiser is not kept, and the resumed run restarts it. Checkpoints have format version 3. An `OC` continued by `continuation` gets its `move` back at the end of `solve!`.
 - **Factories and discretisation:** `Optimization(model; design_setup, physics_setup)` builds the problem from two
@@ -338,6 +339,106 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
 - **Solves per iteration:** OC one filter, one forward, one adjoint (none if self-adjoint) and one transposed filter;
   SiMPL one filter and one forward per line-search trial (usually one), one adjoint and one transposed filter. After
   a rejected step the previous design is not solved again.
+
+### Reaction–diffusion
+
+`ReactionDiffusion(; τ, sensitivity)` evolves one nodal P1 field `φ` by an implicit step of the reaction–diffusion
+equation `∂φ/∂t = −C g − λ + τ ℓ² Δφ` (Yamada et al. 2010, Choi et al. 2011, Otomori et al. 2015, Kim et al. 2020):
+
+```julia
+z  = OptVariables(φ = FieldVariable(Vφ; bounds = (-1.0, 1.0), init = 1.0, frozen = 1.0))   # level set, solid start
+x  = DesignFields(z; φ = Identity())
+θ  = PhysicalFields(x; χ = :φ => Ersatz())          # material: the fraction of each cell where φ ≥ 0
+dΩ = design_measures(θ; degree = 4)
+# … the state with E(χ) = Emin + χ (1 − Emin), the compliance C and Vol = Volume(θ, dΩ; max_fraction = 0.5)
+result = solve!(Optimization(z; objective = C, constraints = (volume = Vol,)),
+                ReactionDiffusion(; τ = 2e-4, sensitivity = :physical); maxiter = 400)
+```
+
+The whole script is `examples/cantilever_rd.jl`. The same method evolves a density (`bounds = (0.0, 1.0)`,
+`χ = :φ => Identity()` and SIMP in the weak forms).
+
+- **Step:** `(mass/Δt + τ ℓ² K) δ = −τ ℓ² (K z + k_d) − C g`, `φ* = z + δ`, then `z = clamp(φ* − λ φ̌, lb, ub)`. `K` is the
+  diffusion matrix (`∇φ⋅∇v`, or the bilinear form `diffusion = (φ, v) -> ∫(…)dΩ` of the user), `k_d` the frozen values
+  in the free rows, `ℓ² = |D|^(2/d)` (`|D|` the measure of the design domain, so `τ` is dimensionless; in 3D this
+  scaling is provisional), `mass` lumped (default) or consistent. HyperShape assembles `m`, `K` (and `M`) once on the
+  design space with Gridap's assembler and factorises the operator once with `ls` (Gridap's `LinearSolver`,
+  `LUSolver()` by default, shown in the banner); `solve = (A, b, x, ctx, stale) -> x` replaces it (PETSc, an iterative
+  solver). The operator is factorised again only when `Δt` or `τ` change (a `Parameter` of a `Continuation`, a
+  rejected step). Frozen zones of the design space stay as they are (Neumann conditions for φ elsewhere).
+- **Volume** (`ExactVolume(; max_step, tol, maxiter, constraint)`, the default): the constraint built with `Volume`,
+  wherever it is in the problem (with none or several, `solve!` asks for `ExactVolume(; constraint = :name)`); the
+  multiplier `λ` is the root of
+  `G(λ) = g(clamp(φ* − λ φ̌)) − g_k` with `φ̌ = A⁻¹ m` (`Δt` everywhere when no value is frozen): Newton on the
+  clipped vector for a linear constraint (vectors only), Newton with the derivative of the constraint for `Ersatz()`,
+  regula falsi (Illinois) for `Step()`, always inside the bracket given by the bounds, from the `λ` of the previous
+  step. With an interface map the target goes down `max_step = 0.02` of `|D|` per iteration from the start (a solid
+  start is not made feasible), with equality; at the final target the constraint is `g ≤ 0` with `λ ≥ 0`. A density
+  meets the target from the first iteration. The augmented Lagrangian of the method takes every other constraint.
+  The tolerance `tol = 1e-4` is a fraction of `|D|`, like `max_step` (converted with the scale of the constraint: the
+  loop, the history and the table show the scaled value). With `Step()` the volume is piecewise constant: the root evaluates it with the material meter
+  of the step (the quadrature of the `Volume` from the nodal values: exact, no constraint evaluation, no allocation)
+  until at most one quadrature point changes side inside the bracket, and ends on its feasible side: the best
+  feasible volume at the resolution of the quadrature points (checked against a sweep of λ). On coarse meshes the jump
+  of one point exceeds `tol`. Measured on the 2 × 1 cantilever, 400 iterations (Mac of the lab, 4 threads, Julia
+  1.13.0, 2026-11-24): `Ersatz()` 1.6 evaluations of the constraint per step at 120 × 60; `Step()` none through the
+  constraint and 44, 31, 16, 4.2 and 3.8 evaluations of the meter at 20 × 10, 30 × 15, 40 × 20, 60 × 30 and 120 × 60;
+  after the descent the volume of `Step()` stays within `tol` at 60 × 30 and 120 × 60 (0.2 and 0.7 cells below at
+  most) and goes down to 1.2–3.5 cells below on 30 × 15 and 20 × 10, where the quadrature points of a cell change
+  together (before: up to 20 cells below, with 3.5–3.7 evaluations of the constraint per step).
+- **Sensitivity** (mandatory): `:physical` differentiates with respect to the material, the interface map taken as
+  the identity weighted by the material, `(w₀ + (1 − w₀) χ) ∂j/∂χ` (`void_weight = w₀ = 1e-3`): holes nucleate where
+  the material is little used. The exact derivative through the map would refill the void (in the prototype the
+  design oscillated, J = 16–70 against 2.4). `:design` is the exact derivative with respect to φ (with `Ersatz()`,
+  nonzero only on the cut cells: no nucleation, so the start needs an interface). Without an interface map both are
+  the same. `check_consistency` always checks the exact derivative; with `Ersatz()` give it steps below the default,
+  `check_consistency(…; h0 = 1e-3)`: larger steps cross the kinks of the cell fractions (a node changing sign) and
+  the observed rates fall below 2 for a correct derivative.
+- **Normalisation** (`normalize`): `L1Mean(c)` (default, `C = c |D| / Σ|gᵢ|`, independent of the mesh),
+  `L2Norm()` (Kim et al.), `MaxAbs()`, or a function `(g, m, area) -> C`.
+- **Stopping** (`default_stop`): the constraints met **and** the material changed in each of the last 5 iterations,
+  `M_k = ∫|χ_k − χ_{k−1}| / ∫χ_k < 2e-3` (`χ` the field the `Volume` reads, cell by cell), **and** the relative range
+  of the objective over the last 10 iterations below `1e-3`; the windows count only iterations with the constraints
+  met, never the descent of the volume (`StopCriteria(material_tol = 2e-3, objective_range = 1e-3, combine = :all)`).
+  `M_k` is computed by the step from the nodal values, without solves or allocations. Options:
+  `StopCriteria(rate_tol = 0.1)` (`‖Δφ‖∞/Δt`), `change_tol` (`‖Δφ‖∞`) and `phase_tol` with `phase_window` (the lumped
+  mass of the nodes where φ changes sign over `|D|`, only with an interface map).
+- **Defaults of the evolution:** `Δt = 0.2` and `max_step = 0.02` of `|D|` per iteration with an interface map,
+  `Δt = 0.4` and the target from the first iteration for a density (the banner says which). On the 2 × 1 cantilever
+  they reach a stable topology in a few tens of iterations (study of 24 runs on 120 × 60 and 240 × 120 meshes). The
+  topology of reaction–diffusion depends on the path: with a smaller `Δt` the design passes through metastable
+  plateaus (9–16 holes, the objective and the material steady for 20 iterations or more) and the diffusion keeps
+  merging holes long after the design looks converged; any reasonable criterion then stops on a plateau (a clean
+  design, with an objective equal or better, but not the one of iteration 400). Neither the interface map (`Step()`
+  or `Ersatz()`) nor the stopping criterion is a recommendation yet: the choice will be validated with more cases.
+- **Diffusion and thickness:** `√(τ |D|)` (0.02 for `τ = 2e-4` on a 2 × 1 domain, 1.2 cells of a 120 × 60 mesh) is the
+  length of a gradient (perimeter) energy, not a minimum thickness: bars of one or two cells are expensive but
+  admissible, and they disappear only as the perimeter decreases, slowly. The 5th percentile of the thickness grows
+  with `τ`, the minimum does not; a minimum size needs a filter or a constraint, which the method does not have.
+- **Rejection:** when the forward problem does not converge at the new design, `RejectStep` halves `Δt` (the operator
+  is factorised again, the gradient comes from the snapshot of the oracle) and the nominal `Δt` comes back at the next
+  step.
+- **Checkpoint:** the multiplier is the memory of the step (`memory`) and the windows of the stopping criteria are
+  saved too: a resumed run is the uninterrupted one bit for bit and stops at the same iteration.
+- **Presets:** `ReactionDiffusion(:kim2020; τ, sensitivity)` sets the parameters of Kim et al. (2020): `L2Norm()`,
+  consistent mass, the volume in the augmented Lagrangian with their rule (`Bertsekas(μ0 = 0.2, growth = 1.025,
+  window = 1, progress = Inf, μmax = 2.0)`, `native = ()`); the keywords given replace those of the preset, and the
+  banner marks them.
+- **Per iteration:** one forward solve, one adjoint (none with `SelfAdjoint()`), one assembly of the sensitivity, one
+  product `K z` and one substitution of the step, no factorisation; the volume costs a few evaluations (vectors for a
+  density; the interface map and one integral for a level set). The closing summary adds the solves of the step,
+  the factorisations and the evaluations of the volume (through the constraint and by the material meter).
+- **Coarse meshes with `Step()`:** the default stop is not met on the 20 × 10, 30 × 15 and 40 × 20 cantilevers in 400
+  iterations (the material keeps changing by quadrature points, `M_k` of 1e-2 to 4e-2), while `Ersatz()` stops at 56,
+  124 and 99 and the density at 35, 51 and 32; at 60 × 30 `Step()` stops at 123 and at 120 × 60 at 65. A run that
+  reaches `maxiter` with the material still changing says so at the end. Without a meter (no `Volume` over the design
+  domain read through `Identity()`, `Step()` or `Ersatz()`) the default stop uses the constraints and the objective
+  range, and the banner says so.
+- **Allocations:** the arithmetic of the step and a linear volume allocate nothing (one substitution of UMFPACK
+  aside); each evaluation of a nonlinear volume reserves about 70 kB and each derivative of `Ersatz()` about 130 kB
+  (Gridap's integration), independent of the mesh.
+- **Not yet:** the presets of Otomori, Yamada and Choi, Dirichlet conditions for φ on lines of nodes, hole seeding
+  for `sensitivity = :design`, 3D validation.
 
 ## Optimisers
 
@@ -430,6 +531,8 @@ A default never removes generality: everything it sets can be replaced from the 
 | `RejectStep(shrink = 0.5, max_attempts = 5)` | `solve!(…; on_failure)` | `on_failure = RejectStep(…)` |
 | `default_stop(optimizer)` | `solve!(…; stop)` | `stop = StopCriteria(…)`, `stop = nothing` or `stop = (info, history, ctx) -> Bool` |
 | `Euclidean()` (only for the stationarity measure) | `DensityMethod(OC())` | `metric = LumpedMass(dΩ)`, a vector of weights or an object with `metric_weights(m, z)` |
+| `ls = LUSolver()`, `mass = :lumped`, `normalize = L1Mean()`, `volume = ExactVolume()`, `Δt = :auto` (0.2 with an interface map, 0.4 without), `void_weight = 1e-3`, `lagrangian = AugmentedLagrangian()` | `ReactionDiffusion` | the keyword of the same name; `solve = (A, b, x, ctx, stale) -> x` for any other solver; `diffusion = (φ, v) -> ∫(…)dΩ` |
+| `max_step = :auto` (`0.02` of `|D|` with an interface map), `tol = 1e-4` (of `|D|`) | `ExactVolume` | the keyword of the same name |
 | maps `Identity`, `HelmholtzFilter`, `TanhProjection`, `CellMean` | `PhysicalFields`, `single_field_design` | `PointwiseMap(f, df; parameters)` |
 | continued objects `TanhProjection` (β), `OC` (move) | `Continuation` | any `Parameter` read by the user's forms or maps |
 | monitor `Grey` | `solve!(…; monitors)` | any object with `monitor_value(m)` |

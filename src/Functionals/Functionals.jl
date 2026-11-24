@@ -205,12 +205,23 @@ function Volume(θ::PhysicalFields, dΩ; max_fraction::Real, field = nothing, sc
   0 < max_fraction <= 1 || throw(ArgumentError("Volume: max_fraction must be in (0, 1], got $max_fraction"))
   vmax = Float64(max_fraction) * sum(∫(1.0)dΩ)
   scale = scale === nothing ? vmax : scale
-  J = θ -> sum(∫(getproperty(θ, f))dΩ) - vmax
+  J = _VolumeValue(f, dΩ, vmax)
   DJ = θ -> NamedTuple{(f,)}((δ -> ∫(δ)dΩ,))
   Functional(J, θ; dJdθ = DJ, scale, linear = is_linear_field(θ, f))
 end
 
 Volume(θ::PhysicalFields, dΩ::DesignMeasures; kwargs...) = Volume(θ, dΩ.domain; kwargs...)
+
+# the value of a Volume, a type of its own so that a method can recognise the constraint (is_volume)
+struct _VolumeValue{M}
+  field::Symbol
+  dΩ::M
+  vmax::Float64
+end
+(v::_VolumeValue)(θ) = sum(∫(getproperty(θ, v.field))v.dΩ) - v.vmax
+
+# whether F was built by Volume
+is_volume(F) = F isa Functional && F.J isa _VolumeValue
 
 function Volume(x::DesignFields, dΩ; kwargs...)
   names = getfield(x, :names)

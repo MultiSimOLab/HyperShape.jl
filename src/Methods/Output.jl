@@ -58,11 +58,16 @@ function _describe_stop(stop)
   stop.stationarity_tol !== nothing && push!(parts, "S < $(stop.stationarity_tol)")
   stop.stationarity_rtol !== nothing && push!(parts, "S/S₁ < $(stop.stationarity_rtol)")
   stop.change_tol !== nothing && push!(parts, "change < $(stop.change_tol)")
-  isempty(parts) ? "maxiter only" : join(parts, " or ")
+  stop.rate_tol !== nothing && push!(parts, "change/step < $(stop.rate_tol)")
+  stop.phase_tol !== nothing && push!(parts, "phase change < $(stop.phase_tol) |D| over $(stop.phase_window) iterations")
+  stop.material_tol !== nothing && push!(parts, "material change < $(stop.material_tol) over $(stop.material_window) iterations")
+  isempty(parts) ? "maxiter only" : stop.combine === :all ?
+    join(parts, " and ") * ", with the constraints met in the windows" : join(parts, " or ")
 end
 
 _active(stop::StopCriteria) = any(x -> x !== nothing, (stop.objective_range, stop.kkt_tol, stop.kkt_rtol, stop.stationarity_tol,
-                                         stop.stationarity_rtol, stop.change_tol))
+                                         stop.stationarity_rtol, stop.change_tol, stop.rate_tol, stop.phase_tol,
+                                         stop.material_tol))
 _active(stop) = true                     # a function of the user
 _stage_rule(stop, schedule) = (stop === nothing || schedule === nothing || !_active(stop)) ? "" :
                               schedule.close_early ? " · every stage (close_early)" : " · last stage only"
@@ -118,8 +123,9 @@ function _print_banner(p::_Printer, problem, method, maxiter, stop, on_failure, 
   println(p.io, "  discretization: ", discretization_label(discretization),
           get(defaults, :discretization, false) ? " (default)" : "",
           problem.setup === nothing ? "" : " · problem from design_setup/physics_setup")
-  opt isa OC && println(p.io, "  OC: move $(_g(opt.move)) · ", opt.adapt === nothing ? "fixed (top88)" :
-                        "adaptive per entry ×$(_g(opt.adapt[1]))/×$(_g(opt.adapt[2])), floor $(_g(opt.move_min))")
+  for (line, color) in banner_lines(method, problem)
+    _styled(p, "  " * line * "\n", color)
+  end
   _print_columns(p, schedule)
 end
 
@@ -188,7 +194,11 @@ function _print_jump(p::_Printer, schedule, stage)
   _print_columns(p, schedule)
 end
 
-const _STOP_TEXT = Dict(:change_tol => "change of z below the tolerance", :kkt_tol => "optimality measure below the tolerance",
+const _STOP_TEXT = Dict(:change_tol => "change of z below the tolerance",
+                        :rate_tol => "rate of change of z (change/step) below the tolerance",
+                        :phase_tol => "fraction of the domain that changes phase below the tolerance over the window",
+                        :material_tol => "change of the material below the tolerance over the window",
+                        :all => "all the stopping criteria met", :kkt_tol => "optimality measure below the tolerance",
                         :kkt_rtol => "optimality measure below the tolerance relative to the first iteration",
                         :stationarity_tol => "stationarity measure below the tolerance",
                         :stationarity_rtol => "stationarity measure below the tolerance relative to the first iteration",
@@ -222,11 +232,19 @@ function _print_failure(p::_Printer, msg, k)
   println(p.io, "failed after $k accepted iterations: ", msg)
 end
 
-# solves: (forward, adjoint, filter) solved in this call, the setup and the final synchronisation included
-function _print_summary(p::_Printer, solves, iterations, events = 0)
+# solves: (forward, adjoint, filter) solved in this call, the setup and the final synchronisation included; `note`: a
+# line of the step (ReactionDiffusion: its solves and factorisations)
+function _print_summary(p::_Printer, solves, iterations, events = 0, note = "")
   p.level >= 1 || return
   t = time() - p.t0
   println(p.io, @sprintf("  solves: forward %d, adjoint %d, filter %d · time %.2f s (%.3f s per iteration)",
                          solves..., t, t / max(iterations, 1)),
           events == 0 ? "" : " · $events rebuild event" * (events == 1 ? "" : "s"))
+  isempty(note) || println(p.io, note)
 end
+
+# the move limit of OC
+banner_lines(m::DensityMethod, problem) =
+  m.optimizer isa OC ? [("OC: move $(_g(m.optimizer.move)) · " * (m.optimizer.adapt === nothing ? "fixed (top88)" :
+                         "adaptive per entry ×$(_g(m.optimizer.adapt[1]))/×$(_g(m.optimizer.adapt[2])), floor $(_g(m.optimizer.move_min))"), :normal)] :
+                       Tuple{String,Symbol}[]

@@ -37,6 +37,11 @@ end
 @_export Optimizers SiMPL
 @_export Methods Optimization
 @_export Methods DensityMethod
+@_export Methods ReactionDiffusion
+@_export Methods ExactVolume
+@_export Methods L1Mean
+@_export Methods L2Norm
+@_export Methods MaxAbs
 @_export Methods LumpedMass
 @_export Methods Euclidean
 @_export Methods FixedMesh
@@ -105,6 +110,10 @@ end
 @_public Methods check_problem
 @_public Methods method_label
 @_public Methods metric_label
+@_public Methods banner_lines
+@_public Methods feasible_start
+@_public Methods phase_change
+@_public Methods material_change
 @_public Methods Discretization
 @_public Methods RebuildCheck
 @_public Methods needs_setup

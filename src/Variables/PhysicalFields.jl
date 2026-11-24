@@ -153,8 +153,21 @@ _update_chain!(chain::Tuple, ctx) = (update_stage!(first(chain), ctx); _update_c
 _push_back(chain::Tuple{}, L, w, ctx, key) = L
 function _push_back(chain::Tuple, L, w, ctx, key)
   s = last(chain)
+  _physical(s, ctx) && return _push_back(Base.front(chain), _physical_pullback(s, L, ctx), w, ctx, key)
   is_lazy(s) || (accumulate!(s, L, w, key); return nothing)
   _push_back(Base.front(chain), pullback(s, L, ctx, key), w, ctx, key)
+end
+
+# The sensitivity with respect to the physical field (`ctx.sensitivity === :physical`, reaction–diffusion): an
+# interface map is taken as the identity weighted by the material, δ ↦ L((w₀ + (1 − w₀) χ) δ), with χ its output.
+# The derivative of the ersatz material is large in the void (weak material, large strains) and would refill it; the
+# weight keeps the sensitivity of the material where the material is. Every other stage keeps its derivative.
+_physical(s, ctx) = false
+_physical(s::Union{StepStage,ErsatzStage}, ctx::OptContext) = ctx.sensitivity === :physical
+function _physical_pullback(s, L, ctx::OptContext)
+  χ = output(s)
+  w0 = ctx.void_weight
+  δ -> L((w0 + (1 - w0) * χ) * δ)
 end
 
 # adds w ⋅ (form assembled on the design space of field i)

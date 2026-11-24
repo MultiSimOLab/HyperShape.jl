@@ -1,6 +1,7 @@
 # The scripts in examples/ run here at a small size, so the documented scripts keep working.
 include(joinpath(@__DIR__, "..", "..", "examples", "mbb.jl"))
 include(joinpath(@__DIR__, "..", "..", "examples", "mbb_factories.jl"))
+include(joinpath(@__DIR__, "..", "..", "examples", "cantilever_rd.jl"))
 
 @testset "Examples" begin
   @testset "MBB beam (examples/mbb.jl)" begin
@@ -19,6 +20,12 @@ include(joinpath(@__DIR__, "..", "..", "examples", "mbb_factories.jl"))
       @test r.history.objective == r0.history.objective && get_values(r.z) == get_values(r0.z)
       @test isfile(joinpath(out, "vtk", "optimization.pvd"))
     end
+  end
+  @testset "Cantilever by reaction–diffusion (examples/cantilever_rd.jl)" begin
+    r = run_cantilever_rd(; nx = 40, ny = 20, maxiter = 200, verbose = 0)   # measured: converged at iteration 99
+    @test r.status === :converged && r.iterations <= 150
+    @test abs(r.history.constraints.volume[end]) <= 2e-4               # the volume (to 1e-4 |D|) reached at iteration 25
+    @test r.history.objective[end] < 1 / (1e-3 + 0.5 * (1 - 1e-3))     # better than a uniform material χ = 0.5
   end
   @testset "The README and the Getting started page show examples/mbb.jl" begin
     root = joinpath(@__DIR__, "..", "..")

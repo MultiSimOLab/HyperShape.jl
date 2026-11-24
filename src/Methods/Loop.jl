@@ -25,7 +25,8 @@ RejectStep(; shrink = 0.5, max_attempts = 5) = RejectStep(shrink, max_attempts)
 
 """
     StopCriteria(; objective_range = nothing, window = 10, kkt_tol = nothing, kkt_rtol = nothing,
-                 stationarity_tol = nothing, stationarity_rtol = nothing, change_tol = nothing)
+                 stationarity_tol = nothing, stationarity_rtol = nothing, change_tol = nothing, rate_tol = nothing,
+                 phase_tol = nothing, phase_window = 5, material_tol = nothing, material_window = 5, combine = :any)
 
 Convergence criteria; each one is off unless given, and the first one met stops the optimisation (the reason in
 [`OptResult`](@ref) is the name of the keyword). With a [`Continuation`](@ref) they only act in the last stage, unless
@@ -46,6 +47,26 @@ it was built with `close_early = true` (then a criterion met in an earlier stage
   computes it with the metric of [`DensityMethod`](@ref) (its step does not use it): give `LumpedMass()` for a value
   independent of the mesh, comparable with SiMPL.
 - `change_tol`: `maximum(abs, Δz)` of the step below this value. With a tanh projection it is rarely reached.
+- `rate_tol`: the rate of change, `maximum(abs, Δz)` divided by the `step` of the step (the pseudo-time step `Δt` of
+  [`ReactionDiffusion`](@ref), the one of the accepted step), below this value: a step shrunk after a rejection does
+  not meet it by being short (measured: the iteration at which it stops still depends on `Δt`).
+- `phase_tol`: the fraction of the design domain that changes phase in an iteration below this value in each of the
+  last `phase_window` iterations (default 5) of the run: the lumped mass of the nodes where the level set changes
+  sign, over `|D|` (`phase_change` of the method). Only for a method whose design goes through an interface map
+  (`ReactionDiffusion` with `Step()` or `Ersatz()`); `solve!` throws otherwise. The windows of `phase_tol` and
+  `material_tol` are saved in the checkpoint: a resumed run stops where the uninterrupted one does.
+- `material_tol`: the material changed in an iteration, `M_k = ∫|χ_k − χ_{k−1}| dΩ / ∫χ_k dΩ` (`material_change` of
+  the method: `χ` is the physical field read by the `Volume` constraint, cell by cell), below this value in each of
+  the last `material_window` iterations (default 5) with the constraints met (the window starts again whenever a
+  constraint is violated: it does not count the descent of the volume). For `ReactionDiffusion` (the step computes
+  `M_k` from the nodal values, without solves or allocations, when the `Volume` integrates over the design domain
+  through `Identity()`, `Step()` or `Ersatz()`); given without such a meter `solve!` throws, while the default stop of
+  `ReactionDiffusion` drops it (an event and a line of the banner say so). A run that ends at `maxiter` with the
+  material still changing says so.
+- `combine`: `:any` (default) stops when the first criterion given is met; `:all` when all of them are met in the
+  same iteration, and then the window of `objective_range` also counts only iterations with the constraints met
+  (the reason is `:all`). The default of `ReactionDiffusion` is
+  `StopCriteria(material_tol = 2e-3, objective_range = 1e-3, combine = :all)`.
 
 The tolerances are not checked at the first iteration of a stage (after a continuation jump the first step restores
 feasibility and its measures say little); `objective_range` needs `window` iterations of the stage.
@@ -58,27 +79,69 @@ struct StopCriteria
   stationarity_tol::Union{Nothing,Float64}
   stationarity_rtol::Union{Nothing,Float64}
   change_tol::Union{Nothing,Float64}
-  function StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol)
+  rate_tol::Union{Nothing,Float64}
+  phase_tol::Union{Nothing,Float64}
+  phase_window::Int
+  material_tol::Union{Nothing,Float64}
+  material_window::Int
+  combine::Symbol
+  function StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol,
+                        rate_tol, phase_tol, phase_window, material_tol, material_window, combine)
     for (k, v) in ((:objective_range, objective_range), (:kkt_tol, kkt_tol), (:kkt_rtol, kkt_rtol),
-                   (:stationarity_tol, stationarity_tol), (:stationarity_rtol, stationarity_rtol), (:change_tol, change_tol))
+                   (:stationarity_tol, stationarity_tol), (:stationarity_rtol, stationarity_rtol), (:change_tol, change_tol),
+                   (:rate_tol, rate_tol), (:phase_tol, phase_tol), (:material_tol, material_tol))
       v === nothing || v > 0 || throw(ArgumentError("StopCriteria: $k must be positive"))
     end
     window >= 2 || throw(ArgumentError("StopCriteria: window must be at least 2"))
+    phase_window >= 1 || throw(ArgumentError("StopCriteria: phase_window must be at least 1"))
+    material_window >= 1 || throw(ArgumentError("StopCriteria: material_window must be at least 1"))
+    combine in (:any, :all) || throw(ArgumentError("StopCriteria: combine must be :any or :all"))
     f(v) = v === nothing ? nothing : Float64(v)
-    new(f(objective_range), Int(window), f(kkt_tol), f(kkt_rtol), f(stationarity_tol), f(stationarity_rtol), f(change_tol))
+    new(f(objective_range), Int(window), f(kkt_tol), f(kkt_rtol), f(stationarity_tol), f(stationarity_rtol), f(change_tol),
+        f(rate_tol), f(phase_tol), Int(phase_window), f(material_tol), Int(material_window), combine)
   end
 end
 
+# the positional form of the seven criteria of before
+StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol) =
+  StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol, nothing, nothing, 5,
+               nothing, 5, :any)
+
 StopCriteria(; objective_range = nothing, window = 10, kkt_tol = nothing, kkt_rtol = nothing, stationarity_tol = nothing,
-             stationarity_rtol = nothing, change_tol = nothing) =
-  StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol)
+             stationarity_rtol = nothing, change_tol = nothing, rate_tol = nothing, phase_tol = nothing, phase_window = 5,
+             material_tol = nothing, material_window = 5, combine = :any) =
+  StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol, rate_tol,
+               phase_tol, phase_window, material_tol, material_window, combine)
+
+"""
+    material_change(opt::Optimizer, state) -> Float64
+
+The material changed in the last accepted step, `∫|χ_k − χ_{k−1}| / ∫χ_k` (see `StopCriteria(material_tol)`);
+`NaN` (the default) when the step does not compute it.
+"""
+material_change(::Optimizer, state) = NaN
+material_available(::Optimizer, state) = false
+
+# the default stop without the change of the material (no meter): the constraints and the objective range
+_without_material(s::StopCriteria) =
+  StopCriteria(s.objective_range, s.window, s.kkt_tol, s.kkt_rtol, s.stationarity_tol, s.stationarity_rtol, s.change_tol,
+               s.rate_tol, s.phase_tol, s.phase_window, nothing, s.material_window, s.combine)
+
+"""
+    phase_change(opt::Optimizer, state) -> Float64
+
+The fraction of the design domain whose phase changed in the last step (see `StopCriteria(phase_tol)`); `NaN` (the
+default) when the step has no phases (a density).
+"""
+phase_change(::Optimizer, state) = NaN
 
 """
     default_stop(optimizer) -> Union{StopCriteria,Nothing}
 
 Stopping criteria of [`solve!`](@ref) when `stop` is not given: `StopCriteria(objective_range = 1e-3)` (range of
-the objective below 0.1 % over the last 10 iterations of the last stage), for every optimiser. With a projection,
-`kkt_tol` and `change_tol` are rarely reached; the objective settles.
+the objective below 0.1 % over the last 10 iterations of the last stage), for OC and SiMPL. With a projection,
+`kkt_tol` and `change_tol` are rarely reached; the objective settles. [`ReactionDiffusion`](@ref):
+`StopCriteria(material_tol = 2e-3, objective_range = 1e-3, combine = :all)`.
 """
 default_stop(::Optimizer) = StopCriteria(objective_range = 1e-3)
 
@@ -491,7 +554,15 @@ struct OptState
   linear_offsets::Dict{Symbol,Float64}
   discretization::String
   events::Int
+  windows::NamedTuple     # the windows of the stopping criteria: phase, material (vectors) and streak
 end
+
+const _NO_WINDOWS = (phase = Float64[], material = Float64[], streak = 0)
+# the form without the windows of the stopping criteria (a resumed run then fills them again)
+OptState(iteration, stage, stage_iterations, z, blocks, frozen_cells, continuation, scales, history, method, optimizer,
+         memory, handled, lagrangian, linear_offsets, discretization, events) =
+  OptState(iteration, stage, stage_iterations, z, blocks, frozen_cells, continuation, scales, history, method, optimizer,
+           memory, handled, lagrangian, linear_offsets, discretization, events, _NO_WINDOWS)
 
 Base.show(io::IO, s::OptState) =
   print(io, "OptState(iteration ", s.iteration, ", stage ", s.stage, ", ", length(s.z), " variables, ", s.method, ")")
@@ -516,7 +587,7 @@ function _capture(problem, method, opt, opt_state, zk, hist, run, cont_names, or
               penalty_reference = Dict{Symbol,Float64}(n => al.vref[i] for (i, n) in enumerate(names)),
               updates = al.updates),
            Dict{Symbol,Float64}(n => fo.V[i] for (i, n) in enumerate(names) if fo.a[i] !== nothing),
-           run.kind, run.events)
+           run.kind, run.events, (phase = copy(run.phase), material = copy(run.material), streak = run.streak))
 end
 _gather_vec(x) = copyto!(Vector{Float64}(undef, length(x)), x)
 
@@ -574,6 +645,10 @@ function _write_checkpoint(c::Checkpoint, st::OptState)
     meta["lagrangian_updates"] = st.lagrangian.updates
   end
   meta["discretization"] = Dict{String,Any}("kind" => st.discretization, "events" => st.events)
+  # the windows of the stopping criteria (NaN, a step without phases, written as -1: phases and changes are ≥ 0)
+  meta["stop_windows"] = Dict{String,Any}("phase" => [isnan(x) ? -1.0 : x for x in st.windows.phase],
+                                          "material" => [isnan(x) ? -1.0 : x for x in st.windows.material],
+                                          "streak" => st.windows.streak)
   _atomic_write(io -> TOML.print(io, meta), joinpath(c.filepath, "checkpoint.toml"))
   for f in readdir(c.filepath)
     (occursin(r"^(z|memory)_\d+\.bin$", f) || occursin(r"^history_\d+\.csv$", f)) && f ∉ (zfile, hfile, mfile) &&
@@ -639,10 +714,14 @@ function load_checkpoint(filepath::AbstractString)
               penalty_reference = _by_name(meta["penalty_reference"]), updates = Int(meta["lagrangian_updates"])) : nothing,
            _by_name(get(meta, "linear_offsets", Dict())),
            String(get(get(meta, "discretization", Dict()), "kind", "FixedMesh")),
-           Int(get(get(meta, "discretization", Dict()), "events", 0)))
+           Int(get(get(meta, "discretization", Dict()), "events", 0)),
+           _read_windows(get(meta, "stop_windows", nothing)))
 end
 
 _by_name(d) = Dict{Symbol,Float64}(Symbol(k) => Float64(v) for (k, v) in d)
+_read_windows(::Nothing) = _NO_WINDOWS
+_read_windows(w) = (phase = Float64[x < 0 ? NaN : Float64(x) for x in w["phase"]],
+                    material = Float64[x < 0 ? NaN : Float64(x) for x in w["material"]], streak = Int(w["streak"]))
 
 # the rows of a loaded history into the history of the run (same constraints; a monitor not in the checkpoint is NaN)
 function _prefill!(hist::OptHistory, old::OptHistory)
@@ -679,7 +758,12 @@ _count(ops) = sum(num_solves, ops; init = 0)
 # ---------------------------------------------------------------------------------------------------------------
 # The loop
 
-function _stop_reason(stop::StopCriteria, info::StepInfo, hist::OptHistory, stage_start)
+# the criteria of a StopCriteria at this iteration; `phase` and `material` are the windows of phase_change and
+# material_change (nothing: not available), `streak` the iterations in a row with the constraints met
+_stop_reason(stop::StopCriteria, info::StepInfo, hist::OptHistory, stage_start) =
+  _stop_check(stop, info, hist, stage_start, nothing, nothing, typemax(Int))
+function _stop_check(stop::StopCriteria, info::StepInfo, hist::OptHistory, stage_start, phase, material, streak)
+  stop.combine === :all && return _stop_all(stop, info, hist, stage_start, phase, material, streak)
   if stop.objective_range !== nothing && hist.n - stage_start >= stop.window
     w = view(hist.objective, hist.n-stop.window+1:hist.n)
     lo, hi = extrema(w)
@@ -698,17 +782,52 @@ function _stop_reason(stop::StopCriteria, info::StepInfo, hist::OptHistory, stag
     isfinite(k1) && k1 > 0 && info.kkt < stop.kkt_rtol * k1 && return :kkt_rtol
   end
   stop.change_tol !== nothing && info.change < stop.change_tol && return :change_tol
+  stop.rate_tol !== nothing && info.change / info.step < stop.rate_tol && return :rate_tol
+  stop.phase_tol !== nothing && _window_below(phase, stop.phase_window, stop.phase_tol) && return :phase_tol
+  stop.material_tol !== nothing && _window_below(material, stop.material_window, stop.material_tol) && return :material_tol
   nothing
 end
 _stop_reason(::Nothing, info, hist, stage_start) = nothing
+_stop_check(::Nothing, info, hist, stage_start, phase, material, streak) = nothing
+
+# the last w values of v (a window) all below tol
+_window_below(v, w, tol) = v !== nothing && length(v) >= w && all(<(tol), view(v, length(v)-w+1:length(v)))
+
+# combine = :all: every criterion given is met at this iteration (windows of objective_range counted with the
+# constraints met, `streak` iterations in a row)
+function _stop_all(stop::StopCriteria, info, hist, stage_start, phase, material, streak)
+  hist.n - stage_start >= 2 || return nothing
+  if stop.objective_range !== nothing
+    (hist.n - stage_start >= stop.window && streak >= stop.window) || return nothing
+    w = view(hist.objective, hist.n-stop.window+1:hist.n)
+    lo, hi = extrema(w)
+    (hi - lo) <= stop.objective_range * max(maximum(abs, w), 1e-3 * abs(hist.objective[1])) || return nothing
+  end
+  stop.kkt_tol === nothing || info.kkt < stop.kkt_tol || return nothing
+  stop.stationarity_tol === nothing || info.stationarity < stop.stationarity_tol || return nothing
+  if stop.stationarity_rtol !== nothing
+    s1 = _first_finite(hist.stationarity, hist.n)
+    (isfinite(s1) && s1 > 0 && info.stationarity < stop.stationarity_rtol * s1) || return nothing
+  end
+  if stop.kkt_rtol !== nothing
+    k1 = hist.kkt[1]
+    (isfinite(k1) && k1 > 0 && info.kkt < stop.kkt_rtol * k1) || return nothing
+  end
+  stop.change_tol === nothing || info.change < stop.change_tol || return nothing
+  stop.rate_tol === nothing || info.change / info.step < stop.rate_tol || return nothing
+  stop.phase_tol === nothing || _window_below(phase, stop.phase_window, stop.phase_tol) || return nothing
+  stop.material_tol === nothing || _window_below(material, stop.material_window, stop.material_tol) || return nothing
+  _active(stop) ? :all : nothing
+end
 # a function of the user: (info, history, ctx) -> Bool, checked after every accepted iteration (also the first of a
 # stage; with a continuation, only in the last stage unless close_early); the reason is :custom
-function _stop_reason(stop, info, hist, stage_start, ctx)
+function _stop_decision(stop, info, hist, stage_start, ctx, phase, material, streak)
   r = stop(info, _history_copy(hist), ctx)        # the history up to this iteration (a copy: O(iterations))
   r isa Bool || throw(ArgumentError("solve!: the stop function must return true or false, got $(repr(r))"))
   r ? :custom : nothing
 end
-_stop_reason(stop::Union{Nothing,StopCriteria}, info, hist, stage_start, ctx) = _stop_reason(stop, info, hist, stage_start)
+_stop_decision(stop::Union{Nothing,StopCriteria}, info, hist, stage_start, ctx, phase, material, streak) =
+  _stop_check(stop, info, hist, stage_start, phase, material, streak)
 
 """
     solve!(problem::Optimization, method::AbstractMethod; maxiter, on_failure = RejectStep(),
@@ -718,7 +837,7 @@ _stop_reason(stop::Union{Nothing,StopCriteria}, info, hist, stage_start, ctx) = 
 Runs the optimisation from the current values of `z`. Mandatory: `maxiter` (total iterations, resumed ones included).
 Optional: `on_failure` ([`RejectStep`](@ref), default `RejectStep(shrink = 0.5, max_attempts = 5)`), `stop`
 ([`StopCriteria`](@ref); default [`default_stop`](@ref): range of the objective below 0.1 % over 10 iterations of
-the last stage; `stop = nothing` runs `maxiter` iterations; or a function (or callable object)
+the last stage, or for [`ReactionDiffusion`](@ref) the material and the objective steady with the constraints met; `stop = nothing` runs `maxiter` iterations; or a function (or callable object)
 `(info, history, ctx) -> Bool` of the user, checked after every accepted iteration, with the
 [`StepInfo`](@ref HyperShape.Optimizers.StepInfo) of the step (`info.f` is the objective before it), the
 [`OptHistory`](@ref) up to this iteration (a copy) and the context: `true` stops with reason `:custom`, under the
@@ -841,7 +960,9 @@ function solve!(problem::Optimization, method::AbstractMethod; maxiter::Integer,
                                          join(dropped, ", "), :yellow)
   end
   run = _LoopState(k0, stage, stage_iters, hist.n - stage_iters, (0, 0, 0), k0, Float64[], (0, 0, 0),
-                   resume === nothing ? 0 : resume.events, string(nameof(typeof(discretization))), false, 0.0, nothing)
+                   resume === nothing ? 0 : resume.events, string(nameof(typeof(discretization))), false, 0.0, nothing,
+                   resume === nothing ? Float64[] : copy(resume.windows.phase),
+                   resume === nothing ? Float64[] : copy(resume.windows.material), resume === nothing ? 0 : resume.windows.streak)
 
   # an optimiser whose parameters the schedule continues gets them back at the end (the stages change them)
   restore_opt = _restorer(opt)
@@ -983,20 +1104,38 @@ function _segment!(problem, method, opt, resume, isfirst, run, hist, ctx, cont_b
   zk = fo.zk
   copyto!(zk, get_values(z))
   resume === nothing || _check_handled(native, resume, cnames)
-  if resume === nothing                       # a resumed design is the one the run left
+  if resume === nothing && feasible_start(method)   # a resumed design is the one the run left
     t_start = isempty(native) ? nothing : _make_feasible!(fo, zk, native[1])
     run.start_scaling = t_start
     # a start feasible up to rounding (t within 1e-6 of 1) is not worth an event
     (t_start === nothing || t_start > 1 - 1e-6) || _print_event(pr, "· the starting design violated the constraint; it was scaled " *
                                             "towards the lower bound by $(round(t_start, sigdigits = 4)) to meet it", :yellow)
+  elseif resume === nothing
+    run.start_scaling = nothing
+    if !isempty(native)                        # the method lowers it (ReactionDiffusion)
+      constraint_info(fo, native[1])
+      g = constraint(fo, native[1], zk)
+      g > 0 && _print_event(pr, "· the starting design violates the constraint $(cnames[native[1]]) by $(@sprintf("%.3g", g)) " *
+                                "(scaled); it is not made feasible: $(method_label(method)) brings it down", :yellow)
+    end
   end
   # after the feasible start: a scale = :initial of a constraint is taken at the design the run starts from
   oracle = length(native) == num_constraints(fo) ? fo : AugmentedLagrangianOracle(fo, augmented_lagrangian(method), native, zk)
   oracle isa AugmentedLagrangianOracle && resume !== nothing && _restore_lagrangian!(oracle, resume, cnames)
-  pr.tols = [i in native ? (is_linear(problem.constraints[i].F) ? _RED_CONSTRAINT : min(_RED_CONSTRAINT, constraint_tol(opt))) :
-             augmented_lagrangian(method).constraint_tol for i in 1:length(problem.constraints)]
   zprev = similar(zk)
   state = init(opt, zk, oracle)
+  if stop isa StopCriteria && stop.material_tol !== nothing && !material_available(opt, state)
+    stop == default_stop(opt) ||
+      throw(ArgumentError("StopCriteria: material_tol needs a method that computes the change of the material " *
+                          "(ReactionDiffusion with a Volume constraint over the design domain read through Identity(), " *
+                          "Step() or Ersatz()); $(method_label(method)) does not here"))
+    stop = _without_material(stop)
+    _print_event(pr, "· no change of the material in this problem (no Volume over the design domain read through " *
+                     "Identity(), Step() or Ersatz()): the default stop uses the constraints and the objective range", :yellow)
+  end
+  # after init: the tolerance of a step may depend on the problem (ReactionDiffusion converts it with the scale)
+  pr.tols = [i in native ? (is_linear(problem.constraints[i].F) ? _RED_CONSTRAINT : min(_RED_CONSTRAINT, constraint_tol(opt))) :
+             augmented_lagrangian(method).constraint_tol for i in 1:length(problem.constraints)]
   if resume !== nothing && resume.memory !== nothing
     if resume.optimizer == string(nameof(typeof(opt)))
       restore_memory!(opt, state, zk, resume.memory)
@@ -1062,7 +1201,12 @@ function _segment!(problem, method, opt, resume, isfirst, run, hist, ctx, cont_b
   f_final = _sync!(oracle)                     # fields and forward state at the final design
   _print_end(pr, status, reason, run.k, f_final, _last_monitors(hist, monitors))
   status === :converged || _warn_unmet(pr, hist, cnames)
-  _print_summary(pr, map(_count, ops) .- run.cstart .+ run.acc, run.k - run.k0, run.events)
+  if status === :maxiter && stop isa StopCriteria && stop.material_tol !== nothing && !isempty(run.material) &&
+     maximum(view(run.material, max(1, length(run.material)-stop.material_window+1):length(run.material))) >= stop.material_tol
+    _print_event(pr, "⚠ maxiter with the material still changing: M = " * @sprintf("%.2e", run.material[end]) *
+                     " (material_tol $(_g_or_e(stop.material_tol))); the design has not settled", :yellow)
+  end
+  _print_summary(pr, map(_count, ops) .- run.cstart .+ run.acc, run.k - run.k0, run.events, summary_note(opt, state))
   final = _save_state!(checkpoint, problem, method, opt, state, zk, hist, run, cont_names, oracle)
   if post !== nothing && post.last != run.k && isfinite(f_final)
     set_context!(ctx, :iteration, run.k)       # after a stall, the iteration tried was run.k + 1
@@ -1196,9 +1340,7 @@ function _native_split(problem, opt, lag)
   names = collect(keys(problem.constraints))
   native = Int[]
   if lag.native === :auto
-    for (i, info) in enumerate(infos)
-      length(native) < max_native(opt) && handles(opt, info) && push!(native, i)
-    end
+    native = _auto_native(opt, problem, infos, names)
   else
     allunique(lag.native) || throw(ArgumentError("AugmentedLagrangian: native repeats a name"))
     for n in lag.native
@@ -1214,6 +1356,15 @@ function _native_split(problem, opt, lag)
   requires_native(opt) && !isempty(names) && isempty(native) &&
     throw(ArgumentError("solve!: $(nameof(typeof(opt))) needs one constraint F ≤ max that solves no state (the volume) of its own; " *
                         "use SiMPL, or keep that constraint native"))
+  native
+end
+
+# the constraints the optimiser takes when `native = :auto`: in the order of the problem, the first ones it handles
+function _auto_native(opt, problem, infos, names)
+  native = Int[]
+  for (i, info) in enumerate(infos)
+    length(native) < max_native(opt) && handles(opt, info) && push!(native, i)
+  end
   native
 end
 
@@ -1246,11 +1397,14 @@ _violations(al::AugmentedLagrangianOracle, vals) = ntuple(i -> violation(al.info
 
 # with a nonlinear native constraint, convergence needs it met to the tolerance of the optimiser; the constraints of
 # the augmented Lagrangian, to its tolerance
+# (OC and SiMPL meet a linear native constraint at every step; a step that may leave it violated on purpose, as
+# ReactionDiffusion with a target lowered per iteration, says so with `_checks_linear_native`)
+_checks_linear_native(::Optimizer) = false
 _constraints_met(o::FunctionalOracle, info, opt, viols) =
-  !any(i -> o.a[i] === nothing, 1:num_constraints(o)) || violation(info) <= constraint_tol(opt)
+  (!_checks_linear_native(opt) && !any(i -> o.a[i] === nothing, 1:num_constraints(o))) || violation(info) <= constraint_tol(opt)
 function _constraints_met(al::AugmentedLagrangianOracle, info, opt, viols)
   fo = al.inner
-  any(i -> fo.a[i] === nothing, al.native) && violation(info) > constraint_tol(opt) && return false
+  (_checks_linear_native(opt) || any(i -> fo.a[i] === nothing, al.native)) && violation(info) > constraint_tol(opt) && return false
   all(i -> viols[i] <= al.tol, al.absorbed)
 end
 
@@ -1355,6 +1509,9 @@ mutable struct _LoopState
   physics_only::Bool      # the last rebuild kept the design
   tevent::Float64         # time the current rebuild started
   start_scaling::Union{Nothing,Float64}   # the factor of a scaled start (first stretch)
+  phase::Vector{Float64}  # phase_change of the accepted iterations of the current stage of this call
+  material::Vector{Float64}   # material_change of the accepted iterations in a row with the constraints met
+  streak::Int             # accepted iterations in a row with the constraints met (in this stage)
 end
 
 function _fail(msg, problem, method, opt, oracle, zk, hist, run, cont_names, checkpoint, pr, ops, post)
@@ -1447,6 +1604,9 @@ function _iterate!(problem, method, opt, oracle, state, zk, zprev, hist, run, ct
       run.stage += 1
       run.stage_iters = 0
       run.stage_start = hist.n
+      empty!(run.phase)
+      empty!(run.material)
+      run.streak = 0
     end
     if stop isa StopCriteria && (stop.kkt_tol !== nothing || stop.kkt_rtol !== nothing) && isnan(info.kkt)
       throw(ArgumentError("StopCriteria: kkt needs an optimiser that computes an optimality measure ($(nameof(typeof(opt))) does not)"))
@@ -1454,6 +1614,18 @@ function _iterate!(problem, method, opt, oracle, state, zk, zprev, hist, run, ct
     if stop isa StopCriteria && (stop.stationarity_tol !== nothing || stop.stationarity_rtol !== nothing) && isnan(info.stationarity)
       throw(ArgumentError("StopCriteria: stationarity needs an optimiser that computes it ($(nameof(typeof(opt))) " *
                           "returned NaN: it does not compute it, or its gradient is not finite)"))
+    end
+    pc = phase_change(opt, state)
+    if stop isa StopCriteria && stop.phase_tol !== nothing && isnan(pc)
+      throw(ArgumentError("StopCriteria: phase_tol needs a method whose design goes through an interface map " *
+                          "(ReactionDiffusion with Step() or Ersatz()); $(method_label(method)) has no phases here"))
+    end
+    push!(run.phase, pc)
+    mc = material_change(opt, state)
+    if stop isa StopCriteria && stop.material_tol !== nothing && isnan(mc)
+      throw(ArgumentError("StopCriteria: material_tol needs a method that computes the change of the material " *
+                          "(ReactionDiffusion with a Volume constraint read through Identity(), Step() or Ersatz()); " *
+                          "$(method_label(method)) does not here"))
     end
     run.k = k
     copyto!(run.zacc, zk)                      # with run.k: a checkpoint after an exception matches them
@@ -1476,7 +1648,10 @@ function _iterate!(problem, method, opt, oracle, state, zk, zprev, hist, run, ct
     end
     _record!(hist, row, cvals, mults, mvals, cont_buf, viols, pens)
     _print_row(pr, hist)
-    r = _stop_reason(stop, info, hist, run.stage_start, ctx)
+    met = _constraints_met(oracle, info, opt, viols)
+    run.streak = met ? run.streak + 1 : 0
+    met ? push!(run.material, mc) : empty!(run.material)
+    r = _stop_decision(stop, info, hist, run.stage_start, ctx, run.phase, run.material, run.streak)
     # convergence also needs the constraints met to their tolerances
     (r !== nothing && !_constraints_met(oracle, info, opt, viols)) && (r = nothing)
     done = false

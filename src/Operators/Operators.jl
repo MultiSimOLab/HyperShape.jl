@@ -36,6 +36,12 @@ post-processing. Read-only for the user; HyperShape updates it. Fields:
   `:optimization` (the current design of the loop and its adjoint) or `:linesearch` (a trial design requested by the
   optimiser; with SiMPL the design that is finally accepted is first solved in this phase).
 - `continuation`: named tuple with the current values of the continued parameters, for example `(β = 4.0,)`.
+- `sensitivity`: `:design` (the derivative with respect to the design, through every map) or `:physical` (set by
+  [`ReactionDiffusion`](@ref HyperShape.Methods.ReactionDiffusion)`(…; sensitivity = :physical)` while it computes the
+  sensitivity of its step: the reverse sweep takes an interface map, `Step()` or `Ersatz()`, as the identity weighted
+  by the material, `δ ↦ (w₀ + (1 − w₀) χ) δ`); `:design` everywhere else, also in
+  [`check_consistency`](@ref HyperShape.Checks.check_consistency).
+- `void_weight`: the weight `w₀` of the void in the `:physical` sensitivity.
 
 For example, `RestartState = ctx.trial > 1` restarts a nonlinear solve from scratch at every evaluation after the
 first one of an iteration (a design tried after a rejected step, or a line-search trial).
@@ -46,14 +52,19 @@ mutable struct OptContext
   trial::Int
   phase::Symbol
   continuation::NamedTuple
+  sensitivity::Symbol
+  void_weight::Float64
 end
 
 const PHASES = (:setup, :check, :optimization, :linesearch)
 
 function OptContext(phase::Symbol = :setup)
   phase in PHASES || throw(ArgumentError("OptContext: phase must be one of $(join(PHASES, ", "))"))
-  OptContext(0, 0, 0, phase, NamedTuple())
+  OptContext(0, 0, 0, phase, NamedTuple(), :design, 0.0)
 end
+# the positional form of the five fields before `sensitivity` and `void_weight`
+OptContext(iteration::Integer, attempt::Integer, trial::Integer, phase::Symbol, continuation::NamedTuple) =
+  OptContext(iteration, attempt, trial, phase, continuation, :design, 0.0)
 
 Base.setproperty!(::OptContext, s::Symbol, v) =
   throw(ArgumentError("OptContext is read-only: HyperShape updates it"))
@@ -61,6 +72,7 @@ Base.setproperty!(::OptContext, s::Symbol, v) =
 # internal setter
 function set_context!(ctx::OptContext, s::Symbol, v)
   s === :phase && !(v in PHASES) && throw(ArgumentError("OptContext: unknown phase $v"))
+  s === :sensitivity && !(v in (:design, :physical)) && throw(ArgumentError("OptContext: sensitivity must be :design or :physical"))
   setfield!(ctx, s, convert(fieldtype(OptContext, s), v))
   ctx
 end
