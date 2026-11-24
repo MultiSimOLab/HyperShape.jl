@@ -871,8 +871,11 @@ Mandatory (modelling decisions):
   identity weighted by the material, `(w₀ + (1 − w₀) χ) ∂j/∂χ` (`w₀ = void_weight`): it nucleates holes, and the exact
   derivative through the map would refill the void (its value there is large: weak material, large strains); `:design`
   the exact derivative with respect to φ (with `Ersatz()`, nonzero only on the cells cut by the interface: no holes are
-  nucleated, so the starting design must have an interface; `Step()` has none). Without an interface map in the chain
-  (a density) both are the same. [`check_consistency`](@ref HyperShape.Checks.check_consistency) always checks the
+  nucleated, so the starting design must have an interface; `Step()` has none). `:design` with an interface map is
+  not a method offered by this release: a variant that only moves the boundary, from a start with holes
+  ([`hole_seed`](@ref HyperShape.Variables.hole_seed)), comes with the double-well reaction `DoubleWell` (next
+  release), which will redefine `:design`. Without an interface map in the chain (a density) both are the same.
+  `hole_seed` also gives perforated starts for `:physical` (studies of the dependence on the start). [`check_consistency`](@ref HyperShape.Checks.check_consistency) always checks the
   exact derivative; with `Ersatz()` give it steps smaller than the default (`h0 = 1e-3`): larger ones cross the
   kinks of the cell fractions (a node changing sign) and the observed rates fall below 2 for a correct derivative.
 
@@ -1024,7 +1027,9 @@ function check_problem(m::ReactionDiffusion, problem)
     θ isa PhysicalFields && has_ersatz(θ) && !_has_interface(z) &&
       throw(ArgumentError("ReactionDiffusion: with sensitivity = :design the derivative through Ersatz() lives on the " *
                           "cells cut by the interface, and the starting design has none (φ does not change sign): no " *
-                          "hole can appear. Use sensitivity = :physical, or start from a design with holes"))
+                          "hole can appear. Use sensitivity = :physical (it nucleates holes). A method that only moves " *
+                          "the boundary, from a start with holes built with hole_seed, comes with DoubleWell (next " *
+                          "release), which will redefine sensitivity = :design"))
   end
   nothing
 end

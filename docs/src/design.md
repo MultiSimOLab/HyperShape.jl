@@ -122,6 +122,50 @@ Vol = Volume(θ, dΩd; max_fraction = 0.4)
   `Ersatz()` when the run starts (a density method interpolates the density itself, SIMP or RAMP). In interface
   methods the starting design need not meet the constraint: the evolution takes it there.
 
+**Starting designs with holes** (`hole_seed`): the free values of a design field with a pattern of holes, given to
+`FieldVariable` as `init`:
+
+```julia
+φ0 = hole_seed(Vφ; radius = 0.05, spacing = 0.2, exclude = "clamp", connect = ("clamp", "load"))
+z  = OptVariables(φ = FieldVariable(Vφ; bounds = (-1.0, 1.0), init = φ0, frozen = 1.0))
+```
+
+- Two uses: an optional perforated start for methods that nucleate holes (`ReactionDiffusion(…; sensitivity =
+  :physical)`, as Yamada et al. 2010; studies of the dependence of the design on the start), and the mandatory start
+  of methods that only move the boundary (the double-well reaction–diffusion `DoubleWell`, next release, after
+  Takezawa et al. 2010), whose holes are those of the seed.
+- `radius`, `spacing` (default `4radius`), `margin` and `width` are lengths in the units of the mesh, so the start
+  does not change when the mesh is refined. Patterns: `:hex` (default; staggered rows in 2D, face-centred cubic in
+  3D, a hole at the centre of the box; `jitter ∈ [0, 1)` moves the centres at random without letting two holes
+  touch), `:lattice` (square or cubic) and `:cvt` (a centroidal Voronoi tessellation of the region where holes may go,
+  by Lloyd's relaxation: even spacing on any geometry and around the excluded zones; from the `:hex` centres, or from
+  random points at least `spacing` apart with `rng`; there `spacing` is the mean distance from a centre to its
+  nearest neighbour: the number of holes starts as that of `:hex` over the region and is corrected after measuring
+  that distance, at most twice, so slender parts get fewer holes than their measure suggests; `nholes` fixes the
+  number instead (rounded to whole orbits with a symmetry); so `:cvt` gives fewer holes than `:hex` with the same
+  `spacing`, 46 against 73 on a 2 × 1 plate; neighbours are at least `min_distance` apart, by default `2radius + (spacing − 2radius)/2`: after
+  each Lloyd step closer centres are pushed apart; the holes of `:cvt` are inside the region, those of `:hex` may be
+  cut by the boundary). The non-nucleating methods of the literature start from
+  periodic staggered patterns (Takezawa et al. 2010); with the double-well prototype a staggered seed gave the bridge
+  of Takezawa within 1–2 % of the published compliance and symmetric designs, and purely random seeds (Poisson disks)
+  up to 20 % worse on the cantilever, which is why random points are only a start for `:cvt`.
+- `symmetry`: reflections `(point = p, normal = n)` and rotations of order `n` (`(point = p, order = n)` in 2D,
+  `(point = p, axis = a, order = n)` in 3D), alone or in a tuple: the seed is built in a fundamental region of the
+  group and replicated, exactly symmetric; every replica keeps the distance between holes and the margins. The
+  geometry and the zones must be symmetric too (a warning says when they are not). With `:hex` and `:lattice` the
+  symmetry must also map the lattice onto itself (`origin` moves it): otherwise the replicas meet along seams with
+  gaps, and a warning says so.
+- The holes keep away (`radius + margin`) from the frozen zones of the space (read from it) and from the tags in
+  `exclude`; the solid of the seed must join the tags of `connect` (default `exclude`) through faces, or a warning
+  names the tag left out. Holes that no value of the field falls into (a mesh too coarse for the radius) give a
+  warning; none at all, an error.
+- The value is a clipped distance (`lb` at the centre with `width = radius`, the level `(lb + ub)/2` on the edge of the
+  hole, `ub` beyond `radius + width`), the minimum with `base`; with `bounds = (0.0, 1.0)` it is a density with 0.5 on
+  the edge. P0 and P1, any mesh in 2D and 3D; linear cost (a few microseconds per value; `:cvt` times its at most 60
+  Lloyd steps per relaxation, up to three relaxations). Sequential. Not periodic across periodic sides. With a
+  design space on part of the model, the cells outside it count as solid for `connect`. An error when every value
+  would be inside a hole, a warning above half (`base` does not count).
+
 Planned: global parameters as blocks (applied voltage, fibre angle), scaling and symmetries in the map `z → x`,
 physical fields that depend on several design fields, material interpolation in the map `x → θ`.
 
@@ -390,8 +434,11 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
   the identity weighted by the material, `(w₀ + (1 − w₀) χ) ∂j/∂χ` (`void_weight = w₀ = 1e-3`): holes nucleate where
   the material is little used. The exact derivative through the map would refill the void (in the prototype the
   design oscillated, J = 16–70 against 2.4). `:design` is the exact derivative with respect to φ (with `Ersatz()`,
-  nonzero only on the cut cells: no nucleation, so the start needs an interface). Without an interface map both are
-  the same. `check_consistency` always checks the exact derivative; with `Ersatz()` give it steps below the default,
+  nonzero only on the cut cells: no nucleation, so the start needs an interface). `:design` with an interface map is
+  not offered as a method: with the exact multiplier of the volume, which shifts φ uniformly, the solid plateau sinks
+  where the derivative vanishes (measured from hole seeds on the 120 × 60 cantilever: 7–25 % worse than `:physical`, specks). The variant that
+  only moves the boundary, from a start with holes (`hole_seed`), comes with the double-well reaction `DoubleWell` in
+  the next release, which will redefine `:design`. Without an interface map both are the same. `check_consistency` always checks the exact derivative; with `Ersatz()` give it steps below the default,
   `check_consistency(…; h0 = 1e-3)`: larger steps cross the kinks of the cell fractions (a node changing sign) and
   the observed rates fall below 2 for a correct derivative.
 - **Normalisation** (`normalize`): `L1Mean(c)` (default, `C = c |D| / Σ|gᵢ|`, independent of the mesh),
@@ -437,8 +484,8 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
 - **Allocations:** the arithmetic of the step and a linear volume allocate nothing (one substitution of UMFPACK
   aside); each evaluation of a nonlinear volume reserves about 70 kB and each derivative of `Ersatz()` about 130 kB
   (Gridap's integration), independent of the mesh.
-- **Not yet:** the presets of Otomori, Yamada and Choi, Dirichlet conditions for φ on lines of nodes, hole seeding
-  for `sensitivity = :design`, 3D validation.
+- **Not yet:** the presets of Otomori, Yamada and Choi, Dirichlet conditions for φ on lines of nodes, the double
+  well (`DoubleWell`, boundary motion from a `hole_seed` start), 3D validation.
 
 ## Optimisers
 
