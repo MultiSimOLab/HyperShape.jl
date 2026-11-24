@@ -50,6 +50,7 @@ function region_cv(V, C)
   sqrt(sum(abs2, a .- m) / (length(a) - 1)) / m
 end
 nodeindex(xs, p) = findfirst(x -> dist(x, p) < 1e-9, xs)
+meannn(c) = sum(minimum(dist(c[i], c[j]) for j in eachindex(c) if j != i) for i in eachindex(c)) / length(c)
 
 @testset "hole_seed" begin
   @testset "values, bounds and FieldVariable (P$order, zone $frozen, $pattern)" for order in (0, 1), frozen in (true, false),
@@ -212,6 +213,10 @@ nodeindex(xs, p) = findfirst(x -> dist(x, p) < 1e-9, xs)
     @test_throws r"pattern = :cvt with rng" hole_seed(V; radius = 0.05, pattern = :poisson)           # internal only
     @test_throws r"jitter must be in \[0, 1\)" hole_seed(V; radius = 0.05, jitter = 1.0)
     @test_throws r"jitter moves the holes of :hex and :lattice" hole_seed(V; radius = 0.05, pattern = :cvt, jitter = 0.5)
+    @test_throws r"nholes and min_distance are options of pattern = :cvt" hole_seed(V; radius = 0.05, nholes = 10)
+    @test_throws r"nholes and min_distance are options of pattern = :cvt" hole_seed(V; radius = 0.05, pattern = :lattice, min_distance = 0.2)
+    @test_throws r"nholes must be a positive integer" hole_seed(V; radius = 0.05, pattern = :cvt, nholes = 0)
+    @test_throws r"min_distance .* must be larger than 2 radius" hole_seed(V; radius = 0.05, pattern = :cvt, min_distance = 0.1)
     @test_throws r"rng must be nothing, an integer seed or an AbstractRNG" hole_seed(V; radius = 0.05, rng = 1.5)
     @test_throws r"each symmetry is a named tuple" hole_seed(V; radius = 0.05, symmetry = ((1.0, 0.5), (0.0, 1.0)))
     @test_throws r"needs normal = … \(a reflection\) or order" hole_seed(V; radius = 0.05, symmetry = (point = (1.0, 0.5),))
@@ -276,21 +281,33 @@ nodeindex(xs, p) = findfirst(x -> dist(x, p) < 1e-9, xs)
       @test mindist(C, clamp_pts) >= 2r - 1e-12 && mindist(C, zone_pts) >= 2r - 1e-12
       rng === nothing && continue
       P = HSV.hole_centers(c.Vφ; radius = r, spacing = s, pattern = :poisson, rng, exclude = "clamp")   # its start
-      @test abs(length(C) - length(HSV.hole_centers(c.Vφ; radius = r, spacing = s, pattern = :cvt, exclude = "clamp"))) <= 3
+      n0 = length(HSV.hole_centers(c.Vφ; radius = r, spacing = s, pattern = :cvt, exclude = "clamp"))
+      @test abs(length(C) - n0) <= 0.1n0 + 2
       # measured (80 × 40, clamp and zone excluded): regions 0.16–0.22 against 0.26–0.31 for random points at least spacing apart
       @test region_cv(c.Vφ, C) < region_cv(c.Vφ, P)
     end
-    # the number of holes of :hex over the region (measure / (√3/2 spacing²)), also in a slender strip, where Lloyd
-    # alone packs the centres closer than the minimum
+    # spacing is the mean distance to the nearest neighbour (the number of holes calibrated), also in a slender strip
+    # and in a slender bar (3D), where the measure over the area per hole of :hex gives too many; nholes fixes the
+    # number (one relaxation), min_distance the minimum
     for (box, cells, n) in (((0, 2, 0, 1), (80, 40), 2 / (sqrt(3) / 2 * s^2)), ((0, 4, 0, 0.3), (160, 12), 1.2 / (sqrt(3) / 2 * s^2)))
       Vb = TestFESpace(CartesianDiscreteModel(box, cells), ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
       for rng in (nothing, 1)
         C = HSV.hole_centers(Vb; radius = r, spacing = s, pattern = :cvt, rng)
-        @test abs(length(C) - n) <= 0.05n + 1
+        @test abs(meannn(C) / s - 1) <= 0.1
         @test mindist(C) >= 2r + (s - 2r) / 2 - 1e-12
         @test all(p -> box[1] <= p[1] <= box[2] && box[3] <= p[2] <= box[4], C)
+        C = HSV.hole_centers(Vb; radius = r, spacing = s, pattern = :cvt, rng, nholes = round(Int, n))
+        @test length(C) == round(Int, n) && mindist(C) >= 2r + (s - 2r) / 2 - 1e-12
       end
     end
+    Vb = TestFESpace(CartesianDiscreteModel((0, 2, 0, 1), (80, 40)), ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
+    C = HSV.hole_centers(Vb; radius = r, spacing = s, pattern = :cvt, min_distance = 0.18)
+    @test mindist(C) >= 0.18 - 1e-12
+    bar = CartesianDiscreteModel((0, 3, 0, 0.4, 0, 0.4), (45, 6, 6))           # 2 spacing thick
+    Vb = TestFESpace(bar, ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
+    C = HSV.hole_centers(Vb; radius = 0.06, spacing = 0.2, pattern = :cvt)
+    # measured: 55 holes (the measure over s³/√2 gives 85), mean distance 0.97 spacing
+    @test abs(meannn(C) / 0.2 - 1) <= 0.1 && mindist(C) >= 0.16 - 1e-12 && length(C) < 0.8 * 0.48 / (0.2^3 / sqrt(2))
     # an unstructured mesh: Gmsh tetrahedra
     V = TestFESpace(DiscreteModelFromFile(joinpath(SEED_MESHES, "m3_s_8.json")), ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
     C = HSV.hole_centers(V; radius = 0.1, spacing = 0.35, pattern = :cvt)
@@ -319,7 +336,10 @@ nodeindex(xs, p) = findfirst(x -> dist(x, p) < 1e-9, xs)
     # rotation of order 4 about the centre of a square (2D) and about the z axis (3D)
     sq = CartesianDiscreteModel((-1, 1, -1, 1), (40, 40))
     Vs = TestFESpace(sq, ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
-    C = @test_logs HSV.hole_centers(Vs; radius = 0.08, spacing = 0.4, pattern, symmetry = (point = (0, 0), order = 4))
+    C = pattern === :hex ?                                               # the lattice of :hex has no 4-fold axis
+        (@test_logs (:warn, r"does not map the lattice of :hex onto itself") HSV.hole_centers(Vs; radius = 0.08, spacing = 0.4,
+                                                                                               pattern, symmetry = (point = (0, 0), order = 4))) :
+        (@test_logs HSV.hole_centers(Vs; radius = 0.08, spacing = 0.4, pattern, symmetry = (point = (0, 0), order = 4)))
     @test all(p -> near((-p[2], p[1]), C), C) && mindist(C) >= (pattern === :cvt ? 0.16 + 0.12 : 0.4) - 1e-12
     bx = CartesianDiscreteModel((-1, 1, -1, 1, 0, 1), (12, 12, 6))
     Vb = TestFESpace(bx, ReferenceFE(lagrangian, Float64, 0); conformity = :L2)
@@ -330,13 +350,54 @@ nodeindex(xs, p) = findfirst(x -> dist(x, p) < 1e-9, xs)
       spacing = s, pattern, symmetry = (point = (0.7, 0.5), normal = (1.0, 0.0)))
   end
 
-  @testset "linear cost" begin
+  @testset "symmetries of the lattice itself (3D, P0): no hole lost" begin
+    m3 = CartesianDiscreteModel((-1, 1, -1, 1, -1, 1), (12, 12, 12))
+    V3 = TestFESpace(m3, ReferenceFE(lagrangian, Float64, 0); conformity = :L2)
+    C0 = HSV.hole_centers(V3; radius = 0.12, spacing = 0.5)                  # face-centred cubic, 44 holes
+    @test length(C0) == 44
+    for sym in ((point = (0, 0, 0), normal = (1, -1, 0)), (point = (0, 0, 0), normal = (1, 0, -1)),
+                (point = (0, 0, 0), axis = (1, 1, 1), order = 3), (point = (0, 0, 0), normal = (1, 0, 0)),
+                (point = (0, 0, 0), axis = (0, 0, 1), order = 4))
+      C = @test_logs HSV.hole_centers(V3; radius = 0.12, spacing = 0.5, symmetry = sym)
+      @test length(C) == 44 && all(p -> near(p, C0), C)                    # before: 34, 34, 41 (rounding at spacing)
+    end
+  end
+
+  @testset "a symmetry the lattice does not have: warning" begin
+    c = seed_cantilever(; nx = 80, ny = 40, frozen = false)
+    @test_logs (:warn, r"does not map the lattice of :lattice onto itself") HSV.hole_centers(c.Vφ; radius = 0.05,
+      spacing = 0.2, pattern = :lattice, origin = (1.03, 0.47), symmetry = (point = (1.0, 0.5), normal = (0.0, 1.0)))
+    @test_logs HSV.hole_centers(c.Vφ; radius = 0.05, spacing = 0.2, pattern = :lattice,
+                                symmetry = (point = (1.0, 0.5), normal = (0.0, 1.0)))   # the default lattice has it
+  end
+
+  @testset "design space on part of the model: the rest is solid for connect (P$order)" for order in (0, 1)
+    c = seed_cantilever(; frozen = false)
+    Ωd = Triangulation(c.model, [sum(xs)[1] / length(xs) < 1.5 for xs in get_cell_coordinates(Triangulation(c.model))])
+    Vd = TestFESpace(Ωd, ReferenceFE(lagrangian, Float64, order); conformity = order == 0 ? :L2 : :H1)
+    φ = @test_logs hole_seed(Vd; radius = 0.05, spacing = 0.25, exclude = "clamp", connect = ("clamp", "load"))
+    @test length(φ) == num_free_dofs(Vd) && any(<(0), φ)
+  end
+
+  @testset "holes as large as the domain: error; mostly void: warning" begin
+    c = seed_cantilever(; frozen = false)
+    @test_throws r"every value of the field is below the level" hole_seed(c.Vφ; radius = 3.0)
+    @test_logs (:warn, r"more void than solid") match_mode = :any hole_seed(c.Vφ; radius = 0.3, spacing = 0.61)
+    @test_logs (:warn, r"more void than solid") match_mode = :any hole_seed(c.Vφ; radius = 0.3, spacing = 0.61, pattern = :cvt)
+  end
+
+  @testset "cost: linear, no allocation per value" begin
     sp(n) = TestFESpace(CartesianDiscreteModel((0, 2, 0, 1), (2n, n)), ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
     V1, V2 = sp(50), sp(100)
-    hole_seed(V1; radius = 0.05, spacing = 0.2)
-    t1 = minimum(@elapsed(hole_seed(V1; radius = 0.05, spacing = 0.2)) for _ in 1:3)
-    t2 = minimum(@elapsed(hole_seed(V2; radius = 0.05, spacing = 0.2)) for _ in 1:3)
-    @test t2 / t1 < 8                       # 4 times the cells
+    for pattern in (:hex, :cvt)
+      hole_seed(V1; radius = 0.05, spacing = 0.2, pattern); hole_seed(V2; radius = 0.05, spacing = 0.2, pattern)
+      a1 = @allocated hole_seed(V1; radius = 0.05, spacing = 0.2, pattern)
+      a2 = @allocated hole_seed(V2; radius = 0.05, spacing = 0.2, pattern)
+      # 4 times the cells, the same holes: memory linear; measured :hex ≈ 240 B per value (the arrays and Gridap's
+      # interpolation of the coordinates), was 4.8 kB
+      @test a2 / a1 < 5
+      @test (a2 - a1) / (num_free_dofs(V2) - num_free_dofs(V1)) < (pattern === :hex ? 600 : 3000)
+    end
   end
 
   @testset "exported, no clash with Gridap and HyperFEM" begin

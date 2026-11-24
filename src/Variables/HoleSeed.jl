@@ -15,11 +15,14 @@ end
 function _Buckets(lo::NTuple{D,Float64}, hi::NTuple{D,Float64}, radius::Float64, npoints::Int) where {D}
   vol = prod(max.(hi .- lo, radius))
   side = max(radius, (vol / max(npoints, 1))^(1 / D))          # never more boxes than points
-  n = ntuple(k -> max(1, ceil(Int, (hi[k] - lo[k]) / side)), D)
+  n = ntuple(k -> max(1, ceil(Int, (hi[k] - lo[k]) / side)), Val(D))
   _Buckets{D}(side, lo, n, zeros(Int, prod(n)), Int[], NTuple{D,Float64}[])
 end
 
-@inline _box(b::_Buckets{D}, x) where {D} = ntuple(k -> clamp(floor(Int, (x[k] - b.lo[k]) / b.side) + 1, 1, b.n[k]), D)
+@inline _box(b::_Buckets{D}, x) where {D} = ntuple(k -> clamp(floor(Int, (x[k] - b.lo[k]) / b.side) + 1, 1, b.n[k]), Val(D))
+
+# the boxes within m of the box I (a function, so that loops that rebuild the buckets do not box them in a closure)
+@inline _around(b::_Buckets{D}, I, m) where {D} = CartesianIndices(ntuple(k -> max(1, I[k] - m):min(b.n[k], I[k] + m), Val(D)))
 
 @inline function _lin(b::_Buckets{D}, I) where {D}
   l, s = 0, 1
@@ -42,7 +45,7 @@ end
 @inline function _nearest2(b::_Buckets{D}, x) where {D}
   I = _box(b, x)
   best = Inf
-  for J in CartesianIndices(ntuple(k -> max(1, I[k] - 1):min(b.n[k], I[k] + 1), D))
+  for J in _around(b, I, 1)
     p = b.head[_lin(b, Tuple(J))]
     while p != 0
       q = b.pts[p]
@@ -64,7 +67,7 @@ function _nearest_index(b::_Buckets{D}, x) where {D}
   I = _box(b, x)
   best, ibest = Inf, 0
   for ring in 0:maximum(b.n)
-    for J in CartesianIndices(ntuple(k -> max(1, I[k] - ring):min(b.n[k], I[k] + ring), D))
+    for J in _around(b, I, ring)
       maximum(k -> abs(J[k] - I[k]), 1:D) == ring || continue            # the shell of this ring only
       p = b.head[_lin(b, Tuple(J))]
       while p != 0
@@ -82,7 +85,61 @@ function _nearest_index(b::_Buckets{D}, x) where {D}
   ibest
 end
 
-_tup(p, ::Val{D}) where {D} = ntuple(k -> Float64(p[k]), D)
+_tup(p, ::Val{D}) where {D} = ntuple(k -> Float64(p[k]), Val(D))
+_dimval(::Val{D}) where {D} = D          # D as a constant from the type of G.dim (no dynamic ntuple)
+# arithmetic on points without broadcasting (nested tuple broadcasts allocate when they are not inlined)
+@inline _d2(a::NTuple{D,Float64}, b::NTuple{D,Float64}) where {D} = (s = 0.0; for k in 1:D; s += (a[k] - b[k])^2; end; s)
+@inline _add(a::NTuple{D,Float64}, b::NTuple{D,Float64}) where {D} = ntuple(k -> a[k] + b[k], Val(D))
+@inline _sub(a::NTuple{D,Float64}, b::NTuple{D,Float64}) where {D} = ntuple(k -> a[k] - b[k], Val(D))
+@inline _axpy(α, x::NTuple{D,Float64}, y::NTuple{D,Float64}) where {D} = ntuple(k -> y[k] + α * x[k], Val(D))   # y + αx
+@inline _scal(α, x::NTuple{D,Float64}) where {D} = ntuple(k -> α * x[k], Val(D))
+@inline _div(x::NTuple{D,Float64}, α) where {D} = ntuple(k -> x[k] / α, Val(D))
+
+# the indices of the points within distance r of x (r ≤ the side of the boxes searches 3^D boxes; Inf, all of them)
+@inline function _foreach_within(f, b::_Buckets{D}, x, r) where {D}
+  I = _box(b, x)
+  m = isfinite(r) ? max(1, ceil(Int, r / b.side)) : maximum(b.n)
+  r2 = r^2
+  for J in _around(b, I, m)
+    p = b.head[_lin(b, Tuple(J))]
+    while p != 0
+      q = b.pts[p]
+      d2 = 0.0
+      for k in 1:D
+        d2 += (x[k] - q[k])^2
+      end
+      d2 < r2 && f(p, d2)
+      p = b.next[p]
+    end
+  end
+  nothing
+end
+
+# a max-heap of (value, index) with stale entries (the caller skips those whose value is no longer current)
+function _heap_push!(v::Vector{Float64}, ix::Vector{Int}, val, i)
+  push!(v, val); push!(ix, i)
+  j = length(v)
+  while j > 1 && v[j >> 1] < v[j]
+    k = j >> 1
+    v[j], v[k] = v[k], v[j]; ix[j], ix[k] = ix[k], ix[j]
+    j = k
+  end
+end
+function _heap_pop!(v::Vector{Float64}, ix::Vector{Int})
+  top = (v[1], ix[1])
+  v[1], ix[1] = v[end], ix[end]
+  pop!(v); pop!(ix)
+  j, n = 1, length(v)
+  while true
+    l, r, m = 2j, 2j + 1, j
+    l <= n && v[l] > v[m] && (m = l)
+    r <= n && v[r] > v[m] && (m = r)
+    m == j && break
+    v[j], v[m] = v[m], v[j]; ix[j], ix[m] = ix[m], ix[j]
+    j = m
+  end
+  top
+end
 
 _seed_tags(t) = t === nothing ? () : t isa Union{AbstractString,Symbol} ? (String(t),) : Tuple(String(s) for s in t)
 
@@ -94,14 +151,14 @@ struct _Isometry{D}
   b::NTuple{D,Float64}
 end
 
-@inline _apply(g::_Isometry{D}, x) where {D} = ntuple(k -> g.b[k] + sum(g.A[k][j] * x[j] for j in 1:D), D)
+@inline _apply(g::_Isometry{D}, x) where {D} = ntuple(k -> g.b[k] + sum(g.A[k][j] * x[j] for j in 1:D), Val(D))
 _compose(g::_Isometry{D}, h::_Isometry{D}) where {D} =        # g ∘ h
-  _Isometry{D}(ntuple(i -> ntuple(j -> sum(g.A[i][k] * h.A[k][j] for k in 1:D), D), D), _apply(g, h.b))
+  _Isometry{D}(ntuple(i -> ntuple(j -> sum(g.A[i][k] * h.A[k][j] for k in 1:D), Val(D)), Val(D)), _apply(g, h.b))
 function _inverse(g::_Isometry{D}) where {D}
-  At = ntuple(i -> ntuple(j -> g.A[j][i], D), D)
-  _Isometry{D}(At, ntuple(i -> -sum(At[i][k] * g.b[k] for k in 1:D), D))
+  At = ntuple(i -> ntuple(j -> g.A[j][i], Val(D)), Val(D))
+  _Isometry{D}(At, ntuple(i -> -sum(At[i][k] * g.b[k] for k in 1:D), Val(D)))
 end
-_identity(::Val{D}) where {D} = _Isometry{D}(ntuple(i -> ntuple(j -> Float64(i == j), D), D), ntuple(_ -> 0.0, D))
+_identity(::Val{D}) where {D} = _Isometry{D}(ntuple(i -> ntuple(j -> Float64(i == j), Val(D)), Val(D)), ntuple(_ -> 0.0, Val(D)))
 _close(g::_Isometry, h::_Isometry, tol) = all(abs.(g.b .- h.b) .<= tol) && all(i -> all(abs.(g.A[i] .- h.A[i]) .<= 1e-9), eachindex(g.A))
 
 function _unit(v, what, ::Val{D}) where {D}
@@ -122,7 +179,7 @@ function _generator(s, ::Val{D}) where {D}
   if haskey(s, :normal)
     (haskey(s, :order) || haskey(s, :axis)) && throw(ArgumentError("hole_seed: a symmetry is a reflection (normal) or a rotation (order), not both"))
     n = _unit(s.normal, "normal", Val(D))
-    A = ntuple(i -> ntuple(j -> Float64(i == j) - 2n[i] * n[j], D), D)
+    A = ntuple(i -> ntuple(j -> Float64(i == j) - 2n[i] * n[j], Val(D)), Val(D))
   elseif haskey(s, :order)
     (s.order isa Integer && s.order >= 2) || throw(ArgumentError("hole_seed: the order of a rotation must be an integer ≥ 2, got $(s.order)"))
     θ = 2π / s.order
@@ -142,7 +199,7 @@ function _generator(s, ::Val{D}) where {D}
     throw(ArgumentError("hole_seed: a symmetry needs normal = … (a reflection) or order = … (a rotation)"))
   end
   A = A::NTuple{D,NTuple{D,Float64}}
-  _Isometry{D}(A, ntuple(i -> p[i] - sum(A[i][j] * p[j] for j in 1:D), D))
+  _Isometry{D}(A, ntuple(i -> p[i] - sum(A[i][j] * p[j] for j in 1:D), Val(D)))
 end
 
 # the group generated by the symmetries (identity first), its inverses, the generators and a generic direction w:
@@ -164,8 +221,18 @@ function _symmetry_group(symmetry, ::Val{D}, L) where {D}
     end
     i += 1
   end
-  w = D == 2 ? (0.8320502943378437, 0.5547001962252291) : (0.8017837257372732, 0.5345224838248488, 0.2672612419124244)
-  (; G = els, Ginv = map(_inverse, els), gens = gs, w = ntuple(k -> w[k], D))
+  # w must not be fixed by the linear part of any element (a plane that contains w, an axis along w): the first of a
+  # few generic directions that every element moves by at least 0.1, or the one moved most
+  cands = D == 2 ? ((0.8320502943378437, 0.5547001962252291), (0.5547001962252291, -0.8320502943378437),
+                    (0.9805806756909202, 0.19611613513818404)) :
+                   ((0.8017837257372732, 0.5345224838248488, 0.2672612419124244),
+                    (0.2672612419124244, -0.8017837257372732, 0.5345224838248488),
+                    (0.5345224838248488, 0.2672612419124244, -0.8017837257372732),
+                    (0.9128709291752769, -0.3651483716701107, 0.18257418583505536))
+  moved(w) = minimum((sqrt(sum(abs2, ntuple(i -> sum(g.A[i][j] * w[j] for j in 1:D) - w[i], Val(D)))) for g in els[2:end]); init = Inf)
+  k = findfirst(w -> moved(w) >= 0.1, cands)
+  w = k === nothing ? cands[argmax(map(moved, cands))] : cands[k]
+  (; G = els, Ginv = map(_inverse, els), gens = gs, w = ntuple(k -> Float64(w[k]), Val(D)), tol)
 end
 
 @inline _dotw(S, x) = sum(S.w .* x)
@@ -176,22 +243,49 @@ function _orbit(S, c, tol)
   o = [c]
   for g in S.G
     p = _apply(g, c)
-    any(q -> sum(abs2, p .- q) <= tol^2, o) || push!(o, p)
+    any(q -> _d2(p, q) <= tol^2, o) || push!(o, p)
   end
   o
 end
 
-# the centre moved to the mean of its images closer than d: onto the plane or the axis it is near to
+# the subgroup generated by the elements H (indices into S.G): the closure of the identity under left products
+function _subgroup(S, H)
+  sub = [1]
+  i = 1
+  while i <= length(sub)
+    for h in H
+      e = _compose(S.G[h], S.G[sub[i]])
+      k = findfirst(g -> _close(g, e, S.tol), S.G)
+      k === nothing || k in sub || push!(sub, k)
+    end
+    i += 1
+  end
+  sub
+end
+
+# the centre moved onto the plane or the axis it is near to: the mean of its images by the subgroup generated by the
+# elements that move it less than d (the projection onto the fixed set of that subgroup), repeated while that subgroup
+# grows. Images exactly d apart (neighbours of a lattice) do not count: relative tolerance 1e-9
 function _snap(S, c, d)
   length(S.G) == 1 && return c
-  s, n = c .* 0.0, 0
-  for g in S.G
-    p = _apply(g, c)
-    sum(abs2, p .- c) < d^2 || continue
-    s = s .+ p
-    n += 1
+  d2 = d^2 * (1 - 1e-9)
+  prev = Int[]
+  for _ in 1:4
+    H = Int[]
+    for k in 2:length(S.G)
+      _d2(_apply(S.G[k], c), c) < d2 && push!(H, k)
+    end
+    isempty(H) && return c
+    sub = sort!(_subgroup(S, H))
+    sub == prev && return c
+    s = _scal(0.0, c)
+    for k in sub
+      s = _add(s, _apply(S.G[k], c))
+    end
+    c = _div(s, length(sub))
+    prev = sub
   end
-  s ./ n
+  c
 end
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -199,30 +293,49 @@ end
 # values are Dirichlet values, as for FieldVariable), the box of the mesh
 function _seed_geometry(V)
   Ω = get_triangulation(V)
+  num_point_dims(Ω) == num_cell_dims(Ω) ||
+    throw(ArgumentError("hole_seed: the cells must have the dimension of the space (not shells or curves in 3D)"))
+  _seed_geometry(V, Ω, Val(num_cell_dims(Ω)))
+end
+
+function _seed_geometry(V, Ω, ::Val{D}) where {D}
   model = get_background_model(Ω)
-  D = num_cell_dims(Ω)
-  X = get_cell_coordinates(Ω)
+  # the nodes of the cells as plain arrays (the lazy cell coordinates allocate at each access)
+  nodes = Gridap.Geometry.get_node_coordinates(Ω)
+  xn = Vector{NTuple{D,Float64}}(undef, length(nodes))
+  for (i, p) in enumerate(nodes)
+    xn[i] = _tup(p, Val(D))
+  end
+  X = Gridap.Arrays.Table(Gridap.Geometry.get_cell_node_ids(Ω))
   nc = length(X)
   cen = Vector{NTuple{D,Float64}}(undef, nc)
   h = Vector{Float64}(undef, nc)
-  lo, hi = ntuple(_ -> Inf, D), ntuple(_ -> -Inf, D)
-  for (c, xs) in enumerate(X)
-    cen[c] = _tup(sum(xs) / length(xs), Val(D))
-    m = 0.0
-    for a in 1:length(xs)
-      p = _tup(xs[a], Val(D))
+  lo, hi = ntuple(_ -> Inf, Val(D)), ntuple(_ -> -Inf, Val(D))
+  @inbounds for c in 1:nc
+    r = X.ptrs[c]:X.ptrs[c+1]-1
+    sc, m = ntuple(_ -> 0.0, Val(D)), 0.0
+    for a in r
+      p = xn[X.data[a]]
+      sc = _add(sc, p)
       lo, hi = min.(lo, p), max.(hi, p)
-      for b in a+1:length(xs)
-        m = max(m, norm(xs[a] - xs[b]))
+      for b in a+1:last(r)
+        m = max(m, sqrt(_d2(p, xn[X.data[b]])))
       end
     end
+    cen[c] = _div(sc, length(r))
     # the longest distance between two vertices; the diagonal of an n-cube divided by √D
-    h[c] = length(xs) == 2^D && D > 1 ? m / sqrt(D) : m
+    h[c] = length(r) == 2^D && D > 1 ? m / sqrt(D) : m
   end
-  meas = collect(Float64, get_cell_measure(Ω))
+  dΩ = get_cell_measure(Ω)
+  cm = Gridap.Arrays.array_cache(dΩ)
+  meas = Float64[Gridap.Arrays.getindex!(cm, dΩ, c) for c in 1:nc]
   ids = get_cell_dof_ids(V)
-  frozen = BitVector([all(<(0), cell) for cell in ids])
-  (; Ω, model, D, X, cen, h, meas, frozen, ids, lo, hi, hmean = sum(h) / nc, hmax = maximum(h))
+  ci = Gridap.Arrays.array_cache(ids)
+  frozen = BitVector(undef, nc)
+  for c in 1:nc
+    frozen[c] = all(<(0), Gridap.Arrays.getindex!(ci, ids, c))
+  end
+  (; Ω, model, D, dim = Val(D), X, xn, cen, h, meas, frozen, ids, lo, hi, hmean = sum(h) / nc, hmax = maximum(h))
 end
 
 # the vertices of the entities of the tags (of any dimension, cells included)
@@ -258,20 +371,20 @@ end
 # apart, a point at the centre of the box; `origin` a point of the lattice), extended `ext` beyond the box
 function _lattice_points(pattern, lo, hi, s, origin, ext, ::Val{D}) where {D}
   o = origin !== nothing ? _tup(origin, Val(D)) :
-      pattern === :hex ? ntuple(k -> (lo[k] + hi[k]) / 2, D) :
-      ntuple(k -> (lo[k] + hi[k]) / 2 - (max(1, round(Int, (hi[k] - lo[k]) / s)) - 1) / 2 * s, D)
+      pattern === :hex ? ntuple(k -> (lo[k] + hi[k]) / 2, Val(D)) :
+      ntuple(k -> (lo[k] + hi[k]) / 2 - (max(1, round(Int, (hi[k] - lo[k]) / s)) - 1) / 2 * s, Val(D))
   cell, basis = if pattern === :lattice || D ∉ (2, 3)
-    ntuple(_ -> s, D), (ntuple(_ -> 0.0, D),)
+    ntuple(_ -> s, Val(D)), (ntuple(_ -> 0.0, Val(D)),)
   elseif D == 2
     (s, sqrt(3) * s), ((0.0, 0.0), (s / 2, sqrt(3) * s / 2))
   else
     a = sqrt(2) * s
     (a, a, a), ((0.0, 0.0, 0.0), (a / 2, a / 2, 0.0), (a / 2, 0.0, a / 2), (0.0, a / 2, a / 2))
   end
-  ranges = ntuple(k -> (floor(Int, (lo[k] - ext - o[k]) / cell[k]) - 1):(ceil(Int, (hi[k] + ext - o[k]) / cell[k]) + 1), D)
+  ranges = ntuple(k -> (floor(Int, (lo[k] - ext - o[k]) / cell[k]) - 1):(ceil(Int, (hi[k] + ext - o[k]) / cell[k]) + 1), Val(D))
   pts = NTuple{D,Float64}[]
   for I in CartesianIndices(ranges), b in basis
-    push!(pts, ntuple(k -> o[k] + I[k] * cell[k] + b[k], D))
+    push!(pts, ntuple(k -> o[k] + I[k] * cell[k] + b[k], Val(D)))
   end
   pts
 end
@@ -283,17 +396,36 @@ function _images(cs::Vector{NTuple{D,Float64}}, S, tol) where {D}
     first_i = length(gen) + 1
     for (k, g) in enumerate(S.G)
       p = _apply(g, c)
-      any(j -> sum(abs2, gen[j] .- p) <= tol^2, first_i:length(gen)) && continue
+      any(j -> _d2(gen[j], p) <= tol^2, first_i:length(gen)) && continue
       push!(gen, p); push!(owner, i); push!(elem, k)
     end
   end
   gen, owner, elem
 end
 
+_maxmove(a, b) = (m = 0.0; for i in eachindex(a); m = max(m, sqrt(_d2(a[i], b[i]))); end; m)
+
+# the mean distance from each point to the nearest other point (at most 3s)
+function _mean_nn(pts::Vector{NTuple{D,Float64}}, lo, hi, s) where {D}
+  length(pts) < 2 && return 3s
+  B = _Buckets(lo, hi, s, length(pts))
+  for p in pts; _push!(B, p); end
+  tot = 0.0
+  best = Ref(Inf)
+  for (i, p) in enumerate(pts)
+    best[] = 9s^2
+    _foreach_within(B, p, 3s) do j, d2
+      j != i && d2 < best[] && (best[] = d2)
+    end
+    tot += sqrt(best[])
+  end
+  tot / length(pts)
+end
+
 # Lloyd's relaxation: each admissible cell goes to the nearest image of a centre, and each centre moves to the
 # centroid (weighted by the measures) of its cells brought back by the inverse symmetry; linear per iteration
 function _lloyd(cs, G, S, adm, s, tolsnap, maxiter)
-  D = G.D
+  D = _dimval(G.dim)
   n = length(cs)
   n == 0 && return cs, 0
   cs = copy(cs)
@@ -302,21 +434,21 @@ function _lloyd(cs, G, S, adm, s, tolsnap, maxiter)
   for outer it in 1:maxiter
     gen, owner, elem = _images(cs, S, tolm)
     B = _Buckets(G.lo, G.hi, s, length(gen))
-    foreach(p -> _push!(B, p), gen)
-    sx = [ntuple(_ -> 0.0, D) for _ in 1:n]
+    for p in gen; _push!(B, p); end
+    sx = fill(ntuple(_ -> 0.0, Val(D)), n)
     sw = zeros(n)
     for c in adm
       j = _nearest_index(B, G.cen[c])
       i = owner[j]
       y = _apply(S.Ginv[elem[j]], G.cen[c])
-      sx[i] = sx[i] .+ G.meas[c] .* y
+      sx[i] = _axpy(G.meas[c], y, sx[i])
       sw[i] += G.meas[c]
     end
     disp = 0.0
     for i in 1:n
       sw[i] > 0 || continue
-      new = _snap(S, sx[i] ./ sw[i], tolsnap)
-      disp = max(disp, sqrt(sum(abs2, new .- cs[i])))
+      new = _snap(S, _div(sx[i], sw[i]), tolsnap)
+      disp = max(disp, sqrt(_d2(new, cs[i])))
       cs[i] = new
     end
     disp < 0.05 * G.hmean && break
@@ -335,25 +467,26 @@ function _separate!(cs::Vector{NTuple{D,Float64}}, G, S, dmin, dsep, K, R, Cadm,
   for _ in 1:sweeps
     gen, owner, elem = _images(cs, S, tolm)
     nimg = zeros(Int, n)
-    foreach(i -> nimg[i] += 1, owner)
+    for i in owner; nimg[i] += 1; end
     B = _Buckets(G.lo, G.hi, dsep, length(gen))
-    foreach(p -> _push!(B, p), gen)
-    disp = [ntuple(_ -> 0.0, D) for _ in 1:n]
+    for p in gen; _push!(B, p); end
+    disp = fill(ntuple(_ -> 0.0, Val(D)), n)
     worst = 0.0
     for (j, p) in enumerate(gen)
       i, A = owner[j], S.G[elem[j]].A
       I = _box(B, p)
-      for J in CartesianIndices(ntuple(k -> max(1, I[k] - 1):min(B.n[k], I[k] + 1), D))
+      for J in _around(B, I, 1)
         q = B.head[_lin(B, Tuple(J))]
         while q != 0
           if owner[q] != i
-            d2 = sum(abs2, p .- B.pts[q])
+            d2 = _d2(p, B.pts[q])
             if d2 < dsep^2
               d = sqrt(d2)
               worst = max(worst, dmin - d)
-              u = d > 1e-12 * dsep ? (p .- B.pts[q]) ./ d : ntuple(k -> k == 1 ? (i < owner[q] ? 1.0 : -1.0) : 0.0, D)
-              δ = ((dsep - d) / 2) .* u
-              disp[i] = disp[i] .+ ntuple(k -> sum(A[l][k] * δ[l] for l in 1:D), D) ./ nimg[i]   # Aᵀδ
+              sg = i < owner[q] ? 1.0 : -1.0                 # coincident images: apart along the first axis
+              u = d > 1e-12 * dsep ? _div(_sub(p, B.pts[q]), d) : ntuple(k -> k == 1 ? sg : 0.0, Val(D))
+              δ = _scal((dsep - d) / 2, u)
+              disp[i] = _add(disp[i], _div(ntuple(k -> sum(A[l][k] * δ[l] for l in 1:D), Val(D)), nimg[i]))   # Aᵀδ
             end
           end
           q = B.next[q]
@@ -361,14 +494,14 @@ function _separate!(cs::Vector{NTuple{D,Float64}}, G, S, dmin, dsep, K, R, Cadm,
       end
     end
     for i in 1:n
-      x = cs[i] .+ disp[i]
+      x = _add(cs[i], disp[i])
       if !isempty(K.pts)
         k = _nearest_index(K, x)
-        v = x .- K.pts[k]
+        v = _sub(x, K.pts[k])
         d = sqrt(sum(abs2, v))
         if d < R
           worst = max(worst, R - d)
-          x = d > 0 ? K.pts[k] .+ (R * (1 + 1e-3) / d) .* v : x
+          x = d > 0 ? _axpy(R * (1 + 1e-3) / d, v, K.pts[k]) : x
         end
       end
       _nearest2(Cadm, x) <= ρp^2 || (x = G.cen[admc[_nearest_index(Cadm, x)]])
@@ -380,32 +513,42 @@ function _separate!(cs::Vector{NTuple{D,Float64}}, G, S, dmin, dsep, K, R, Cadm,
 end
 
 # adds to pts the candidate centroids farthest from pts and their images until they give N holes (`count`: the holes of
-# a point, its distinct images); deterministic; the distances by buckets at the start, then O(candidates × group) per
-# added point
+# a point, its distinct images); deterministic. A max-heap of the distances; a new point only lowers the distances of
+# the candidates nearer to it than the current largest distance (searched by buckets): linear in the candidates when
+# the points are spread over the region
 function _farthest_fill!(pts, G, S, cand, N, s; count = p -> 1)
   total = sum(count, pts; init = 0)
   (total >= N || isempty(cand)) && return pts
-  D = G.D
+  D = _dimval(G.dim)
   imgs = NTuple{D,Float64}[_apply(g, p) for p in pts for g in S.G]
   d2 = fill(Inf, length(cand))
   if !isempty(imgs)
     B = _Buckets(G.lo, G.hi, s, length(imgs))
-    foreach(p -> _push!(B, p), imgs)
+    for p in imgs; _push!(B, p); end
     for (j, c) in enumerate(cand)
       i = _nearest_index(B, G.cen[c])
-      d2[j] = sum(abs2, G.cen[c] .- B.pts[i])
+      d2[j] = _d2(G.cen[c], B.pts[i])
     end
   end
-  while total < N
-    j = argmax(d2)
-    d2[j] > 0 || break
+  Bc = _Buckets(G.lo, G.hi, s / 4, length(cand))
+  for c in cand; _push!(Bc, G.cen[c]); end
+  hv, hi_ = Float64[], Int[]
+  for j in eachindex(cand)                                   # in order: ties go to the first candidate
+    _heap_push!(hv, hi_, d2[j], j)
+  end
+  while total < N && !isempty(hv)
+    v, j = _heap_pop!(hv, hi_)
+    v == d2[j] || continue                                   # stale
+    v > 0 || break
     x = G.cen[cand[j]]
     push!(pts, x)
     total += count(x)
     for g in S.G
       y = _apply(g, x)
-      for (k, c) in enumerate(cand)
-        d2[k] = min(d2[k], sum(abs2, G.cen[c] .- y))
+      _foreach_within(Bc, y, sqrt(v)) do k, e2
+        e2 < d2[k] || return
+        d2[k] = e2
+        _heap_push!(hv, hi_, e2, k)
       end
     end
   end
@@ -421,7 +564,7 @@ function _farthest_subset(pts, N; count = p -> 1)
   while total < N
     x = pts[take[end]]
     for j in eachindex(pts)
-      d2[j] = min(d2[j], sum(abs2, pts[j] .- x))
+      d2[j] = min(d2[j], _d2(pts[j], x))
     end
     push!(take, argmax(d2))
     total += count(pts[take[end]])
@@ -431,24 +574,24 @@ end
 
 # the centres of the holes (see hole_seed); pattern :poisson is internal (random points at least `spacing` apart,
 # the random start of :cvt)
-function _hole_centers(G, radius, spacing, pattern, margin, exclude, rng, origin, jitter, S)
-  D = G.D
+function _hole_centers(G, radius, spacing, pattern, margin, exclude, rng, origin, jitter, S, nholes, min_distance)
+  D = _dimval(G.dim)
   lo, hi = G.lo, G.hi
   L = maximum(hi .- lo)
   R = radius + margin
   keep = _tag_vertices(G.model, exclude, Val(D))           # keep-out points: excluded tags and frozen cells
-  for c in findall(G.frozen), p in G.X[c]
-    push!(keep, _tup(p, Val(D)))
+  for c in findall(G.frozen), a in G.X.ptrs[c]:G.X.ptrs[c+1]-1
+    push!(keep, G.xn[G.X.data[a]])
   end
   K = _Buckets(lo, hi, R, length(keep))
-  foreach(p -> _push!(K, p), keep)
+  for p in keep; _push!(K, p); end
   C = _Buckets(lo, hi, radius, length(G.cen))
-  foreach(c -> _push!(C, c), G.cen)
+  for c in G.cen; _push!(C, c); end
   admissible(x) = _nearest2(C, x) <= radius^2 && _nearest2(K, x) >= R^2
   tolF = 1e-9 * L
   fund(x) = _in_fundamental(S, x, tolF)
   # the smallest distance between two centres that the pattern guarantees
-  dmin = pattern === :cvt ? 2radius + (spacing - 2radius) / 2 :
+  dmin = pattern === :cvt ? (min_distance === nothing ? 2radius + (spacing - 2radius) / 2 : Float64(min_distance)) :
          pattern === :poisson ? spacing : 2radius + (1 - jitter) * (spacing - 2radius)
   # the points of the pattern in the fundamental region
   poisson() = begin
@@ -474,37 +617,57 @@ function _hole_centers(G, radius, spacing, pattern, margin, exclude, rng, origin
     # the relaxation would pull inside and crowd
     ρin = G.hmax * sqrt(D) / 2
     Cin = _Buckets(lo, hi, ρin, length(G.cen))
-    foreach(c -> _push!(Cin, c), G.cen)
+    for c in G.cen; _push!(Cin, c); end
     inside(x) = _nearest2(Cin, x) <= ρin^2
     init = rng === nothing ? filter(x -> fund(x) && admissible(x) && inside(x), _lattice_points(:hex, lo, hi, spacing, origin, radius, Val(D))) :
            poisson()
     adm = [c for c in 1:length(G.cen) if !G.frozen[c] && _nearest2(K, G.cen[c]) >= R^2]
-    # the number of holes of :hex with this spacing over the admissible region (√3/2 s² per hole in 2D, s³/√2 in 3D):
-    # the start is thinned or completed up to it by farthest points (the boundary layer the start leaves empty); a
-    # point gives as many holes as distinct images (those on a plane or an axis, fewer)
-    vhex = D == 2 ? sqrt(3) / 2 * spacing^2 : D == 3 ? spacing^3 / sqrt(2) : spacing^D
-    N = max(1, round(Int, sum(c -> G.meas[c], adm; init = 0.0) / vhex))
     nimg(p) = length(_orbit(S, _snap(S, p, dmin), 1e-6 * spacing))
-    sum(nimg, init; init = 0) > N && (init = _farthest_subset(init, N; count = nimg))
-    _farthest_fill!(init, G, S, filter(c -> fund(G.cen[c]), adm), N, spacing; count = nimg)
-    n0 = length(init)
-    # Lloyd steps, each followed by the separation of the centres closer than dmin (the number of holes is kept: in
-    # thin regions, a tube, Lloyd alone packs them closer than spacing); then the last separation
+    candf = filter(c -> fund(G.cen[c]), adm)
     Cadm = _Buckets(lo, hi, ρin, length(adm))
-    foreach(c -> _push!(Cadm, G.cen[c]), adm)
+    for c in adm; _push!(Cadm, G.cen[c]); end
     ρp = min(ρin, radius)
     dsep = dmin * (1 + 1e-2)
     tolm = 1e-6 * spacing
-    cs = init
-    for _ in 1:60
-      prev = copy(cs)
-      cs = first(_lloyd(cs, G, S, adm, spacing, dmin, 1))
-      _separate!(cs, G, S, dmin, dsep, K, R, Cadm, adm, ρp, tolm)
-      maximum(i -> sqrt(sum(abs2, cs[i] .- prev[i])), eachindex(cs); init = 0.0) < 0.05 * G.hmean && break
+    # N holes: the start thinned or completed by farthest points (the boundary layer the start leaves empty; a point
+    # gives as many holes as distinct images); Lloyd steps, each followed by the separation of the centres closer than
+    # dmin (Lloyd alone packs them closer in thin regions, a tube); then the last separation
+    relax(N) = begin
+      cs = copy(init)
+      sum(nimg, cs; init = 0) > N && (cs = _farthest_subset(cs, N; count = nimg))
+      _farthest_fill!(cs, G, S, candf, N, spacing; count = nimg)
+      for _ in 1:60
+        prev = copy(cs)
+        cs = first(_lloyd(cs, G, S, adm, spacing, dmin, 1))
+        _separate!(cs, G, S, dmin, dsep, K, R, Cadm, adm, ρp, tolm)
+        _maxmove(cs, prev) < 0.05 * G.hmean && break
+      end
+      _separate!(cs, G, S, dmin, dsep, K, R, Cadm, adm, ρp, tolm; sweeps = 200)
+      cs, _mean_nn(first(_images(cs, S, tolm)), lo, hi, spacing)
     end
-    worst = _separate!(cs, G, S, dmin, dsep, K, R, Cadm, adm, ρp, tolm; sweeps = 200)
-    @debug "hole_seed :cvt" N n0 holes = sum(nimg, cs; init = 0) worst
-    cs
+    if nholes !== nothing
+      first(relax(nholes))
+    else
+      # the number of holes for a mean distance to the nearest neighbour ≈ spacing: from the number of :hex over the
+      # admissible region (√3/2 s² per hole in 2D, s³/√2 in 3D), corrected with d̄ ∝ N^(-1/α): α = D at first, then
+      # α measured from the two runs (between 1, a slender part, and D)
+      vhex = D == 2 ? sqrt(3) / 2 * spacing^2 : D == 3 ? spacing^3 / sqrt(2) : spacing^D
+      Ns = [max(1, round(Int, sum(c -> G.meas[c], adm; init = 0.0) / vhex))]
+      runs = [relax(Ns[1])]
+      for pass in 1:2
+        d = last(runs[end])
+        abs(d / spacing - 1) <= 0.05 && break
+        α = pass == 1 || last(runs[1]) == last(runs[2]) || Ns[1] == Ns[2] ? Float64(D) :
+            clamp(log(Ns[2] / Ns[1]) / log(last(runs[1]) / last(runs[2])), 1.0, Float64(D))
+        Nn = max(1, round(Int, Ns[end] * (d / spacing)^α))
+        Nn in Ns && break
+        push!(Ns, Nn)
+        push!(runs, relax(Nn))
+      end
+      k = argmin([abs(last(q) / spacing - 1) for q in runs])
+      @debug "hole_seed :cvt" Ns dmean = last.(runs) chosen = k
+      first(runs[k])
+    end
   else
     ρj = jitter * (spacing - 2radius) / 2
     r = rng === nothing ? Random.Xoshiro(1) : rng
@@ -512,35 +675,60 @@ function _hole_centers(G, radius, spacing, pattern, margin, exclude, rng, origin
     if ρj > 0                                               # uniform in the ball of radius ρj (rejection)
       for i in eachindex(pts)
         while true
-          δ = ntuple(_ -> 2rand(r) - 1, D)
+          δ = ntuple(_ -> 2rand(r) - 1, Val(D))
           sum(abs2, δ) <= 1 || continue
-          pts[i] = pts[i] .+ ρj .* δ
+          pts[i] = _axpy(ρj, δ, pts[i])
           break
         end
       end
     end
     pts
   end
-  centers = last(_accept_orbits(pts, S, dmin, admissible, spacing, lo, hi))
+  _, centers, ndrop = _accept_orbits(pts, S, dmin, admissible, spacing, lo, hi)
+  pattern in (:hex, :lattice) && _check_lattice(pattern, S, lo, hi, spacing, origin, radius, ndrop, Val(D))
   centers, keep
 end
 
+# a warning when a symmetry does not map the lattice of :hex or :lattice onto itself (inside the box): the replicas
+# of the fundamental region then meet along seams where orbits closer than the distance between holes are dropped
+function _check_lattice(pattern, S, lo, hi, spacing, origin, radius, ndrop, ::Val{D}) where {D}
+  length(S.G) == 1 && return nothing
+  L = _lattice_points(pattern, lo, hi, spacing, origin, radius, Val(D))
+  B = _Buckets(lo, hi, spacing, length(L))
+  for p in L; _push!(B, p); end
+  tol2 = (1e-6 * spacing)^2
+  inbox(x) = all(k -> lo[k] - 1e-9spacing <= x[k] <= hi[k] + 1e-9spacing, 1:D)
+  for (k, g) in enumerate(S.gens)
+    bad = count(p -> inbox(p) && inbox(_apply(g, p)) && _nearest2(B, _apply(g, p)) > tol2, L)
+    bad > 0 &&
+      @warn "hole_seed: symmetry $k does not map the lattice of :$pattern onto itself ($bad lattice points without an " *
+            "image): the replicas meet along seams, where $ndrop orbits closer than the distance between holes were " *
+            "dropped and gaps are left. Choose origin so that the symmetry maps the lattice onto itself, or use " *
+            "pattern = :cvt"
+  end
+  nothing
+end
+
 # the orbits of the points, accepted whole (symmetric) in order if every point is admissible and at least dmin from
-# the others: the points kept (snapped) and all the centres
+# the others: the points kept (snapped), all the centres and the number of admissible orbits dropped for distance
 function _accept_orbits(pts, S, dmin, admissible, spacing, lo::NTuple{D,Float64}, hi) where {D}
   A = _Buckets(lo, hi, dmin, length(pts) * length(S.G))
   d2 = dmin^2 * (1 - 1e-9)
   kept, centers = NTuple{D,Float64}[], NTuple{D,Float64}[]
+  ndrop = 0
   for c in pts
     c = _snap(S, c, dmin)
     o = _orbit(S, c, 1e-6 * spacing)
     all(admissible, o) || continue
-    all(p -> _nearest2(A, p) >= d2, o) || continue
-    all(i -> all(j -> sum(abs2, o[i] .- o[j]) >= d2, i+1:length(o)), eachindex(o)) || continue
+    if !all(p -> _nearest2(A, p) >= d2, o) || !all(i -> all(j -> _d2(o[i], o[j]) >= d2, i+1:length(o)), eachindex(o))
+      # a duplicate of an accepted orbit (a point on the border of the fundamental region) is not a drop
+      any(p -> _nearest2(A, p) <= (1e-6 * spacing)^2, o) || (ndrop += 1)
+      continue
+    end
     push!(kept, c)
     foreach(p -> (_push!(A, p); push!(centers, p)), o)
   end
-  kept, centers
+  kept, centers, ndrop
 end
 
 # a warning when the mesh or the keep-out points are not symmetric (to the largest cell size)
@@ -548,9 +736,9 @@ function _check_symmetry(G, S, keep)
   length(S.G) == 1 && return nothing
   tol2 = G.hmax^2
   Cn = _Buckets(G.lo, G.hi, G.hmax, length(G.cen))
-  foreach(c -> _push!(Cn, c), G.cen)
+  for c in G.cen; _push!(Cn, c); end
   Kn = _Buckets(G.lo, G.hi, G.hmax, length(keep))
-  foreach(c -> _push!(Kn, c), keep)
+  for c in keep; _push!(Kn, c); end
   for (k, g) in enumerate(S.gens)
     nc = count(x -> _nearest2(Cn, _apply(g, x)) > tol2, G.cen)
     nk = count(x -> _nearest2(Kn, _apply(g, x)) > tol2, keep)
@@ -562,7 +750,7 @@ function _check_symmetry(G, S, keep)
   nothing
 end
 
-function _seed_args(V, radius, spacing, pattern, margin, width, jitter, rng, bounds; internal = false)
+function _seed_args(V, radius, spacing, pattern, margin, width, jitter, rng, bounds, nholes, min_distance; internal = false)
   (V isa TrialFESpace && num_dirichlet_dofs(V) > 0) &&
     throw(ArgumentError("hole_seed: give the test space (the one given to FieldVariable, with dirichlet_tags)"))
   lb, ub = Float64(bounds[1]), Float64(bounds[2])
@@ -578,40 +766,50 @@ function _seed_args(V, radius, spacing, pattern, margin, width, jitter, rng, bou
   (0 <= jitter < 1) || throw(ArgumentError("hole_seed: jitter must be in [0, 1), got $jitter"))
   (pattern in (:cvt, :poisson) && jitter > 0) &&
     throw(ArgumentError("hole_seed: jitter moves the holes of :hex and :lattice; for a random start use pattern = :cvt with rng"))
+  (nholes === nothing && min_distance === nothing) || pattern === :cvt ||
+    throw(ArgumentError("hole_seed: nholes and min_distance are options of pattern = :cvt (the lattices fix both)"))
+  nholes === nothing || (nholes isa Integer && nholes >= 1) ||
+    throw(ArgumentError("hole_seed: nholes must be a positive integer, got $nholes"))
+  min_distance === nothing || (isfinite(min_distance) && min_distance > 2radius) ||
+    throw(ArgumentError("hole_seed: min_distance ($min_distance) must be larger than 2 radius ($(2radius)): the holes would overlap"))
   r = rng === nothing ? (pattern === :poisson ? Random.Xoshiro(1) : nothing) :
       rng isa Integer ? Random.Xoshiro(rng) : rng isa Random.AbstractRNG ? rng :
       throw(ArgumentError("hole_seed: rng must be nothing, an integer seed or an AbstractRNG, got $(typeof(rng))"))
   lb, ub, r
 end
 
-function _seed_centers(V, G, radius, spacing, pattern, margin, exclude, r, origin, jitter, symmetry)
+function _seed_centers(G, radius, spacing, pattern, margin, exclude, r, origin, jitter, symmetry, nholes, min_distance)
   ex = _seed_tags(exclude)
   _check_tags(G.model, ex, "exclude")
   origin === nothing || length(origin) == G.D || throw(ArgumentError("hole_seed: origin must have $(G.D) coordinates"))
   S = _symmetry_group(symmetry, Val(G.D), maximum(G.hi .- G.lo))
-  centers, keep = _hole_centers(G, Float64(radius), Float64(spacing), pattern, Float64(margin), ex, r, origin, Float64(jitter), S)
+  centers, keep = _hole_centers(G, Float64(radius), Float64(spacing), pattern, Float64(margin), ex, r, origin, Float64(jitter), S,
+                                nholes, min_distance)
   _check_symmetry(G, S, keep)
   centers
 end
 
 """
     hole_centers(V; radius, spacing = 4radius, pattern = :hex, margin = radius, exclude = (), rng = nothing,
-                 origin = nothing, jitter = 0.0, symmetry = nothing) -> Vector{NTuple{D,Float64}}
+                 origin = nothing, jitter = 0.0, symmetry = nothing, nholes = nothing,
+                 min_distance = nothing) -> Vector{NTuple{D,Float64}}
 
 The centres of the holes that [`hole_seed`](@ref) places with the same arguments (not exported; for tests and
 plots). `pattern = :poisson` (internal) gives the random points at least `spacing` apart that start `:cvt` with `rng`.
 """
 function hole_centers(V; radius::Real, spacing::Real = 4radius, pattern::Symbol = :hex, margin::Real = radius,
-                      exclude = (), rng = nothing, origin = nothing, jitter::Real = 0.0, symmetry = nothing)
-  _, _, r = _seed_args(V, radius, spacing, pattern, margin, radius, jitter, rng, (-1.0, 1.0); internal = true)
+                      exclude = (), rng = nothing, origin = nothing, jitter::Real = 0.0, symmetry = nothing,
+                      nholes = nothing, min_distance = nothing)
+  _, _, r = _seed_args(V, radius, spacing, pattern, margin, radius, jitter, rng, (-1.0, 1.0), nholes, min_distance; internal = true)
   G = _seed_geometry(V)
-  _seed_centers(V, G, radius, spacing, pattern, margin, exclude, r, origin, jitter, symmetry)
+  _seed_centers(G, radius, spacing, pattern, margin, exclude, r, origin, jitter, symmetry, nholes, min_distance)
 end
 
 """
     hole_seed(V; radius, spacing = 4radius, pattern = :hex, margin = radius, exclude = (), connect = exclude,
               base = nothing, bounds = (-1.0, 1.0), width = radius, frozen = nothing, rng = nothing, origin = nothing,
-              jitter = 0.0, symmetry = nothing, verbose = false) -> Vector{Float64}
+              jitter = 0.0, symmetry = nothing, nholes = nothing, min_distance = nothing,
+              verbose = false) -> Vector{Float64}
 
 The free values of a design field with holes: the `init` of [`FieldVariable`](@ref) (same space `V`, same `bounds`,
 same `frozen`):
@@ -634,27 +832,32 @@ Holes of radius `radius` (a length, in the units of the mesh) about `spacing` ap
   of the bounding box of the mesh: staggered rows `√3/2 spacing` apart in 2D (the seeds of Takezawa et al.),
   face-centred cubic in 3D. `jitter ∈ [0, 1)` moves each centre at random (`rng`, seed 1 if not given) inside a ball
   of radius `jitter (spacing − 2radius)/2`, so that two holes never touch (the solid between them is at least
-  `(1 − jitter)(spacing − 2radius)`).
+  `(1 − jitter)(spacing − 2radius)`); the sequence of Julia's generators may change between versions of Julia, so a
+  reference saved with `jitter` may change too.
 - `pattern = :lattice`: square (cubic) lattice of step `spacing`, symmetric in the bounding box (with `jitter` too).
 - `pattern = :cvt`: a centroidal Voronoi tessellation of the cells where a hole may go (Lloyd's relaxation): the
-  centres spread evenly over any geometry, away from the excluded zones. The number of holes is that of `:hex` with
-  the same `spacing` over that region (its measure over `√3/2 spacing²` in 2D, `spacing³/√2` in 3D), so `spacing` sets
-  the density, and neighbours are about `spacing` apart in the bulk. Guaranteed: neighbours at least
-  `2radius + (spacing − 2radius)/2` apart (half the solid of `:hex` between two holes). After each Lloyd step the
-  centres closer than that are pushed apart, so that the number of holes is kept where Lloyd alone would pack them
-  closer (slender parts: a tube a few `spacing` thick); an orbit is dropped only where the minimum cannot be met
-  (parts thinner than about `spacing`). It starts from the centres of `:hex` (deterministic) or, with `rng` (an
-  integer seed or an `AbstractRNG`), from random points at least `spacing` apart, thinned or completed by farthest
-  points to that number; at most 60 Lloyd steps, until no centre moves more than 5 % of the mean cell size. Its
+  centres spread evenly over any geometry, away from the excluded zones. `spacing` is the mean distance from a centre
+  to its nearest neighbour (within 5 % where the number of holes allows it): the number of holes starts as that of
+  `:hex` with the same `spacing` over that region (its measure over `√3/2 spacing²` in 2D, `spacing³/√2` in 3D), the
+  mean distance is measured after the relaxation and the number corrected, at most twice (up to three relaxations;
+  the closest run is kept). Slender parts get fewer holes than their measure suggests (a tube 1.5 `spacing` thick:
+  half). `nholes` fixes the number of holes instead (images of a symmetry included; one relaxation). Neighbours are
+  at least `min_distance` apart (default `2radius + (spacing − 2radius)/2`, half the solid of `:hex` between two
+  holes; it must exceed `2radius`): after each Lloyd step the centres closer than that are pushed apart, and an orbit
+  is dropped only where the minimum cannot be met. It starts from the centres of `:hex` (deterministic) or, with `rng`
+  (an integer seed or an `AbstractRNG`), from random points at least `spacing` apart, thinned or completed by farthest
+  points; at most 60 Lloyd steps per relaxation, until no centre moves more than 5 % of the mean cell size. Its
   centres are inside the region (near a centroid of a cell where a hole may go), not cut by the boundary as those of
-  `:hex` may be: on a slender part `:hex` keeps more holes than `:cvt`, many of them cut. The sequence of Julia's
-  generators may change between versions of Julia: give references without `rng`.
+  `:hex` may be. The sequence of Julia's generators may change between versions of Julia: give references without
+  `rng`. `nholes` and `min_distance` are options of `:cvt` only.
 
 `origin` (`:hex`, `:lattice`, and the start of `:cvt`) is a point of the lattice. A hole is kept when the centroid of
 some cell is inside it (meshes that do not fill their bounding box), and holes cut by the boundary are kept (a
 periodic pattern); to keep them inside, exclude the boundary tag. The holes keep `radius + margin` from the vertices
 of the **frozen zones of `V`** (cells whose values are all Dirichlet values: read from `V`, nothing to give) and of
-the tags in `exclude` (loads, supports), so that the solid is at least `margin` thick there.
+the tags in `exclude` (loads, supports), so that the solid is at least `margin` thick there. The distance is measured
+to the vertices of those cells and tags: between two vertices `h` apart the distance to the entity can be up to
+`R − √(R² − h²/4)` shorter (`R = radius + margin`; 3 % of `R` with `h = R/2`), which matters only on coarse meshes.
 
 `symmetry`: one symmetry or a tuple of them, each a named tuple: `(point = p, normal = n)` a reflection in the plane
 (line in 2D) through `p` normal to `n`; `(point = p, order = n)` a rotation of order `n` about `p` in 2D and
@@ -662,7 +865,11 @@ the tags in `exclude` (loads, supports), so that the solid is at least `margin` 
 region of the group they generate and replicated: the centres are exactly symmetric, a centre closer to a plane (or
 an axis) than the distance between holes goes onto it, and every replica keeps the distance between holes and the
 margins (an orbit that does not is dropped whole). The geometry, the frozen zones and the excluded tags must be
-symmetric too: a warning says so when the mesh (to the largest cell size) or the keep-out points are not.
+symmetric too: a warning says so when the mesh (to the largest cell size) or the keep-out points are not. With
+`:hex` and `:lattice` the symmetry should also map the lattice onto itself (the planes of the default lattices through
+the centre of the box, rotations of order 2 about it, and of order 4 for `:lattice`; `origin` moves the lattice): if
+it does not, the replicas meet along seams where orbits are dropped and gaps are left, and a warning says how many;
+`:cvt` has no such seams.
 ```julia
 hole_seed(Vφ; radius = 0.05, spacing = 0.2, symmetry = (point = (1.0, 0.5), normal = (0.0, 1.0)))   # y = 0.5
 hole_seed(Vt; radius = 0.1, pattern = :cvt, symmetry = (point = (0, 0, 0), axis = (0, 0, 1), order = 4))
@@ -673,7 +880,8 @@ level `(lb + ub)/2` at `d = radius` and `ub` at `d = radius + width` (linear in 
 level set in `(-1, 1)`, a density in `(0, 1)` with `0.5` on the edge of the holes), and is then the minimum with
 `base` (default `ub`; a number, a vector of free values or a function of the coordinates).
 
-Checks: an `ArgumentError` when no hole fits or no value of the field falls inside a hole; warnings when some holes
+Checks: an `ArgumentError` when no hole fits, no value of the field falls inside a hole or every value is below the
+level (all void); warnings when more than half of the values are below the level, when some holes
 contain no value of the field (the mesh does not resolve them: refine or enlarge them), when the solid between two
 holes is thinner than two cells, and when the solid (the cells whose mean value is at least the level, the frozen
 cells with the values `frozen`, by default `ub`) does not join the tags of `connect` (by default `exclude`;
@@ -685,60 +893,48 @@ Void fraction of a periodic pattern with `spacing = 4radius`: `:hex` 23 % in 2D 
 (`spacing ≈ L_min/4`). A pattern of cosines (Oka, Misawa, Yamada) is one line of the user,
 `init = x -> clamp(-cos(2π x[1]/s) * cos(2π x[2]/s) + c, -1, 1)`, without the margins.
 
-P0 and P1 Lagrangian spaces (and other scalar Lagrangian spaces: the values sit at the nodes), any mesh in 2D and 3D,
-with periodic conditions too; the cost is linear in the cells and the values (a few microseconds per value; `:cvt`
-that times its Lloyd steps). Sequential (not for distributed spaces yet).
+P0 and P1 Lagrangian spaces (and other scalar Lagrangian spaces: the values sit at the nodes), any mesh in 2D and 3D.
+With periodic conditions the pattern is not periodic: the distance between holes is not kept across the periodic
+sides. The cells of the model outside the triangulation of `V` (a design space on part of the model) count as solid
+in the check of `connect`. The cost is linear in the cells and the values (a few microseconds per value; `:cvt`
+that times its Lloyd steps, up to three relaxations). Sequential (not for distributed spaces yet).
 """
 function hole_seed(V; radius::Real, spacing::Real = 4radius, pattern::Symbol = :hex, margin::Real = radius,
                    exclude = (), connect = exclude, base = nothing, bounds = (-1.0, 1.0), width::Real = radius,
                    frozen = nothing, rng = nothing, origin = nothing, jitter::Real = 0.0, symmetry = nothing,
-                   verbose::Bool = false)
-  lb, ub, r = _seed_args(V, radius, spacing, pattern, margin, width, jitter, rng, bounds)
+                   nholes = nothing, min_distance = nothing, verbose::Bool = false)
+  lb, ub, r = _seed_args(V, radius, spacing, pattern, margin, width, jitter, rng, bounds, nholes, min_distance)
   radius, spacing, margin, width, jitter = Float64.((radius, spacing, margin, width, jitter))
   G = _seed_geometry(V)
-  D = G.D
   _check_tags(G.model, _seed_tags(exclude), "exclude")
   co = _seed_tags(connect)
   _check_tags(G.model, co, "connect")
   hmean = G.hmean
-  ligament = pattern === :cvt ? (spacing - 2radius) / 2 : (1 - jitter) * (spacing - 2radius)
+  ligament = pattern === :cvt ? (min_distance === nothing ? (spacing - 2radius) / 2 : min_distance - 2radius) :
+             (1 - jitter) * (spacing - 2radius)
   ligament >= 2hmean ||
     @warn "hole_seed: the solid between two holes ($(round(ligament, sigdigits = 3))) is thinner than two cells (mean cell size $(round(hmean, sigdigits = 3)))"
-  centers = _seed_centers(V, G, radius, spacing, pattern, margin, exclude, r, origin, jitter, symmetry)
+  centers = _seed_centers(G, radius, spacing, pattern, margin, exclude, r, origin, jitter, symmetry, nholes, min_distance)
   isempty(centers) &&
     throw(ArgumentError("hole_seed: no hole fits (a centroid of a cell inside each hole, radius + margin = $(radius + margin) " *
                         "from the frozen zones and the excluded tags)"))
-  # the coordinates of the free values by interpolation: P0, P1, any numbering
   n = num_free_dofs(V)
-  xs = ntuple(k -> get_free_dof_values(interpolate(x -> x[k], V)), D)
-  B = _Buckets(G.lo, G.hi, radius + width, length(centers))
-  foreach(c -> _push!(B, c), centers)
   bv = base === nothing ? nothing : base isa Number ? nothing : base isa AbstractVector ? base :
        get_free_dof_values(interpolate(base, V))
   bv === nothing || length(bv) == n ||
     throw(DimensionMismatch("hole_seed: base has $(length(bv)) values, the space has $n free values"))
   b0 = base isa Number ? Float64(base) : ub
-  φ = Vector{Float64}(undef, n)
-  @inbounds for i in 1:n
-    x = ntuple(k -> xs[k][i], D)
-    d2 = _nearest2(B, x)
-    s = d2 == Inf ? 1.0 : clamp((sqrt(d2) - radius) / width, -1.0, 1.0)
-    v = lb + (ub - lb) * (s + 1) / 2
-    φ[i] = clamp(min(bv === nothing ? b0 : Float64(bv[i]), v), lb, ub)
-  end
+  φ, nin, empty = _seed_values(V, G, G.dim, centers, radius, width, lb, ub, bv, b0)
   level = (lb + ub) / 2
-  # holes without any value of the field inside
-  E = _Buckets(G.lo, G.hi, radius, n)
-  nin = 0
-  for i in 1:n
-    x = ntuple(k -> xs[k][i], D)
-    _nearest2(B, x) < radius^2 || continue
-    nin += 1
-    _push!(E, x)
-  end
   nin > 0 || throw(ArgumentError("hole_seed: no value of the field falls inside a hole (radius = $radius, mean cell " *
                                  "size $(round(hmean, sigdigits = 3))): refine the mesh or enlarge the holes"))
-  empty = count(c -> _nearest2(E, c) >= radius^2, centers)
+  nvoid = count(<(level), φ)
+  nvoid < n || throw(ArgumentError("hole_seed: every value of the field is below the level (all void): the holes " *
+                                   "cover the domain (radius = $radius, spacing = $spacing, lengths in the units of " *
+                                   "the mesh): reduce radius or enlarge spacing"))
+  nvoid <= n / 2 ||
+    @warn "hole_seed: $(round(100nvoid / n, digits = 1)) % of the values are below the level (more void than solid): " *
+          "check radius and spacing (radius = $radius, spacing = $spacing, lengths in the units of the mesh)"
   empty > 0 &&
     @warn "hole_seed: $empty of $(length(centers)) holes contain no value of the field (radius = $radius, mean cell size $(round(hmean, sigdigits = 3))): refine the mesh or enlarge the holes"
   connected = true
@@ -746,9 +942,37 @@ function hole_seed(V; radius::Real, spacing::Real = 4radius, pattern::Symbol = :
     connected, why = _solid_connects(V, G, φ, level, frozen === nothing ? ub : frozen, co)
     connected || @warn "hole_seed: the solid of the seed does not join the tags $(join(co, ", ")): $why"
   end
-  verbose && @info "hole_seed: $(length(centers)) holes ($pattern), $(round(100count(<(level), φ) / n, digits = 1)) % of " *
+  verbose && @info "hole_seed: $(length(centers)) holes ($pattern), $(round(100nvoid / n, digits = 1)) % of " *
                    "the values below the level" * (isempty(co) ? "" : connected ? ", connected" : ", not connected")
   φ
+end
+
+# The values (a function barrier: D from the type of the centres). The coordinates of the free values by interpolation
+# (P0, P1, any numbering); the number of values inside the holes and the number of holes without any.
+function _seed_values(V, G, ::Val{D}, centers, radius, width, lb, ub, bv, b0) where {D}
+  n = num_free_dofs(V)
+  xs = ntuple(k -> collect(Float64, get_free_dof_values(interpolate(x -> x[k], V)))::Vector{Float64}, Val(D))
+  B = _Buckets(G.lo, G.hi, radius + width, length(centers))
+  for c in centers; _push!(B, c); end
+  φ = Vector{Float64}(undef, n)
+  @inbounds for i in 1:n
+    x = ntuple(k -> xs[k][i], Val(D))
+    d2 = _nearest2(B, x)
+    s = d2 == Inf ? 1.0 : clamp((sqrt(d2) - radius) / width, -1.0, 1.0)
+    v = lb + (ub - lb) * (s + 1) / 2
+    φ[i] = clamp(min(bv === nothing ? b0 : Float64(bv[i]), v), lb, ub)
+  end
+  # holes without any value of the field inside
+  E = _Buckets(G.lo, G.hi, radius, n)
+  nin = 0
+  @inbounds for i in 1:n
+    x = ntuple(k -> xs[k][i], Val(D))
+    _nearest2(B, x) < radius^2 || continue
+    nin += 1
+    _push!(E, x)
+  end
+  empty = count(c -> _nearest2(E, c) >= radius^2, centers)
+  φ, nin, empty
 end
 
 # The cells whose mean value is ≥ level are solid; two solid cells are joined if they share a face of dimension D − 1
@@ -764,8 +988,10 @@ function _solid_connects(V, G, φ, level, frozen, tags)
   end
   t2m === nothing && return true, ""        # not reached for the triangulations of a model and of its parts
   dv = (frozen isa Number || num_dirichlet_dofs(V) == 0) ? nothing : get_dirichlet_dof_values(TrialFESpace(V, frozen))
-  solid = falses(ncm)
-  for (c, cell) in enumerate(G.ids)
+  solid = trues(ncm)                         # cells of the model outside the triangulation of V: solid (not design)
+  ci = Gridap.Arrays.array_cache(G.ids)
+  for c in 1:length(G.ids)
+    cell = Gridap.Arrays.getindex!(ci, G.ids, c)
     s = 0.0
     for d in cell
       s += d > 0 ? φ[d] : dv === nothing ? Float64(frozen) : dv[-d]
@@ -774,6 +1000,7 @@ function _solid_connects(V, G, φ, level, frozen, tags)
   end
   c2f = Gridap.Geometry.get_faces(topo, D, D - 1)
   f2c = Gridap.Geometry.get_faces(topo, D - 1, D)
+  cc2f, cf2c = Gridap.Arrays.array_cache(c2f), Gridap.Arrays.array_cache(f2c)
   comp = zeros(Int, ncm)
   ncomp = 0
   stack = Int[]
@@ -784,7 +1011,7 @@ function _solid_connects(V, G, φ, level, frozen, tags)
     push!(stack, c0)
     while !isempty(stack)
       c = pop!(stack)
-      for f in c2f[c], c2 in f2c[f]
+      for f in Gridap.Arrays.getindex!(cc2f, c2f, c), c2 in Gridap.Arrays.getindex!(cf2c, f2c, f)
         (solid[c2] && comp[c2] == 0) || continue
         comp[c2] = ncomp
         push!(stack, c2)
