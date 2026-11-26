@@ -5,7 +5,7 @@ using HyperShape
 using HyperShape.Variables: get_values, set_values!, set_beta!
 using HyperShape.Operators: num_solves
 using HyperShape.Optimizers: FunctionOracle, OC, SiMPL, init, step!, shrink!
-using HyperShape.Methods: FunctionalOracle, _setup_constraint!, OptHistory, _record!, _stop_reason
+using HyperShape.Methods: FunctionalOracle, _setup_constraint!, OptHistory, _record!, _stop_reason, _stop_check
 using LinearAlgebra
 using Test
 
@@ -1020,19 +1020,55 @@ same_history(a, b) = all(isequal(getproperty(a, c), getproperty(b, c)) for c in 
       rec!(f)
     end
     @test _stop_reason(st, info(), h, 0) === :objective_range
-    # an objective tending to zero: floor 1e-3 |f₁|; a negative objective
+    # an objective tending to zero: the range relative to the window does not stop it (no floor from the first
+    # objective); objective_atol does
     h0 = OptHistory(10, ())
     for f in (1.0, 1e-6, 0.8e-6, 0.6e-6, 0.5e-6)
       _record!(h0, (h0.n + 1, f, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1), (), (), (), ())
     end
-    @test _stop_reason(StopCriteria(objective_range = 1e-3, window = 4), info(), h0, 0) === :objective_range
-    # a huge first objective: the floor 1e-3 |f₁| hides a range of 3.5e-3 above the tolerance (the false stop of the
-    # double well from the seed of Takezawa on 400 × 200); the correction of the floor is a separate change
+    @test _stop_reason(StopCriteria(objective_range = 1e-3, window = 4), info(), h0, 0) === nothing
+    @test _stop_reason(StopCriteria(objective_range = 1e-3, window = 4, objective_atol = 1e-6), info(), h0, 0) === :objective_range
+    @test _stop_reason(StopCriteria(objective_range = 1e-3, window = 4, objective_atol = 1e-7), info(), h0, 0) === nothing
+    # a window of zeros meets the relative range (no division)
+    hz = OptHistory(10, ())
+    for f in (1.0, 0.0, 0.0, 0.0, 0.0)
+      _record!(hz, (hz.n + 1, f, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1), (), (), (), ())
+    end
+    @test _stop_reason(StopCriteria(objective_range = 1e-3, window = 4), info(), hz, 0) === :objective_range
+    @test _stop_reason(StopCriteria(objective_range = 1e-3, window = 5), info(), hz, 0) === nothing   # 1.0 in the window
+    # a huge first objective does not hide a range of 3.5e-3 above the tolerance (the false stop of the double well
+    # from the seed of Takezawa on 400 × 200, caused by the former floor 1e-3 |f₁|)
     hb = OptHistory(20, ())
     for f in (3.16e5, (25.0 .+ 0.0875 .* (0:9) ./ 9)...)
       _record!(hb, (hb.n + 1, f, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1), (), (), (), ())
     end
-    @test_broken _stop_reason(StopCriteria(objective_range = 1e-3, window = 10), info(), hb, 0) === nothing
+    @test _stop_reason(StopCriteria(objective_range = 1e-3, window = 10), info(), hb, 0) === nothing
+    @test _stop_reason(StopCriteria(objective_range = 4e-3, window = 10), info(), hb, 0) === :objective_range
+    @test _stop_reason(StopCriteria(objective_range = 1e-3, window = 10, objective_atol = 0.1), info(), hb, 0) === :objective_range
+    # the same with combine = :all (the windows with the constraints met: streak)
+    sall = StopCriteria(objective_range = 1e-3, window = 10, combine = :all)
+    @test _stop_check(sall, info(), hb, 0, nothing, nothing, 10) === nothing
+    @test _stop_check(StopCriteria(objective_range = 4e-3, window = 10, combine = :all), info(), hb, 0, nothing, nothing, 10) === :all
+    @test _stop_check(StopCriteria(objective_range = 1e-3, window = 10, combine = :all, objective_atol = 0.1),
+                      info(), hb, 0, nothing, nothing, 10) === :all
+    @test _stop_check(StopCriteria(objective_range = 1e-3, window = 10, combine = :all, objective_atol = 0.1),
+                      info(), hb, 0, nothing, nothing, 9) === nothing                           # streak shorter than the window
+    @test _stop_check(StopCriteria(objective_range = 1e-3, window = 4, combine = :all), info(), hz, 0, nothing, nothing, 4) === :all
+    # objective_atol: positive, only with objective_range; the positional forms of before
+    @test_throws ArgumentError StopCriteria(objective_range = 1e-3, objective_atol = 0.0)
+    @test_throws ArgumentError StopCriteria(objective_range = 1e-3, objective_atol = -1.0)
+    @test_throws ArgumentError StopCriteria(objective_atol = 1e-6)
+    @test_throws ArgumentError StopCriteria(kkt_tol = 1e-3, objective_atol = 1e-6)
+    s14 = StopCriteria(1e-3, 10, nothing, nothing, nothing, nothing, nothing, nothing, nothing, 5, 1e-2, 5, :all, nothing)
+    @test s14 isa StopCriteria && s14.objective_atol === nothing && s14.material_tol == 1e-2 && s14.combine === :all
+    s15 = StopCriteria(1e-3, 10, nothing, nothing, nothing, nothing, nothing, nothing, nothing, 5, nothing, 5, :any, nothing, 1e-8)
+    @test s15.objective_atol === 1e-8
+    @test HyperShape.Methods._without_material(StopCriteria(objective_range = 1e-3, material_tol = 1e-2, objective_atol = 1e-8)).objective_atol === 1e-8
+    # the banner
+    @test HyperShape.Methods._describe_stop(StopCriteria(objective_range = 1e-3)) ==
+          "relative objective range < 0.001 over 10 iterations"
+    @test HyperShape.Methods._describe_stop(StopCriteria(objective_range = 1e-3, objective_atol = 1e-8)) ==
+          "relative objective range < 0.001 or < 1.0e-8 absolute over 10 iterations"
     hn = OptHistory(10, ())
     for f in (-1.0, -2.0, -2.0005, -2.0004)
       _record!(hn, (hn.n + 1, f, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1), (), (), (), ())

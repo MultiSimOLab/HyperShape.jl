@@ -27,16 +27,20 @@ RejectStep(; shrink = 0.5, max_attempts = 5) = RejectStep(shrink, max_attempts)
     StopCriteria(; objective_range = nothing, window = 10, kkt_tol = nothing, kkt_rtol = nothing,
                  stationarity_tol = nothing, stationarity_rtol = nothing, change_tol = nothing, rate_tol = nothing,
                  phase_tol = nothing, phase_window = 5, material_tol = nothing, material_window = 5, combine = :any,
-                 grey_tol = nothing)
+                 grey_tol = nothing, objective_atol = nothing)
 
 Convergence criteria; each one is off unless given, and the first one met stops the optimisation (the reason in
 [`OptResult`](@ref) is the name of the keyword). With a [`Continuation`](@ref) they only act in the last stage, unless
 it was built with `close_early = true` (then a criterion met in an earlier stage ends that stage).
 
 - `objective_range`: range of the objective over the last `window` iterations of the current stage, `(max - min)`,
-  relative to `max(largest |f| in the window, 1e-3 |f₁|)` (`f₁` the objective of the first iteration of the run, so an
-  objective that tends to zero still converges), below this value. A range, not the difference between the ends of
-  the window, so an oscillation does not pass for convergence.
+  relative to the largest `|f|` in the window, below this value: `max - min <= objective_range * maximum(abs, window)`
+  (no division: a window of zeros meets it). A range, not the difference between the ends of the window, so an
+  oscillation does not pass for convergence. The reference is the window alone, not the first objective of the run:
+  a run whose first objective is much larger than the final one (a seed with holes over the supports) is not stopped
+  early. An objective that tends to zero may never meet a relative range: give `objective_atol` too.
+- `objective_atol`: only together with `objective_range`: the criterion is also met when the range of the window is
+  below this absolute value (units of the scaled objective), for objectives that tend to zero. Off by default.
 - `kkt_tol`: optimality measure of the optimiser below this value (absolute: units of the scaled objective).
   `kkt_rtol`: the same, relative to the one of the first iteration of the run (off if that one is not a positive
   number). Only with optimisers that compute it (SiMPL; with OC `solve!` throws before the first iteration).
@@ -91,22 +95,33 @@ struct StopCriteria
   material_window::Int
   combine::Symbol
   grey_tol::Union{Nothing,Float64}
+  objective_atol::Union{Nothing,Float64}
   function StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol,
-                        rate_tol, phase_tol, phase_window, material_tol, material_window, combine, grey_tol)
+                        rate_tol, phase_tol, phase_window, material_tol, material_window, combine, grey_tol, objective_atol)
     for (k, v) in ((:objective_range, objective_range), (:kkt_tol, kkt_tol), (:kkt_rtol, kkt_rtol),
                    (:stationarity_tol, stationarity_tol), (:stationarity_rtol, stationarity_rtol), (:change_tol, change_tol),
-                   (:rate_tol, rate_tol), (:phase_tol, phase_tol), (:material_tol, material_tol), (:grey_tol, grey_tol))
+                   (:rate_tol, rate_tol), (:phase_tol, phase_tol), (:material_tol, material_tol), (:grey_tol, grey_tol),
+                   (:objective_atol, objective_atol))
       v === nothing || v > 0 || throw(ArgumentError("StopCriteria: $k must be positive"))
     end
+    objective_atol === nothing || objective_range !== nothing ||
+      throw(ArgumentError("StopCriteria: objective_atol only acts together with objective_range"))
     window >= 2 || throw(ArgumentError("StopCriteria: window must be at least 2"))
     phase_window >= 1 || throw(ArgumentError("StopCriteria: phase_window must be at least 1"))
     material_window >= 1 || throw(ArgumentError("StopCriteria: material_window must be at least 1"))
     combine in (:any, :all) || throw(ArgumentError("StopCriteria: combine must be :any or :all"))
     f(v) = v === nothing ? nothing : Float64(v)
     new(f(objective_range), Int(window), f(kkt_tol), f(kkt_rtol), f(stationarity_tol), f(stationarity_rtol), f(change_tol),
-        f(rate_tol), f(phase_tol), Int(phase_window), f(material_tol), Int(material_window), combine, f(grey_tol))
+        f(rate_tol), f(phase_tol), Int(phase_window), f(material_tol), Int(material_window), combine, f(grey_tol),
+        f(objective_atol))
   end
 end
+
+# the positional form of the fourteen criteria of before (without objective_atol)
+StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol, rate_tol,
+             phase_tol, phase_window, material_tol, material_window, combine, grey_tol) =
+  StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol, rate_tol,
+               phase_tol, phase_window, material_tol, material_window, combine, grey_tol, nothing)
 
 # the positional form of the thirteen criteria of before (without grey_tol)
 StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol, rate_tol,
@@ -121,9 +136,9 @@ StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stati
 
 StopCriteria(; objective_range = nothing, window = 10, kkt_tol = nothing, kkt_rtol = nothing, stationarity_tol = nothing,
              stationarity_rtol = nothing, change_tol = nothing, rate_tol = nothing, phase_tol = nothing, phase_window = 5,
-             material_tol = nothing, material_window = 5, combine = :any, grey_tol = nothing) =
+             material_tol = nothing, material_window = 5, combine = :any, grey_tol = nothing, objective_atol = nothing) =
   StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol, rate_tol,
-               phase_tol, phase_window, material_tol, material_window, combine, grey_tol)
+               phase_tol, phase_window, material_tol, material_window, combine, grey_tol, objective_atol)
 
 """
     material_change(opt::Optimizer, state) -> Float64
@@ -154,7 +169,7 @@ stop_allowed(::Optimizer, state, k) = true
 # the default stop without the change of the material (no meter): the constraints and the objective range
 _without_material(s::StopCriteria) =
   StopCriteria(s.objective_range, s.window, s.kkt_tol, s.kkt_rtol, s.stationarity_tol, s.stationarity_rtol, s.change_tol,
-               s.rate_tol, s.phase_tol, s.phase_window, nothing, s.material_window, s.combine, s.grey_tol)
+               s.rate_tol, s.phase_tol, s.phase_window, nothing, s.material_window, s.combine, s.grey_tol, s.objective_atol)
 
 """
     phase_change(opt::Optimizer, state) -> Float64
@@ -795,10 +810,7 @@ _stop_reason(stop::StopCriteria, info::StepInfo, hist::OptHistory, stage_start) 
 function _stop_check(stop::StopCriteria, info::StepInfo, hist::OptHistory, stage_start, phase, material, streak, grey = NaN)
   stop.combine === :all && return _stop_all(stop, info, hist, stage_start, phase, material, streak, grey)
   if stop.objective_range !== nothing && hist.n - stage_start >= stop.window
-    w = view(hist.objective, hist.n-stop.window+1:hist.n)
-    lo, hi = extrema(w)
-    d = max(maximum(abs, w), 1e-3 * abs(hist.objective[1]))   # an objective tending to zero: floor from the first
-    (hi - lo) <= stop.objective_range * d && return :objective_range
+    _objective_steady(stop, hist) && return :objective_range
   end
   hist.n - stage_start >= 2 || return nothing   # the first iteration of a stage (restoration after a jump)
   stop.kkt_tol !== nothing && info.kkt < stop.kkt_tol && return :kkt_tol
@@ -821,6 +833,15 @@ end
 _stop_reason(::Nothing, info, hist, stage_start) = nothing
 _stop_check(::Nothing, info, hist, stage_start, phase, material, streak, grey = NaN) = nothing
 
+# objective_range: the range of the last `window` objectives relative to their largest |f| (no division: a window of
+# zeros meets it), or below objective_atol when given
+function _objective_steady(stop::StopCriteria, hist::OptHistory)
+  w = view(hist.objective, hist.n-stop.window+1:hist.n)
+  lo, hi = extrema(w)
+  r = hi - lo
+  r <= stop.objective_range * maximum(abs, w) || (stop.objective_atol !== nothing && r < stop.objective_atol)
+end
+
 # the last w values of v (a window) all below tol
 _window_below(v, w, tol) = v !== nothing && length(v) >= w && all(<(tol), view(v, length(v)-w+1:length(v)))
 
@@ -830,9 +851,7 @@ function _stop_all(stop::StopCriteria, info, hist, stage_start, phase, material,
   hist.n - stage_start >= 2 || return nothing
   if stop.objective_range !== nothing
     (hist.n - stage_start >= stop.window && streak >= stop.window) || return nothing
-    w = view(hist.objective, hist.n-stop.window+1:hist.n)
-    lo, hi = extrema(w)
-    (hi - lo) <= stop.objective_range * max(maximum(abs, w), 1e-3 * abs(hist.objective[1])) || return nothing
+    _objective_steady(stop, hist) || return nothing
   end
   stop.kkt_tol === nothing || info.kkt < stop.kkt_tol || return nothing
   stop.stationarity_tol === nothing || info.stationarity < stop.stationarity_tol || return nothing

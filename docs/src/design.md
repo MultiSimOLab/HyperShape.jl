@@ -342,7 +342,8 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
   jump; the optimisation only stops in the last stage.
 - **Stopping:** `maxiter` is mandatory. `stop` defaults to `StopCriteria(objective_range = 1e-3)` for OC and SiMPL
   (`default_stop`; `ReactionDiffusion`: material, objective and constraints, below): the range of the objective over the last 10 iterations of the last stage, relative to the
-  objective, below 0.1 %. With a tanh projection `change_tol` and `kkt_tol` are rarely reached; the objective settles
+  largest `|f|` of that window, below 0.1 % (no reference to the first objective of the run, whose value may be far
+  from the final one; an objective that tends to zero needs `objective_atol`, an absolute tolerance on the range). With a tanh projection `change_tol` and `kkt_tol` are rarely reached; the objective settles
   (half MBB beam 150×50: OC with adaptive move limits stops at iteration 214, 0.4 % above its value at 500 iterations; SiMPL at 210, within 0.3 % of 350 iterations). Other criteria:
   `kkt_tol`, `kkt_rtol` (relative to the first iteration), `stationarity_tol`, `stationarity_rtol` (the measure
   `‖z − P(z − g)‖_M` of the SiMPL paper, computed by OC and SiMPL at the design before each step and shown in the
@@ -560,12 +561,13 @@ The whole script is `examples/bridge_dw.jl`; `validation/bridge_takezawa.jl` rep
   from the iteration after the settling (or from the start with one substep, or with `settle = false`).
   `solve!(…; stop)` replaces it and is not held. The early stops of the study (400 × 200 and 800 × 400 from the seed
   of Takezawa, iterations 49–53) were not an interface stuck with the windows met: on 400 × 200 (iteration 53) the
-  relative range of the objective over the window was 3.5e-3, above `1e-3`, but `objective_range` measures it against `max(max|f|, 1e-3 |f₁|)`, and the first
-  objective of those runs is huge (holes of the seed over the supports: `f₁ ≈ 3e5`, floor 315 for `J ≈ 25`). The
-  settling uses the range without that floor, so the hold of the default stop masks the false stop on the default
-  path; it remains with `settle = false`, with one substep from the start and with a `stop` of the user. The floor
-  is common to every method and will be corrected in a separate change. Measured (Validation page): the
-  bridge 200 × 100 from `:hex` settles at 74 and stops at 75 (J 23.90; from the seed of Takezawa 72 and 77, J 23.67), the cantilever 200 × 100 at 74 and 75 (J 2.493).
+  relative range of the objective over the window was 3.5e-3, above `1e-3`, but `objective_range` then measured it
+  against `max(max|f|, 1e-3 |f₁|)`, and the first objective of those runs is huge (holes of the seed over the
+  supports: `f₁ ≈ 3e5`, a floor of 315 for `J ≈ 25`). That floor, common to every method, has been removed: the range
+  is relative to the window alone (`objective_atol` covers objectives that tend to zero). It also caused the stops at
+  77 and 93 documented before (bridge 200 × 100 and the 400 × 200 case above with the hold, both from the seed of
+  Takezawa). Measured (Validation page): the bridge 200 × 100 from `:hex` settles at 74 and stops at 75 (J 23.90; from
+  the seed of Takezawa 72 and 82, J 23.67), the cantilever 200 × 100 at 74 and 75 (J 2.493).
 - **Grey:** `StopCriteria(grey_tol)` stops on the measure of grey `Σᵢ mᵢ 4φ̂ᵢ(1 − φ̂ᵢ)/|D|` (nodal, without
   allocations); with the well it stays at 1–3 % (the interface), so it is a criterion for a refinement stage, not for
   the evolution from the seed.
