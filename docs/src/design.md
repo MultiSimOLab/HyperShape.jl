@@ -522,7 +522,9 @@ The whole script is `examples/bridge_dw.jl`; `validation/bridge_takezawa.jl` rep
   frozen over the substeps.
 - **Physical parameters** (decision of Jesús, 2026-11-26): `κ = τ ℓ²` and the time of the evolution per iteration
   `T` (`DoubleWell(T = 25)`) are physical, the same on every mesh. `ReactionDiffusion(; κ = …)` takes `κ` directly
-  (exactly one of `τ` and `κ`; the banner shows both). With the well `κ` (or `τ`) and `Δt` are numbers: a
+  (exactly one of `τ` and `κ`; the banner shows both): `κ` is the coefficient of `K` in the operator as given, and
+  `τ` enters as `τ ℓ²`, so `τ = κ/ℓ²` with the `ℓ²` of the method (a quadrature of `|D|`) gives the same run bit for
+  bit (`τ = κ/2` on the domain 2 × 1 can differ in the last bits, and the double well amplifies them). With the well `κ` (or `τ`) and `Δt` are numbers: a
   `Continuation` of them would leave `n` and `Δt` stale, and `ReactionDiffusion` refuses a `Parameter` there. An iteration is `n = ⌈T/(cfl Δt_lim)⌉` substeps of
   `Δt = T/n`, with `Δt_lim = 2/maxᵢ(τℓ² Σⱼ|Kᵢⱼ|/mᵢ)` (Gershgorin, from the assembled `K` and `m` once at the start:
   `0.375 h²/(τℓ²)` on squares, any mesh) and `cfl = 4/3` with `:implicit`, `1/3` with `:explicit` (`h²/(8τℓ²)`, the
@@ -531,7 +533,8 @@ The whole script is `examples/bridge_dw.jl`; `validation/bridge_takezawa.jl` rep
   100 × 50, 200 × 100, 400 × 200 and 800 × 400. No new factorisation per iteration. `DoubleWell(substeps = n)` fixes
   `n` instead (`T` is then ignored and `Δt = :auto` of the method is `cfl Δt_lim`; the preset `:takezawa2010`). The
   event after the setup gives `T`, `n`, `Δt`, `Δt_lim` and `ξ = √(τℓ²/2W)` in mean cell sizes `(|D|/cells)^(1/d)`
-  (`K` and `m` are assembled once, in the setup; the banner gives the formula). More than 10⁶ substeps per iteration
+  (`K` and `m` are assembled once, in the setup; the banner gives the formula; once per `solve!`, and again after a
+  rebuild of the discretisation only if it changed). More than 10⁶ substeps per iteration
   are refused. With `:explicit` the operator of the step is never factorised.
 - **Mesh** (study of 2026-11-25, `validation/mesh_double_well.jl`): with κ = 1e-5 and `T = 25` the compliance of the
   cantilever 2 × 1 from `:hex` is the same within about 3 % on 100 × 50, 200 × 100 and 400 × 200 (2.558, 2.493, 2.426 with 2, 5 and 20 substeps: within ±2.7 % of the value on 200 × 100), but the

@@ -142,8 +142,10 @@ grey_measure(::Optimizer, state) = NaN
 iteration_events!(::Optimizer, state, k, maxiter, met, f) = nothing
 
 # events of the step once its state is set up (after init and, for a resumed run, its memory restored): nothing or a
-# vector of (message, color) (ReactionDiffusion with DoubleWell gives its substeps and Δt, which need the matrices)
-setup_events(::Optimizer, state) = nothing
+# vector of (message, color) (ReactionDiffusion with DoubleWell gives its substeps and Δt, which need the matrices);
+# `first` is false at the segments after a rebuild of the discretisation, where the loop prints only the messages that
+# differ from those of the previous segment (a rebuild on the same mesh repeats none)
+setup_events(::Optimizer, state, first::Bool) = nothing
 
 # whether the default stop may end the run at the accepted iteration `k` (ReactionDiffusion with DoubleWell holds it
 # until the iteration after the settling); a stop given to solve! is not held
@@ -993,7 +995,7 @@ function solve!(problem::Optimization, method::AbstractMethod; maxiter::Integer,
                    resume === nothing ? 0 : resume.events, string(nameof(typeof(discretization))), false, 0.0, nothing,
                    resume === nothing ? Float64[] : copy(resume.windows.phase),
                    resume === nothing ? Float64[] : copy(resume.windows.material), resume === nothing ? 0 : resume.windows.streak,
-                   defaults.stop)
+                   defaults.stop, String[])
 
   # an optimiser whose parameters the schedule continues gets them back at the end (the stages change them)
   restore_opt = _restorer(opt)
@@ -1178,8 +1180,11 @@ function _segment!(problem, method, opt, resume, isfirst, run, hist, ctx, cont_b
     throw(ArgumentError("StopCriteria: grey_tol needs a method that computes the measure of grey of the design " *
                         "(ReactionDiffusion); $(method_label(method)) does not (use the monitor Grey)"))
   end
-  evs = setup_events(opt, state)
-  evs === nothing || foreach(e -> _print_event(pr, e[1], e[2]), evs)
+  evs = setup_events(opt, state, isfirst)
+  if evs !== nothing
+    foreach(e -> (isfirst || !(e[1] in run.setup)) && _print_event(pr, e[1], e[2]), evs)
+    run.setup = String[e[1] for e in evs]
+  end
   _set_output!(post, problem)
   if !isfirst
     # a rebuild: the forward solve of the next iteration, done now, gives the objective at the rebuilt problem
@@ -1550,6 +1555,7 @@ mutable struct _LoopState
   material::Vector{Float64}   # material_change of the accepted iterations in a row with the constraints met
   streak::Int             # accepted iterations in a row with the constraints met (in this stage)
   default_stop::Bool      # the stop is the default one (stop_allowed of the optimiser applies)
+  setup::Vector{String}   # the setup events of the optimiser at the last segment (a rebuild prints only new ones)
 end
 
 function _fail(msg, problem, method, opt, oracle, zk, hist, run, cont_names, checkpoint, pr, ops, post)

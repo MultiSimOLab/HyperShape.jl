@@ -269,6 +269,8 @@ _value(x::Real) = Float64(x)
 _value(p::Parameter) = p[]
 # the dimensionless τ (from κ = τ ℓ² when κ was given)
 _τ(opt::RDStep, ℓ2) = opt.κgiven ? _value(opt.τ) / ℓ2 : _value(opt.τ)
+# the coefficient of the diffusion in the operator, κ = τ ℓ²: κ as given (no round trip through τ), or τ ℓ²
+_coef(opt::RDStep, ℓ2) = opt.κgiven ? _value(opt.τ) : _value(opt.τ) * ℓ2
 
 mutable struct RDState{NS,C,MT,MM,ME}
   m::Vector{Float64}            # lumped mass (free rows)
@@ -284,6 +286,7 @@ mutable struct RDState{NS,C,MT,MM,ME}
   unit::Bool                    # φ̌ = Δt (no Dirichlet values and the default diffusion)
   nfrozen::Int
   τ::Float64
+  c::Float64                    # κ = τ ℓ², the coefficient of K in the operator (κ as given, or τ ℓ²)
   Δt::Float64                   # current (reduced after a rejected step)
   Δt_nom::Float64               # nominal
   ns::NS                        # numerical setup of ls (nothing with a solve of the user)
@@ -393,15 +396,16 @@ function Optimizers.init(opt::RDStep, z, oracle)
   ℓ2 = area^(2 / d)
   Δtlim, nsub = opt.reaction === nothing ? (NaN, 0) : _dw_resolve_Δt!(opt, K, m, ℓ2)
   τ, Δt = _check_τΔt(opt, ℓ2)
+  c = _coef(opt, ℓ2)
   ns = nothing
   if opt.solve === nothing && _factorizes(opt)
-    _fill_operator!(A, K, M, m, Kmap, Mmap, Dmap, τ * ℓ2, Δt)
+    _fill_operator!(A, K, M, m, Kmap, Mmap, Dmap, c, Δt)
     ns = numerical_setup(symbolic_setup(opt.ls, A), A)
   end
   v() = zeros(n)
   dw = opt.reaction
   blk = zv.blocks[1]
-  s = RDState(m, K, M, A, Kmap, Mmap, Dmap, kd, area, ℓ2, nd == 0 && opt.diffusion === nothing, nd, τ, Δt, Δt,
+  s = RDState(m, K, M, A, Kmap, Mmap, Dmap, kd, area, ℓ2, nd == 0 && opt.diffusion === nothing, nd, τ, c, Δt, Δt,
               ns, true, v(), v(), v(), v(), v(), v(), v(), v(), 0.0, false, :none,
               _has_interface_map(physical_fields(fo.J)), NaN, _material_meter(fo, z), z, Inf, fo.ctx, 0, 0, 0, 0, NaN, NaN,
               Float64(blk.lb), Float64(blk.ub), dw === nothing ? Float64[] : v(), nsub, nsub,
@@ -447,7 +451,7 @@ end
 # given; with scheme = :explicit a Δt above Δt_lim is refused
 function _dw_resolve_Δt!(opt::_DWStep, K, m, ℓ2)
   dw = opt.reaction
-  Δtlim = _gershgorin_Δt(K, m, _τ(opt, ℓ2) * ℓ2)
+  Δtlim = _gershgorin_Δt(K, m, _coef(opt, ℓ2))
   if opt.Δt === :auto
     isfinite(Δtlim) || throw(ArgumentError("ReactionDiffusion: with DoubleWell the substep comes from Δt_lim of the " *
                                            "diffusion, which needs τ > 0: give τ > 0 (or substeps = n and a number Δt)"))
@@ -495,7 +499,7 @@ _factorizes(opt::_DWStep) = opt.reaction.scheme === :implicit
 
 # the operator for the current τ and Δt, factorised again, and φ̌
 function _rebuild!(opt::RDStep, s::RDState)
-  _fill_operator!(s.A, s.K, s.M, s.m, s.Kmap, s.Mmap, s.Dmap, s.τ * s.ℓ2, s.Δt)
+  _fill_operator!(s.A, s.K, s.M, s.m, s.Kmap, s.Mmap, s.Dmap, s.c, s.Δt)
   if opt.solve === nothing
     numerical_setup!(s.ns, s.A)
   else
@@ -509,7 +513,7 @@ end
 # with the double well: the operator only with :implicit, and no φ̌ (the multiplier acts inside the reaction)
 function _rebuild!(opt::_DWStep, s::RDState)
   _factorizes(opt) || return s
-  _fill_operator!(s.A, s.K, s.M, s.m, s.Kmap, s.Mmap, s.Dmap, s.τ * s.ℓ2, s.Δt)
+  _fill_operator!(s.A, s.K, s.M, s.m, s.Kmap, s.Mmap, s.Dmap, s.c, s.Δt)
   if opt.solve === nothing
     numerical_setup!(s.ns, s.A)
   else
@@ -704,8 +708,9 @@ end
 # τ or Δt continued (Parameter), a rejected step, or the nominal Δt back after one
 function _sync_parameters!(opt::RDStep, s::RDState, retry::Bool)
   τ, Δt = _check_τΔt(opt, s.ℓ2)
-  changed = τ != s.τ || Δt != s.Δt_nom
-  s.τ, s.Δt_nom = τ, Δt
+  c = _coef(opt, s.ℓ2)
+  changed = c != s.c || Δt != s.Δt_nom
+  s.τ, s.c, s.Δt_nom = τ, c, Δt
   if changed || (!retry && s.Δt != Δt)
     retry || (s.Δt = Δt)
     _rebuild!(opt, s)
@@ -739,7 +744,7 @@ end
 # r = −τℓ²(K z + k_d) − C g, φ* = z + A⁻¹ r (the arithmetic of the step, without allocations, and one solve)
 function _rd_rhs!(s::RDState, z, C)
   mul!(s.r, s.K, z)
-  c = s.τ * s.ℓ2
+  c = s.c
   @. s.r = -c * (s.r + s.kd) - C * s.g
   s
 end
@@ -807,7 +812,7 @@ end
 # the diffusion of a substep, ψ into s.φs: implicit (m/Δt + τℓ²K) ψ = m z/Δt − τℓ² k_d (one back-substitution), or
 # explicit ψ = z − Δt τℓ² (K z + k_d)/m
 function _dw_diffuse!(opt::_DWStep, s::RDState, z)
-  c = s.τ * s.ℓ2
+  c = s.c
   if opt.reaction.scheme === :explicit
     mul!(s.r, s.K, z)
     @. s.φs = z - s.Δt * c * (s.r + s.kd) / s.m
@@ -923,13 +928,13 @@ end
 
 # The events of the double well once the state is set up (init, and the memory of a resumed run restored): T, the
 # substeps, Δt, Δt_lim and the width of the interface in mean cell sizes
-function setup_events(opt::_DWStep, s::RDState)
+function setup_events(opt::_DWStep, s::RDState, first::Bool)
   dw = opt.reaction
-  c = s.τ * s.ℓ2
+  c = s.c
   wtxt = c > 0 ? ", width of the interface ξ = √(τℓ²/2W) = $(_g(sqrt(c / (2dw.W)) / s.hmean)) h̄ (h̄ = (|D|/cells)^(1/d) = " *
                  "$(_g(s.hmean)), the mean cell size)" : ", no diffusion (τ = 0): no width of the interface"
   ev = [("· double well: " * _dw_time_text(dw, s) * " (Δt_lim = $(_g(s.Δtlim)))" * wtxt, :cyan)]
-  s.settled && push!(ev, ("· double well settled at iteration $(s.settle_iter) (resumed): one substep per iteration", :cyan))
+  first && s.settled && push!(ev, ("· double well settled at iteration $(s.settle_iter) (resumed): one substep per iteration", :cyan))
   ev
 end
 
@@ -1332,7 +1337,9 @@ Mandatory (modelling decisions):
 - `τ`: diffusion coefficient (dimensionless; a number or a [`Parameter`](@ref HyperShape.Operators.Parameter), which a
   `Continuation` can change, not with `DoubleWell`); larger values give simpler designs with thicker members. Or
   `κ = τ ℓ²` instead (exactly one of the two): the same diffusion as a physical length squared, `τ = κ/ℓ²` with
-  `ℓ² = |D|^(2/d)` computed on the mesh (the banner shows both).
+  `ℓ² = |D|^(2/d)` computed on the mesh (the banner shows both). The operator takes `κ` as given; with `τ` it takes
+  `τ ℓ²`, so `τ = κ/ℓ²` with that `ℓ²` gives the run of `κ` bit for bit, while `τ = κ/2` on a domain of measure 2
+  can differ in the last bits (the measure is a sum of quadratures, not exactly 2).
 - `sensitivity` (not with `reaction = DoubleWell(…)`, where it is `:design`): `:physical` takes the derivative with
   respect to the material, the interface map taken as the
   identity weighted by the material, `(w₀ + (1 − w₀) χ) ∂j/∂χ` (`w₀ = void_weight`): it nucleates holes, and the exact

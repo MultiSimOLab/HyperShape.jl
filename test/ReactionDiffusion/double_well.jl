@@ -23,6 +23,42 @@ function dw_cantilever(; nx = 40, ny = 20, frozen = true, simplex = false, radiu
   end
   rd_cantilever(; nx, ny, design = :density, frozen, simplex, init, kw...)
 end
+# the density cantilever of dw_cantilever from factories (a rebuild of the discretisation, RebuildCheck)
+function dw_factories(; nx = 40, ny = 20)
+  model = CartesianDiscreteModel((0, 2, 0, 1), (nx, ny))
+  labels = get_face_labeling(model)
+  add_tag_from_vertex_filter!(labels, "clamp", model, x -> x[1] < 1e-9)
+  add_tag_from_vertex_filter!(labels, "load", model, x -> x[1] > 2 - 1e-9 && abs(x[2] - 0.5) <= 0.1 + 1e-9)
+  tag_adjacent_cells!(labels, "load_zone", model, "load")
+  design_setup(model) = begin
+    Vφ = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity = :H1, dirichlet_tags = "load_zone")
+    φ0 = hole_seed(Vφ; bounds = (0.0, 1.0), radius = 0.1, spacing = 0.4, exclude = "clamp", connect = ("clamp", "load"),
+                   frozen = 1.0, width = 2 * (2 / nx))
+    z = OptVariables(φ = FieldVariable(Vφ; bounds = (0.0, 1.0), init = φ0, frozen = 1.0))
+    (; z, x = DesignFields(z; φ = Identity()))
+  end
+  physics_setup(model, x) = begin
+    θ = PhysicalFields(x; χ = :φ => Identity())
+    dΩ = design_measures(θ; degree = 2)
+    Ω = Triangulation(model)
+    dΓ = Measure(BoundaryTriangulation(model; tags = "load"), 2)
+    bc = BoundaryConditions(BoundaryCondition("clamp", VectorValue(0.0, 0.0)))
+    V = TestFESpace(Ω, ReferenceFE(lagrangian, VectorValue{2,Float64}, 1), bc; conformity = :H1)
+    U = TrialFESpace(V, bc, 1.0)
+    ν, Emin = 0.3, 1e-3
+    λ, μ = ν / (1 - ν^2), 1 / (2(1 + ν))
+    σ(e) = λ * tr(e) * one(e) + 2μ * e
+    E(ρ) = Emin + ρ^3 * (1 - Emin)
+    dE(ρ) = 3ρ^2 * (1 - Emin)
+    t = VectorValue(0.0, -1.0)
+    a(u, v) = ∫((E ∘ θ.χ) * (ε(v) ⊙ (σ ∘ ε(u))))dΩ.domain
+    S = StateOperator(StaticLinearModel(v -> ∫(t ⋅ v)dΓ, a, U, V, bc; ls = LUSolver(), backend = :compiled), θ;
+          adjoint = AdjointProblem(sensitivity = (u, q) -> (δ -> ∫((dE ∘ θ.χ) * (ε(q) ⊙ (σ ∘ ε(u))) * δ)dΩ.domain)))
+    C = Functional((u, θ) -> ∫(t ⋅ u)dΓ, S; dJdu = SelfAdjoint(), scale = :initial)
+    (; objective = C, constraints = (volume = Volume(θ, dΩ; max_fraction = 0.5),))
+  end
+  Optimization(model; design_setup, physics_setup)
+end
 # a physical diffusion, the same on every mesh of these tests: κ = τ ℓ² = 4e-4 (ℓ² = |D| = 2), ξ = √(κ/2W) ≈ 0.028
 const DW_τ = 2e-4
 # references of the CI cases (Mac M5 Max, Julia 1.13): the cantilever 100×50 and the bridge 100×50 with κ = 4e-5
@@ -421,6 +457,31 @@ end
     @test occursin("τ = 0.0002 (κ = τℓ² = 0.0004, ℓ² = 2)", String(take!(io)))
   end
 
+  @testset "11c. κ and τ = κ/ℓ² give the same run bit for bit, with and without the well" begin
+    # κ = 1e-5 (one substep on 40×20, no settling) and κ = 4e-4 (8 substeps, settles)
+    for (κ, n) in ((1e-5, 1), (4e-4, 8))
+      fo, z, s = rd_start(dw_cantilever(; nx = 40, ny = 20), ReactionDiffusion(; κ, reaction = DoubleWell()))
+      @test s.c === κ                                # κ is the coefficient of the operator, without a round trip
+      τ = κ / s.ℓ2                                   # ℓ² = |D|^(2/d) as the method computes it (the quadrature of |D|)
+      @test τ * s.ℓ2 == κ                            # (on this mesh τ ℓ² gives κ back exactly)
+      go(m) = solve!(dw_cantilever(; nx = 40, ny = 20).problem, m; maxiter = 200, verbose = 0)
+      ra = go(ReactionDiffusion(; κ, reaction = DoubleWell()))
+      rb = go(ReactionDiffusion(; τ, reaction = DoubleWell()))
+      @test ra.state.c === rb.state.c === κ && ra.state.nsub == rb.state.nsub == n && ra.state.Δtlim == rb.state.Δtlim
+      @test get_values(ra.z) == get_values(rb.z) && ra.history.objective == rb.history.objective
+      @test ra.iterations == rb.iterations && ra.state.settle_iter == rb.state.settle_iter
+      n > 1 && @test ra.state.settled
+    end
+    κ = 4e-4                                         # without the well
+    fo, z, s = rd_start(rd_cantilever(; nx = 30, ny = 15), ReactionDiffusion(; κ, sensitivity = :physical))
+    τ = κ / s.ℓ2
+    @test s.c === κ && τ * s.ℓ2 == κ
+    run0(m) = solve!(rd_cantilever(; nx = 30, ny = 15).problem, m; maxiter = 20, stop = nothing, verbose = 0)
+    ra = run0(ReactionDiffusion(; κ, sensitivity = :physical))
+    rb = run0(ReactionDiffusion(; τ, sensitivity = :physical))
+    @test get_values(ra.z) == get_values(rb.z) && ra.history.objective == rb.history.objective
+  end
+
   @testset "12. the grey measure and grey_tol; the settling" begin
     c = dw_cantilever(; nx = 40, ny = 20)
     m = dw()
@@ -509,6 +570,40 @@ end
     # n substeps before each settling, 1 after it, n again from the jump (iteration 51)
     n = s.nsub
     @test s.nsolves == n * ks[1] + (50 - ks[1]) + n * (ks[2] - 50) + (100 - ks[2])
+  end
+
+  @testset "15b. checkpoint and resume across a continuation jump, before and after the second settling: bit for bit" begin
+    P = Parameter(1.0)
+    cont() = Continuation(pc = P => [1.0, 1.0]; every = 50)
+    r0 = solve!(dw_cantilever(; nx = 40, ny = 20).problem, dw(); maxiter = 100, stop = nothing, verbose = 0,
+                continuation = cont())
+    k2 = r0.state.settle_iter
+    @test r0.state.settled && 50 < k2 < 100
+    for k in (40, 50, 51, 53, k2)        # before the jump, at it, just after it, in the second window, at the settling
+      dir = mktempdir()
+      r1 = solve!(dw_cantilever(; nx = 40, ny = 20).problem, dw(); maxiter = k, stop = nothing, verbose = 0,
+                  continuation = cont(), checkpoint = Checkpoint(filepath = dir, every = 1000))
+      @test r1.iterations == k
+      r2 = solve!(dw_cantilever(; nx = 40, ny = 20).problem, dw(); maxiter = 100, stop = nothing, verbose = 0,
+                  continuation = cont(), resume = dir)
+      @test get_values(r2.z) == get_values(r0.z) && r2.history.objective == r0.history.objective
+      @test r2.state.settled && r2.state.settle_iter == k2 && r2.iterations == r0.iterations
+    end
+  end
+
+  @testset "17. a rebuild of the discretisation (RebuildCheck): the run of FixedMesh bit for bit, the setup event once" begin
+    io1, io2 = IOBuffer(), IOBuffer()
+    r1 = solve!(dw_factories(), dw(); maxiter = 80, stop = nothing, verbose = 1, io = io1)
+    r2 = solve!(dw_factories(), dw(); maxiter = 80, stop = nothing, verbose = 1, io = io2,
+                discretization = RDM.RebuildCheck(every = 15))
+    o1, o2 = String(take!(io1)), String(take!(io2))
+    k = r1.state.settle_iter
+    @test r1.state.settled && 15 < k < 75                    # rebuilds before and after the settling
+    @test get_values(r1.z) == get_values(r2.z) && r1.history.objective == r2.history.objective
+    @test r2.state.settled && r2.state.settle_iter == k && r2.state.substeps == 1
+    @test count(r"iteration \d+: design and physics rebuilt", o2) == 5
+    @test count("· double well: T =", o1) == count("· double well: T =", o2) == 1    # not repeated at a rebuild
+    @test count("double well settled at iteration", o2) == 1 && !occursin("(resumed)", o2)
   end
 
   @testset "16. with the well: a rejected step, a nonlinear native constraint, consistent mass, a solve of the user" begin
