@@ -40,7 +40,7 @@ export Optimization, DensityMethod, LumpedMass, Euclidean, FixedMesh
 export Continuation, StopCriteria, RejectStep, Checkpoint, load_checkpoint, Grey
 export OptHistory, OptResult, OptimizationFailure, OptState
 export solve!
-export ReactionDiffusion, ExactVolume, L1Mean, L2Norm, MaxAbs
+export ReactionDiffusion, ExactVolume, L1Mean, L2Norm, MaxAbs, DoubleWell
 
 include("Problem.jl")
 include("Discretization.jl")

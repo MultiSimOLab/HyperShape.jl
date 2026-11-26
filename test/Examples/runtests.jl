@@ -2,6 +2,7 @@
 include(joinpath(@__DIR__, "..", "..", "examples", "mbb.jl"))
 include(joinpath(@__DIR__, "..", "..", "examples", "mbb_factories.jl"))
 include(joinpath(@__DIR__, "..", "..", "examples", "cantilever_rd.jl"))
+include(joinpath(@__DIR__, "..", "..", "examples", "bridge_dw.jl"))
 
 @testset "Examples" begin
   @testset "MBB beam (examples/mbb.jl)" begin
@@ -26,6 +27,16 @@ include(joinpath(@__DIR__, "..", "..", "examples", "cantilever_rd.jl"))
     @test r.status === :converged && r.iterations <= 150
     @test abs(r.history.constraints.volume[end]) <= 2e-4               # the volume (to 1e-4 |D|) reached at iteration 25
     @test r.history.objective[end] < 1 / (1e-3 + 0.5 * (1 - 1e-3))     # better than a uniform material χ = 0.5
+  end
+  @testset "Bridge by the double well (examples/bridge_dw.jl)" begin
+    r = run_bridge_dw(; nx = 60, ny = 30, maxiter = 150, verbose = 0)
+    @test r.status === :converged || r.status === :maxiter
+    @test r.history.constraints.volume[end] <= 1e-4 * 2 / 0.6              # the volume (to 1e-4 |D|) reached
+    # κ = 1e-5 and T = 25 on 60×30: one substep from the start (Δt_lim = 41.7), nothing to settle
+    @test r.state.nsub == 1 && r.state.substeps == 1
+    # the seed has more material than the limit: the compliance grows while the volume goes down to it
+    @test all(isfinite, r.history.objective)
+    @test 23.0 <= r.objective <= 25.0                                    # measured 24.05 at 51 (load on two cells)
   end
   @testset "The README and the Getting started page show examples/mbb.jl" begin
     root = joinpath(@__DIR__, "..", "..")

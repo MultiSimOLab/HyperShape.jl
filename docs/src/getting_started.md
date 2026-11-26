@@ -148,4 +148,6 @@ z  = OptVariables(φ = FieldVariable(Vφ; bounds = (-1.0, 1.0), init = φ0, froz
 ```
 
 With `sensitivity = :physical` the seed is optional (holes still nucleate and merge; useful to study the dependence on
-the start); methods that only move the boundary (`DoubleWell`, next release) need it.
+the start); methods that only move the boundary need it: the double well, `ReactionDiffusion(; τ, reaction =
+DoubleWell())` on a density (`bounds = (0.0, 1.0)`, `hole_seed(Vφ; bounds = (0.0, 1.0), …)`), whose holes are those of
+the seed (`examples/bridge_dw.jl`, the bridge of Takezawa et al. 2010).

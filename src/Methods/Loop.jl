@@ -26,7 +26,8 @@ RejectStep(; shrink = 0.5, max_attempts = 5) = RejectStep(shrink, max_attempts)
 """
     StopCriteria(; objective_range = nothing, window = 10, kkt_tol = nothing, kkt_rtol = nothing,
                  stationarity_tol = nothing, stationarity_rtol = nothing, change_tol = nothing, rate_tol = nothing,
-                 phase_tol = nothing, phase_window = 5, material_tol = nothing, material_window = 5, combine = :any)
+                 phase_tol = nothing, phase_window = 5, material_tol = nothing, material_window = 5, combine = :any,
+                 grey_tol = nothing)
 
 Convergence criteria; each one is off unless given, and the first one met stops the optimisation (the reason in
 [`OptResult`](@ref) is the name of the keyword). With a [`Continuation`](@ref) they only act in the last stage, unless
@@ -63,6 +64,10 @@ it was built with `close_early = true` (then a criterion met in an earlier stage
   through `Identity()`, `Step()` or `Ersatz()`); given without such a meter `solve!` throws, while the default stop of
   `ReactionDiffusion` drops it (an event and a line of the banner say so). A run that ends at `maxiter` with the
   material still changing says so.
+- `grey_tol`: the measure of grey of the design below this value, `M_nd = Σᵢ mᵢ 4φ̂ᵢ(1 − φ̂ᵢ) / |D|` (`φ̂` the design
+  scaled to `[0, 1]` by its bounds, `mᵢ` the lumped mass of the free values; nodal, without allocations; Kim et al.
+  2020). For `ReactionDiffusion` (`grey_measure` of the method); `solve!` throws with other methods (for a physical
+  density use the monitor [`Grey`](@ref)).
 - `combine`: `:any` (default) stops when the first criterion given is met; `:all` when all of them are met in the
   same iteration, and then the window of `objective_range` also counts only iterations with the constraints met
   (the reason is `:all`). The default of `ReactionDiffusion` is
@@ -85,11 +90,12 @@ struct StopCriteria
   material_tol::Union{Nothing,Float64}
   material_window::Int
   combine::Symbol
+  grey_tol::Union{Nothing,Float64}
   function StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol,
-                        rate_tol, phase_tol, phase_window, material_tol, material_window, combine)
+                        rate_tol, phase_tol, phase_window, material_tol, material_window, combine, grey_tol)
     for (k, v) in ((:objective_range, objective_range), (:kkt_tol, kkt_tol), (:kkt_rtol, kkt_rtol),
                    (:stationarity_tol, stationarity_tol), (:stationarity_rtol, stationarity_rtol), (:change_tol, change_tol),
-                   (:rate_tol, rate_tol), (:phase_tol, phase_tol), (:material_tol, material_tol))
+                   (:rate_tol, rate_tol), (:phase_tol, phase_tol), (:material_tol, material_tol), (:grey_tol, grey_tol))
       v === nothing || v > 0 || throw(ArgumentError("StopCriteria: $k must be positive"))
     end
     window >= 2 || throw(ArgumentError("StopCriteria: window must be at least 2"))
@@ -98,9 +104,15 @@ struct StopCriteria
     combine in (:any, :all) || throw(ArgumentError("StopCriteria: combine must be :any or :all"))
     f(v) = v === nothing ? nothing : Float64(v)
     new(f(objective_range), Int(window), f(kkt_tol), f(kkt_rtol), f(stationarity_tol), f(stationarity_rtol), f(change_tol),
-        f(rate_tol), f(phase_tol), Int(phase_window), f(material_tol), Int(material_window), combine)
+        f(rate_tol), f(phase_tol), Int(phase_window), f(material_tol), Int(material_window), combine, f(grey_tol))
   end
 end
+
+# the positional form of the thirteen criteria of before (without grey_tol)
+StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol, rate_tol,
+             phase_tol, phase_window, material_tol, material_window, combine) =
+  StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol, rate_tol,
+               phase_tol, phase_window, material_tol, material_window, combine, nothing)
 
 # the positional form of the seven criteria of before
 StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol) =
@@ -109,9 +121,9 @@ StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stati
 
 StopCriteria(; objective_range = nothing, window = 10, kkt_tol = nothing, kkt_rtol = nothing, stationarity_tol = nothing,
              stationarity_rtol = nothing, change_tol = nothing, rate_tol = nothing, phase_tol = nothing, phase_window = 5,
-             material_tol = nothing, material_window = 5, combine = :any) =
+             material_tol = nothing, material_window = 5, combine = :any, grey_tol = nothing) =
   StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol, rate_tol,
-               phase_tol, phase_window, material_tol, material_window, combine)
+               phase_tol, phase_window, material_tol, material_window, combine, grey_tol)
 
 """
     material_change(opt::Optimizer, state) -> Float64
@@ -122,10 +134,21 @@ The material changed in the last accepted step, `∫|χ_k − χ_{k−1}| / ∫�
 material_change(::Optimizer, state) = NaN
 material_available(::Optimizer, state) = false
 
+# the measure of grey of the design of the step (see `StopCriteria(grey_tol)`); NaN when the step does not compute it
+grey_measure(::Optimizer, state) = NaN
+
+# events of the step after each accepted iteration `k` (with `met` the constraints met and `f` the objective): nothing
+# or a vector of (message, color); a step may change its own state here (ReactionDiffusion with DoubleWell settles)
+iteration_events!(::Optimizer, state, k, maxiter, met, f) = nothing
+
+# whether the default stop may end the run at the accepted iteration `k` (ReactionDiffusion with DoubleWell holds it
+# until the iteration after the settling); a stop given to solve! is not held
+stop_allowed(::Optimizer, state, k) = true
+
 # the default stop without the change of the material (no meter): the constraints and the objective range
 _without_material(s::StopCriteria) =
   StopCriteria(s.objective_range, s.window, s.kkt_tol, s.kkt_rtol, s.stationarity_tol, s.stationarity_rtol, s.change_tol,
-               s.rate_tol, s.phase_tol, s.phase_window, nothing, s.material_window, s.combine)
+               s.rate_tol, s.phase_tol, s.phase_window, nothing, s.material_window, s.combine, s.grey_tol)
 
 """
     phase_change(opt::Optimizer, state) -> Float64
@@ -141,7 +164,8 @@ phase_change(::Optimizer, state) = NaN
 Stopping criteria of [`solve!`](@ref) when `stop` is not given: `StopCriteria(objective_range = 1e-3)` (range of
 the objective below 0.1 % over the last 10 iterations of the last stage), for OC and SiMPL. With a projection,
 `kkt_tol` and `change_tol` are rarely reached; the objective settles. [`ReactionDiffusion`](@ref):
-`StopCriteria(material_tol = 2e-3, objective_range = 1e-3, combine = :all)`.
+`StopCriteria(material_tol = 2e-3, objective_range = 1e-3, combine = :all)`, with `material_tol = 1e-2` when the
+reaction is a [`DoubleWell`](@ref).
 """
 default_stop(::Optimizer) = StopCriteria(objective_range = 1e-3)
 
@@ -762,8 +786,8 @@ _count(ops) = sum(num_solves, ops; init = 0)
 # material_change (nothing: not available), `streak` the iterations in a row with the constraints met
 _stop_reason(stop::StopCriteria, info::StepInfo, hist::OptHistory, stage_start) =
   _stop_check(stop, info, hist, stage_start, nothing, nothing, typemax(Int))
-function _stop_check(stop::StopCriteria, info::StepInfo, hist::OptHistory, stage_start, phase, material, streak)
-  stop.combine === :all && return _stop_all(stop, info, hist, stage_start, phase, material, streak)
+function _stop_check(stop::StopCriteria, info::StepInfo, hist::OptHistory, stage_start, phase, material, streak, grey = NaN)
+  stop.combine === :all && return _stop_all(stop, info, hist, stage_start, phase, material, streak, grey)
   if stop.objective_range !== nothing && hist.n - stage_start >= stop.window
     w = view(hist.objective, hist.n-stop.window+1:hist.n)
     lo, hi = extrema(w)
@@ -785,17 +809,18 @@ function _stop_check(stop::StopCriteria, info::StepInfo, hist::OptHistory, stage
   stop.rate_tol !== nothing && info.change / info.step < stop.rate_tol && return :rate_tol
   stop.phase_tol !== nothing && _window_below(phase, stop.phase_window, stop.phase_tol) && return :phase_tol
   stop.material_tol !== nothing && _window_below(material, stop.material_window, stop.material_tol) && return :material_tol
+  stop.grey_tol !== nothing && grey < stop.grey_tol && return :grey_tol
   nothing
 end
 _stop_reason(::Nothing, info, hist, stage_start) = nothing
-_stop_check(::Nothing, info, hist, stage_start, phase, material, streak) = nothing
+_stop_check(::Nothing, info, hist, stage_start, phase, material, streak, grey = NaN) = nothing
 
 # the last w values of v (a window) all below tol
 _window_below(v, w, tol) = v !== nothing && length(v) >= w && all(<(tol), view(v, length(v)-w+1:length(v)))
 
 # combine = :all: every criterion given is met at this iteration (windows of objective_range counted with the
 # constraints met, `streak` iterations in a row)
-function _stop_all(stop::StopCriteria, info, hist, stage_start, phase, material, streak)
+function _stop_all(stop::StopCriteria, info, hist, stage_start, phase, material, streak, grey = NaN)
   hist.n - stage_start >= 2 || return nothing
   if stop.objective_range !== nothing
     (hist.n - stage_start >= stop.window && streak >= stop.window) || return nothing
@@ -817,17 +842,18 @@ function _stop_all(stop::StopCriteria, info, hist, stage_start, phase, material,
   stop.rate_tol === nothing || info.change / info.step < stop.rate_tol || return nothing
   stop.phase_tol === nothing || _window_below(phase, stop.phase_window, stop.phase_tol) || return nothing
   stop.material_tol === nothing || _window_below(material, stop.material_window, stop.material_tol) || return nothing
+  stop.grey_tol === nothing || grey < stop.grey_tol || return nothing
   _active(stop) ? :all : nothing
 end
 # a function of the user: (info, history, ctx) -> Bool, checked after every accepted iteration (also the first of a
 # stage; with a continuation, only in the last stage unless close_early); the reason is :custom
-function _stop_decision(stop, info, hist, stage_start, ctx, phase, material, streak)
+function _stop_decision(stop, info, hist, stage_start, ctx, phase, material, streak, grey = NaN)
   r = stop(info, _history_copy(hist), ctx)        # the history up to this iteration (a copy: O(iterations))
   r isa Bool || throw(ArgumentError("solve!: the stop function must return true or false, got $(repr(r))"))
   r ? :custom : nothing
 end
-_stop_decision(stop::Union{Nothing,StopCriteria}, info, hist, stage_start, ctx, phase, material, streak) =
-  _stop_check(stop, info, hist, stage_start, phase, material, streak)
+_stop_decision(stop::Union{Nothing,StopCriteria}, info, hist, stage_start, ctx, phase, material, streak, grey = NaN) =
+  _stop_check(stop, info, hist, stage_start, phase, material, streak, grey)
 
 """
     solve!(problem::Optimization, method::AbstractMethod; maxiter, on_failure = RejectStep(),
@@ -962,7 +988,8 @@ function solve!(problem::Optimization, method::AbstractMethod; maxiter::Integer,
   run = _LoopState(k0, stage, stage_iters, hist.n - stage_iters, (0, 0, 0), k0, Float64[], (0, 0, 0),
                    resume === nothing ? 0 : resume.events, string(nameof(typeof(discretization))), false, 0.0, nothing,
                    resume === nothing ? Float64[] : copy(resume.windows.phase),
-                   resume === nothing ? Float64[] : copy(resume.windows.material), resume === nothing ? 0 : resume.windows.streak)
+                   resume === nothing ? Float64[] : copy(resume.windows.material), resume === nothing ? 0 : resume.windows.streak,
+                   defaults.stop)
 
   # an optimiser whose parameters the schedule continues gets them back at the end (the stages change them)
   restore_opt = _restorer(opt)
@@ -1512,6 +1539,7 @@ mutable struct _LoopState
   phase::Vector{Float64}  # phase_change of the accepted iterations of the current stage of this call
   material::Vector{Float64}   # material_change of the accepted iterations in a row with the constraints met
   streak::Int             # accepted iterations in a row with the constraints met (in this stage)
+  default_stop::Bool      # the stop is the default one (stop_allowed of the optimiser applies)
 end
 
 function _fail(msg, problem, method, opt, oracle, zk, hist, run, cont_names, checkpoint, pr, ops, post)
@@ -1651,9 +1679,18 @@ function _iterate!(problem, method, opt, oracle, state, zk, zprev, hist, run, ct
     met = _constraints_met(oracle, info, opt, viols)
     run.streak = met ? run.streak + 1 : 0
     met ? push!(run.material, mc) : empty!(run.material)
-    r = _stop_decision(stop, info, hist, run.stage_start, ctx, run.phase, run.material, run.streak)
+    evs = iteration_events!(opt, state, k, maxiter, met, f_acc)
+    evs === nothing || foreach(e -> _print_event(pr, e[1], e[2]), evs)
+    gr = NaN
+    if stop isa StopCriteria && stop.grey_tol !== nothing
+      gr = grey_measure(opt, state)
+      isnan(gr) && throw(ArgumentError("StopCriteria: grey_tol needs a method that computes the measure of grey of the " *
+                                       "design (ReactionDiffusion); $(method_label(method)) does not (use the monitor Grey)"))
+    end
+    r = _stop_decision(stop, info, hist, run.stage_start, ctx, run.phase, run.material, run.streak, gr)
     # convergence also needs the constraints met to their tolerances
     (r !== nothing && !_constraints_met(oracle, info, opt, viols)) && (r = nothing)
+    (r !== nothing && run.default_stop && !stop_allowed(opt, state, k)) && (r = nothing)
     done = false
     if r !== nothing
       if schedule === nothing || run.stage == schedule.nstages

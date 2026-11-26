@@ -3,6 +3,9 @@
 #   mbb(; case = :top88 | :simpl, …)  half MBB beam, SIMP, against top88 with the PDE filter (Andreassen et al. 2011)
 #                                     and against SiMPL (Kim, Lazarov, Surowiec, Keith, arXiv:2411.19421)
 #   cantilever3d(; …)                 3D cantilever (close to top3d), no published value: runs, Taylor tests, symmetry
+#   bridge(; …)                       the bridge of Takezawa et al. (2010) with the double well (ReactionDiffusion +
+#                                     DoubleWell): J = 23.3 published at 100 iterations
+#   cantilever_dw(; …)                the cantilever 2 × 1 with the double well from hole_seed (mesh independence)
 #
 # Both return a named tuple with the result of `solve!` and the cell means of the physical density.
 using Gridap, Gridap.Geometry, HyperFEM, HyperShape, Printf
@@ -148,3 +151,172 @@ end
 row(name, r, ref = NaN) = @sprintf("| %s | %.6g | %s | %d | %s | %.1f s |", name, r.result.objective,
                                    isnan(ref) ? "—" : @sprintf("%+.2f %%", 100 * (r.result.objective / ref - 1)),
                                    r.result.iterations, r.result.status, r.time)
+
+# The seed of Takezawa et al. (2010) for the bridge (their Fig. 9a): rows of rectangular holes 0.2 × 0.1, every 1/6 in
+# height, 0.4 apart, alternate rows shifted by 0.2 (values 0 in the holes, 1 elsewhere)
+function takezawa_bridge_seed(V)
+  f(x) = begin
+    k = round(Int, x[2] * 6)
+    abs(x[2] - k / 6) <= 0.05 + 1e-9 || return 1.0
+    xs = isodd(k) ? x[1] - 0.2 : x[1]
+    abs(xs - 0.4 * round(xs / 0.4)) <= 0.1 + 1e-9 ? 0.0 : 1.0
+  end
+  collect(get_free_dof_values(interpolate(f, V)))
+end
+
+# interior holes of a design given by its cell means on a Cartesian nx × ny mesh: the connected components (by faces)
+# of the cells below 1/2 that do not touch the boundary
+function interior_holes(χ, nx, ny)
+  void = reshape(χ .< 0.5, nx, ny)
+  seen = falses(nx, ny)
+  n = 0
+  for j in 1:ny, i in 1:nx
+    (void[i, j] && !seen[i, j]) || continue
+    stack = [(i, j)]
+    seen[i, j] = true
+    inner = true
+    while !isempty(stack)
+      (a, b) = pop!(stack)
+      for (p, q) in ((a + 1, b), (a - 1, b), (a, b + 1), (a, b - 1))
+        (1 <= p <= nx && 1 <= q <= ny) || (inner = false; continue)
+        (void[p, q] && !seen[p, q]) || continue
+        seen[p, q] = true
+        push!(stack, (p, q))
+      end
+    end
+    inner && (n += 1)
+  end
+  n
+end
+
+"""
+    bridge(; nx = 200, ny = nx ÷ 2, seed = :hex, method = :default, κ = 1e-5, maxiter = 100,
+           stop = nothing, snapshots = (), verbose = 0)
+
+The bridge of Takezawa, Nishiwaki and Kitamura (2010, Section 5.2): domain 2 × 1, roller at (0, 0), pin at (2, 0),
+unit point load downwards at (1, 0), plane stress (E = 1, ν = 0.3), volume fraction 0.3, `k(φ) = max(φ³, 1e-5)`, a
+density φ ∈ [0, 1] with the double well. Published: J = 23.3 at 100 iterations with κ = 1e-5 on their 200 × 100 grid.
+- `seed`: `:hex` (`hole_seed(…; radius = 0.1, spacing = 0.4)`, the default pattern) or `:takezawa` (their rectangles,
+  `takezawa_bridge_seed`: only for the comparison with the published 23.3 on 200 × 100).
+- `method`: `:default` (`ReactionDiffusion(; τ, reaction = DoubleWell())`, scheme (c)) or `:takezawa2010` (the preset).
+- `κ`: the diffusion `τ ℓ²` (`τ = κ/|D|`), a physical parameter (the same on every mesh). With a point load the
+  compliance grows like `log(1/h)`: values on different meshes are not comparable.
+`snapshots`: iterations whose cell means are kept (`snaps[k]`); other keywords go to the method (`ReactionDiffusion`),
+`solve_kwargs` to `solve!`. Returns the result, the cell means, the interior holes,
+the asymmetry `maxᵢ |χ − mirror(χ)|` of the cell means about x = 1, the fraction of cells whose phase (χ ≥ ½) differs
+from the mirror one (`asymmetry_phase`; rounding breaks the symmetry and the evolution amplifies it: the designs are
+symmetric up to a few cells, not to rounding) and the time.
+"""
+function bridge(; nx = 200, ny = nx ÷ 2, seed = :hex, method = :default, κ = 1e-5, maxiter = 100,
+                stop = nothing, snapshots = (), verbose = 0, solve_kwargs = (;), kwargs...)
+  h = 2 / nx
+  model = CartesianDiscreteModel((0, 2, 0, 1), (nx, ny))
+  labels = get_face_labeling(model)
+  add_tag_from_tags!(labels, "roller", [1])
+  add_tag_from_tags!(labels, "pin", [2])
+  add_tag_from_tags!(labels, "bottom", [1, 2, 5])
+  add_tag_from_vertex_filter!(labels, "load", model, x -> abs(x[1] - 1) < 1e-9 && x[2] < 1e-9)
+  Ω = Triangulation(model)
+  dΩ = Measure(Ω, 4)
+  dΓ = Measure(BoundaryTriangulation(model; tags = "bottom"), 2)
+  bc = BoundaryConditions(BoundaryCondition("roller", VectorValue(0.0, 0.0); mask = (false, true)),
+                          BoundaryCondition("pin", VectorValue(0.0, 0.0)))
+  V = TestFESpace(Ω, ReferenceFE(lagrangian, VectorValue{2,Float64}, 1), bc; conformity = :H1)
+  U = TrialFESpace(V, bc, 1.0)
+  Vφ = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
+  tags = ("roller", "pin", "load")
+  φ0 = seed === :takezawa ? takezawa_bridge_seed(Vφ) :
+       seed === :hex ? hole_seed(Vφ; bounds = (0.0, 1.0), radius = 0.1, spacing = 0.4, exclude = tags, connect = tags,
+                                 width = 2h) : throw(ArgumentError("bridge: seed must be :takezawa or :hex"))
+  z = OptVariables(φ = FieldVariable(Vφ; bounds = (0.0, 1.0), init = φ0))
+  x = DesignFields(z; φ = Identity())
+  θ = PhysicalFields(x; χ = :φ => Identity())
+  ν = 0.3
+  λ, μ = ν / (1 - ν^2), 1 / (2(1 + ν))
+  σ(e) = λ * tr(e) * one(e) + 2μ * e
+  k(φ) = max(φ^3, 1e-5)
+  dk(φ) = φ^3 > 1e-5 ? 3φ^2 : 0.0
+  # unit point load at (1, 0): the traction dual to the shape function of that node on the edge [1, 1 + h]
+  t(x) = VectorValue(0.0, (1 - 1e-12 <= x[1] <= 1 + h + 1e-12) ? -(4 - 6 * (x[1] - 1) / h) / h : 0.0)
+  a(u, v) = ∫((k ∘ θ.χ) * (ε(v) ⊙ (σ ∘ ε(u))))dΩ
+  S = StateOperator(StaticLinearModel(v -> ∫(t ⋅ v)dΓ, a, U, V, bc; ls = LUSolver(), backend = :compiled), θ;
+        adjoint = AdjointProblem(sensitivity = (u, p) -> (δ -> ∫((dk ∘ θ.χ) * (ε(p) ⊙ (σ ∘ ε(u))) * δ)dΩ)))
+  C = Functional((u, θ) -> ∫(t ⋅ u)dΓ, S; dJdu = SelfAdjoint(), scale = 1.0)
+  Vol = Volume(θ, dΩ; max_fraction = 0.3)
+  problem = Optimization(z; objective = C, constraints = (volume = Vol,))
+  τ = κ / 2                                            # ℓ² = |D| = 2
+  m = method === :default ? ReactionDiffusion(; τ, merge((; reaction = DoubleWell()), kwargs)...) :
+      method === :takezawa2010 ? ReactionDiffusion(:takezawa2010; τ, kwargs...) :
+      throw(ArgumentError("bridge: method must be :default or :takezawa2010"))
+  V0 = FESpace(model, ReferenceFE(lagrangian, Float64, 0); conformity = :L2)
+  cells() = (HyperShape.update_fields!(θ, problem.ctx); collect(assemble_vector(v -> ∫(θ.χ * v)dΩ, V0)) ./ (h * h))
+  snaps = Dict{Int,Vector{Float64}}()
+  0 in snapshots && (snaps[0] = cells())
+  mon = (snap = _Snapshots(Set{Int}(snapshots), snaps, cells, Ref(0)),)
+  kw = stop === :default ? (;) : (; stop)
+  tt = @elapsed r = solve!(problem, m; maxiter, verbose, monitors = isempty(snapshots) ? (;) : mon, kw..., solve_kwargs...)
+  χ = cells()
+  M = reshape(χ, nx, ny)
+  P = M .>= 0.5
+  (; result = r, χ, holes = interior_holes(χ, nx, ny), asymmetry = maximum(abs, M .- reverse(M, dims = 1)),
+     asymmetry_phase = count(P .!= reverse(P, dims = 1)) / length(P), volume = sum(χ) / (nx * ny), time = tt, snaps, nx, ny)
+end
+
+"""
+    cantilever_dw(; nx = 200, ny = nx ÷ 2, κ = 1e-5, maxiter = 300, stop = :default, verbose = 0, io = stdout, kwargs...)
+
+The cantilever 2 × 1 with the double well: clamped at x = 0, a unit traction downwards on x = 2, |y − ½| ≤ 0.1,
+plane stress (E = 1, ν = 0.3), volume fraction 0.5, `k(φ) = max(φ³, 1e-5)`, a density φ ∈ [0, 1] from
+`hole_seed(…; radius = 0.1, spacing = 0.4)` (`:hex`) and `ReactionDiffusion(; τ = κ/|D|, reaction = DoubleWell(; kwargs...))`
+(`T = 25` per iteration by default). `κ` is physical: the case of the study of mesh independence
+(`validation/mesh_double_well.jl`). Returns the result, the cell means, the interior holes, the volume and the time.
+"""
+function cantilever_dw(; nx = 200, ny = nx ÷ 2, κ = 1e-5, maxiter = 300, stop = :default, verbose = 0, io = stdout, kwargs...)
+  h = 2 / nx
+  model = CartesianDiscreteModel((0, 2, 0, 1), (nx, ny))
+  labels = get_face_labeling(model)
+  add_tag_from_vertex_filter!(labels, "clamp", model, x -> x[1] < 1e-9)
+  add_tag_from_vertex_filter!(labels, "load", model, x -> x[1] > 2 - 1e-9 && abs(x[2] - 0.5) <= 0.1 + 1e-9)
+  Ω = Triangulation(model)
+  dΩ = Measure(Ω, 4)
+  dΓ = Measure(BoundaryTriangulation(model; tags = "load"), 2)
+  bc = BoundaryConditions(BoundaryCondition("clamp", VectorValue(0.0, 0.0)))
+  V = TestFESpace(Ω, ReferenceFE(lagrangian, VectorValue{2,Float64}, 1), bc; conformity = :H1)
+  U = TrialFESpace(V, bc, 1.0)
+  Vφ = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
+  tags = ("clamp", "load")
+  φ0 = hole_seed(Vφ; bounds = (0.0, 1.0), radius = 0.1, spacing = 0.4, exclude = tags, connect = tags, width = 2h)
+  z = OptVariables(φ = FieldVariable(Vφ; bounds = (0.0, 1.0), init = φ0))
+  θ = PhysicalFields(DesignFields(z; φ = Identity()); χ = :φ => Identity())
+  ν = 0.3
+  λ, μ = ν / (1 - ν^2), 1 / (2(1 + ν))
+  σ(e) = λ * tr(e) * one(e) + 2μ * e
+  k(φ) = max(φ^3, 1e-5)
+  dk(φ) = φ^3 > 1e-5 ? 3φ^2 : 0.0
+  t = VectorValue(0.0, -1.0)
+  a(u, v) = ∫((k ∘ θ.χ) * (ε(v) ⊙ (σ ∘ ε(u))))dΩ
+  S = StateOperator(StaticLinearModel(v -> ∫(t ⋅ v)dΓ, a, U, V, bc; ls = LUSolver(), backend = :compiled), θ;
+        adjoint = AdjointProblem(sensitivity = (u, p) -> (δ -> ∫((dk ∘ θ.χ) * (ε(p) ⊙ (σ ∘ ε(u))) * δ)dΩ)))
+  C = Functional((u, θ) -> ∫(t ⋅ u)dΓ, S; dJdu = SelfAdjoint(), scale = 1.0)
+  problem = Optimization(z; objective = C, constraints = (volume = Volume(θ, dΩ; max_fraction = 0.5),))
+  m = ReactionDiffusion(; τ = κ / 2, reaction = DoubleWell(; kwargs...))          # ℓ² = |D| = 2
+  kw = stop === :default ? (;) : (; stop)
+  tt = @elapsed r = solve!(problem, m; maxiter, verbose, io, kw...)
+  V0 = FESpace(model, ReferenceFE(lagrangian, Float64, 0); conformity = :L2)
+  HyperShape.update_fields!(θ, problem.ctx)
+  χ = collect(assemble_vector(v -> ∫(θ.χ * v)dΩ, V0)) ./ (h * h)
+  (; result = r, χ, holes = interior_holes(χ, nx, ny), volume = sum(χ) / (nx * ny), time = tt, nx, ny)
+end
+
+# a monitor that keeps the cell means at the iterations asked
+struct _Snapshots{F}
+  at::Set{Int}
+  snaps::Dict{Int,Vector{Float64}}
+  cells::F
+  k::Base.RefValue{Int}
+end
+function HyperShape.Methods.monitor_value(s::_Snapshots)
+  s.k[] += 1
+  s.k[] in s.at && (s.snaps[s.k[]] = s.cells())
+  0.0
+end

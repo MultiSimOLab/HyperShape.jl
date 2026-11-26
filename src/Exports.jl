@@ -42,6 +42,7 @@ end
 @_export Methods L1Mean
 @_export Methods L2Norm
 @_export Methods MaxAbs
+@_export Methods DoubleWell
 @_export Methods LumpedMass
 @_export Methods Euclidean
 @_export Methods FixedMesh

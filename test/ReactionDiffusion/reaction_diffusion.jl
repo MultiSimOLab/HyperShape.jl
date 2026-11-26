@@ -478,7 +478,9 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     c = rd_cantilever(; nx = 10, ny = 5, interface = Step())
     @test_throws r"Step\(\), which has no derivative" solve!(c.problem, ReactionDiffusion(; τ = 1e-4, sensitivity = :design); maxiter = 1, verbose = 0)
     c = rd_cantilever(; nx = 10, ny = 5)
-    @test_throws r"starting design has none" solve!(c.problem, ReactionDiffusion(; τ = 1e-4, sensitivity = :design); maxiter = 1, verbose = 0)
+    # :design with Ersatz() and no reaction is not a method (decision of Jesús, 2026-11-25; it used to throw only
+    # without an interface, "starting design has none")
+    @test_throws r"sensitivity = :design with an interface map is not a method" solve!(c.problem, ReactionDiffusion(; τ = 1e-4, sensitivity = :design); maxiter = 1, verbose = 0)
     # two blocks
     model = CartesianDiscreteModel((0, 1, 0, 1), (4, 4))
     V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
@@ -581,12 +583,12 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     r = solve!(c.problem, ReactionDiffusion(; τ = pτ, Δt = pΔt, sensitivity = :physical); maxiter = 6, stop = nothing, verbose = 0,
                continuation = Continuation(τ = pτ => [2e-4, 1e-3], Δt = pΔt => [0.1, 0.05]; every = 3))
     @test r.state.nfactor == 2 && r.state.τ == 1e-3 && r.history.step == [0.1, 0.1, 0.1, 0.05, 0.05, 0.05]
-    # sensitivity = :design with Ersatz() from a design with a hole
+    # sensitivity = :design with Ersatz() from a design with a hole: not a method any more (decision of Jesús,
+    # 2026-11-25; it ran 8 iterations here before the PR double-well): the message points to DoubleWell
     φ0 = x -> clamp(0.3 - hypot(x[1] - 1.0, x[2] - 0.5) + 0.2, -1.0, 1.0)
     c = rd_cantilever(; nx = 20, ny = 10, init = φ0)
-    r = solve!(c.problem, ReactionDiffusion(; τ = 2e-4, sensitivity = :design); maxiter = 8, stop = nothing, verbose = 0)
-    g = r.history.constraints.volume
-    @test all(isfinite, r.history.objective) && all(k -> abs(g[k] - max(0.0, g[k-1] - 0.04)) <= VT, 2:8)
+    @test_throws r"reaction = DoubleWell\(…\) and hole_seed" solve!(c.problem, ReactionDiffusion(; τ = 2e-4, sensitivity = :design);
+                                                                    maxiter = 8, stop = nothing, verbose = 0)
     # consistent mass with a frozen zone
     c = rd_cantilever(; nx = 20, ny = 10)
     r = solve!(c.problem, rd(; mass = :consistent); maxiter = 5, stop = nothing, verbose = 0)
@@ -826,7 +828,7 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     rs = solve!(cs.problem, rd(); maxiter = 400, verbose = 0)
     @test r.objective * get_scale(c.C) <= 1.05 * rs.objective * get_scale(cs.C)       # absolute compliances
     c = rd_cantilever(; nx = 10, ny = 5)
-    @test_throws r"hole_seed, comes with DoubleWell" solve!(c.problem, ReactionDiffusion(; τ = 1e-4, sensitivity = :design); maxiter = 1, verbose = 0)
+    @test_throws r"is not a method of ReactionDiffusion.*DoubleWell.*hole_seed" solve!(c.problem, ReactionDiffusion(; τ = 1e-4, sensitivity = :design); maxiter = 1, verbose = 0)
   end
 
 end

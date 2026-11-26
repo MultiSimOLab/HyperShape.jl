@@ -17,7 +17,7 @@ const DIRS = GROUP == "all" ? (GROUPS["core"]..., GROUPS["methods"]..., GROUPS["
     if GROUP in ("all", "core")
         @testset "Package loads and exports its public names" begin
             for name in (:OC, :SiMPL, :Optimization, :DensityMethod, :ReactionDiffusion, :ExactVolume, :L1Mean, :L2Norm,
-                         :MaxAbs, :StateOperator, :Functional, :solve!, :hole_seed)
+                         :MaxAbs, :DoubleWell, :StateOperator, :Functional, :solve!, :hole_seed)
                 @test name in names(HyperShape)
             end
             for name in (:FieldWriter, :write_fields)          # public, not exported (to move to HyperFEM)
