@@ -110,21 +110,28 @@ mesh; the examples and the tests start from `:hex`.
 
 - **Mesh.** The load is a point load: the compliance grows like `log(1/h)` (the solid domain alone gives a larger J on
   a finer mesh), so the values of the bridge on different meshes are not comparable with each other nor with 23.3 away
-  from 200 × 100. With κ = 1e-5 and `T = 25` on 400 × 200 (20 substeps of 1.25), the default stop gives J = 24.09 from
-  the seed of Takezawa (175/176, settled/stopped, 9 holes) and 24.31 from `:hex` (141/142, 6 holes). The test suite runs
+  from 200 × 100. With κ = 1e-5 and `T = 25` on 400 × 200 (20 substeps of 1.25), the default stop gives J = 24.08 from
+  the seed of Takezawa (175/185, settled/stopped, 9 holes; `interior_holes` gives 11 at 185, counting two grey specks
+  of one and two cells next to the supports, χ ≈ 0.36) and 24.31 from `:hex` (141/142, 6 holes). The test suite runs
   the bridge on 100 × 50 with κ = 4e-5 from `:hex` against its own reference (J 23.34 at 100 iterations, 23.40 with the
   preset). The mesh independence is checked on the cantilever (next section).
 - **Stop and settling.** With the default stop of the well (`material_tol = 1e-2`, maxiter 300, checked from the
-  iteration after the settling): on 200 × 100 from the seed of Takezawa the run settles at 72 and stops at 77 (J 23.672, 9 holes), from `:hex` at 74 and 75 (J 23.902, 6 holes). 100 × 50 (κ = 4e-5, `:hex`): settles at 105, stops at 116 (J 23.263). The
-  range of the objective alone stopped at 58 with J 24.81, before the merge of the holes. Without the hold until the
-  settling, on 400 × 200 with 10 substeps of 2.5 from the seed of Takezawa the run stopped at iteration 53 (J 25.21,
-  18 holes). That stop is false, and not caused by the substeps: the relative range of the objective over the last 10
-  iterations was 3.5e-3, above `1e-3`, but `objective_range` compares the range with `max(max|f|, 1e-3 |f₁|)` and
-  `f₁ = 3.16e5` (the holes of the seed over the supports), a floor of 315 for `J ≈ 25`. The settling measures the
-  range without the floor, so on the default path the hold masks it (the run settles at 88 and stops at 93, J 24.84,
-  still with 18 holes: on that mesh 10 substeps of 2.5 do not merge the holes of that seed; with `T = 25` from
-  `n = ⌈T/(cfl Δt_lim)⌉`, 20 substeps of 1.25, it has 9 holes). The floor is common to all the methods; its correction
-  is a separate change.
+  iteration after the settling): on 200 × 100 from the seed of Takezawa the run settles at 72 and stops at 82 (J 23.672, 9 holes), from `:hex` at 74 and 75 (J 23.902, 6 holes). 100 × 50 (κ = 4e-5, `:hex`): settles at 105, stops at 116 (J 23.263). The
+  range of the objective alone (`StopCriteria(objective_range = 1e-3)`, not held) is met at the iteration of the
+  settling, which checks the same range: from the seed of Takezawa it stops at 72 on 200 × 100 (J 23.719, 9 holes) and
+  at 175 on 400 × 200 (J 24.117, 9 holes). With the floor of `objective_range` described below it stopped early, at 51
+  (J 23.776) and at 50 (J 25.241, 21 holes: before the merge of the holes) (measured on the code before the
+  correction). On 400 × 200 with 10 substeps of 2.5 from the seed of Takezawa the run used to stop at
+  iteration 53 (J 25.21, 18 holes) with `settle = false` or with the stop of the well given by the user (not held).
+  That stop was false, and not caused by the substeps: the relative range of the objective over the last 10
+  iterations was 3.5e-3, above `1e-3`, but `objective_range` then compared the range with `max(max|f|, 1e-3 |f₁|)`
+  and `f₁ = 3.16e5` (the holes of the seed over the supports), a floor of 315 for `J ≈ 25`. That floor has been
+  removed: the range is relative to the window alone (`objective_atol` gives an absolute tolerance for objectives that
+  tend to zero). It also caused the stops at 77 (200 × 100 above) and 93 (this case with the hold) documented before.
+  Measured without it (2026-11-26, Mac M5 Max, Julia 1.13, 4 threads): this case settles at 88 and stops at 98
+  (J 24.83, still 18 holes: on that mesh 10 substeps of 2.5 do not merge the holes of that seed; with `T = 25` from
+  `n = ⌈T/(cfl Δt_lim)⌉`, 20 substeps of 1.25, it has 9 holes), the same with the stop given by the user; with
+  `settle = false` the default stop is not met in 300 iterations (J 24.64).
 
 ## Mesh independence of the double well (cantilever)
 
