@@ -2,6 +2,7 @@
 include(joinpath(@__DIR__, "..", "..", "examples", "mbb.jl"))
 include(joinpath(@__DIR__, "..", "..", "examples", "mbb_factories.jl"))
 include(joinpath(@__DIR__, "..", "..", "examples", "cantilever_rd.jl"))
+include(joinpath(@__DIR__, "..", "..", "examples", "bridge_dw.jl"))
 
 @testset "Examples" begin
   @testset "MBB beam (examples/mbb.jl)" begin
@@ -26,6 +27,17 @@ include(joinpath(@__DIR__, "..", "..", "examples", "cantilever_rd.jl"))
     @test r.status === :converged && r.iterations <= 150
     @test abs(r.history.constraints.volume[end]) <= 2e-4               # the volume (to 1e-4 |D|) reached at iteration 25
     @test r.history.objective[end] < 1 / (1e-3 + 0.5 * (1 - 1e-3))     # better than a uniform material χ = 0.5
+  end
+  @testset "Bridge by the double well (examples/bridge_dw.jl)" begin
+    r = run_bridge_dw(; nx = 100, ny = 50, maxiter = 300, verbose = 0)
+    # κ = 1e-5 and T = 25 on 100×50: 2 substeps of 12.5, settles, then the default stop (measured: settles at 136,
+    # converges at 168, J 21.347, Mac M5 Max, Julia 1.13)
+    @test r.state.nsub == 2 && r.state.Δt == 12.5
+    @test r.status === :converged && r.reason === :all && r.iterations < 300
+    @test r.state.settled && r.state.substeps == 1 && r.state.settle_iter < r.iterations
+    @test abs(r.history.constraints.volume[end]) <= 1e-4 * 2 / 0.6              # the volume (to 1e-4 |D|) reached
+    @test all(isfinite, r.history.objective)
+    @test 21.0 <= r.objective <= 21.7
   end
   @testset "The README and the Getting started page show examples/mbb.jl" begin
     root = joinpath(@__DIR__, "..", "..")

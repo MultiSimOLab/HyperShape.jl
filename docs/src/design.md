@@ -132,8 +132,8 @@ z  = OptVariables(φ = FieldVariable(Vφ; bounds = (-1.0, 1.0), init = φ0, froz
 
 - Two uses: an optional perforated start for methods that nucleate holes (`ReactionDiffusion(…; sensitivity =
   :physical)`, as Yamada et al. 2010; studies of the dependence of the design on the start), and the mandatory start
-  of methods that only move the boundary (the double-well reaction–diffusion `DoubleWell`, next release, after
-  Takezawa et al. 2010), whose holes are those of the seed.
+  of methods that only move the boundary (the double-well reaction–diffusion, `ReactionDiffusion(…; reaction =
+  DoubleWell())`, after Takezawa et al. 2010), whose holes are those of the seed (with `bounds = (0.0, 1.0)`).
 - `radius`, `spacing` (default `4radius`), `margin` and `width` are lengths in the units of the mesh, so the start
   does not change when the mesh is refined. Patterns: `:hex` (default; staggered rows in 2D, face-centred cubic in
   3D, a hole at the centre of the box; `jitter ∈ [0, 1)` moves the centres at random without letting two holes
@@ -433,12 +433,12 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
 - **Sensitivity** (mandatory): `:physical` differentiates with respect to the material, the interface map taken as
   the identity weighted by the material, `(w₀ + (1 − w₀) χ) ∂j/∂χ` (`void_weight = w₀ = 1e-3`): holes nucleate where
   the material is little used. The exact derivative through the map would refill the void (in the prototype the
-  design oscillated, J = 16–70 against 2.4). `:design` is the exact derivative with respect to φ (with `Ersatz()`,
-  nonzero only on the cut cells: no nucleation, so the start needs an interface). `:design` with an interface map is
-  not offered as a method: with the exact multiplier of the volume, which shifts φ uniformly, the solid plateau sinks
-  where the derivative vanishes (measured from hole seeds on the 120 × 60 cantilever: 7–25 % worse than `:physical`, specks). The variant that
-  only moves the boundary, from a start with holes (`hole_seed`), comes with the double-well reaction `DoubleWell` in
-  the next release, which will redefine `:design`. Without an interface map both are the same. `check_consistency` always checks the exact derivative; with `Ersatz()` give it steps below the default,
+  design oscillated, J = 16–70 against 2.4). `:design` is the exact derivative with respect to φ: for a density
+  (without an interface map both are the same) and with the double well (below), where it is the default.
+  `:design` with an interface map is not a method and `solve!` throws: the exact derivative lives on the cut cells
+  and, with the exact multiplier of the volume, which shifts φ uniformly, the solid plateau sinks where the derivative
+  vanishes (measured from hole seeds on the 120 × 60 cantilever: 7–25 % worse than `:physical`, specks). The variant
+  that only moves the boundary, from a start with holes (`hole_seed`), is a density with `reaction = DoubleWell(…)`. `check_consistency` always checks the exact derivative; with `Ersatz()` give it steps below the default,
   `check_consistency(…; h0 = 1e-3)`: larger steps cross the kinks of the cell fractions (a node changing sign) and
   the observed rates fall below 2 for a correct derivative.
 - **Normalisation** (`normalize`): `L1Mean(c)` (default, `C = c |D| / Σ|gᵢ|`, independent of the mesh),
@@ -484,8 +484,103 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
 - **Allocations:** the arithmetic of the step and a linear volume allocate nothing (one substitution of UMFPACK
   aside); each evaluation of a nonlinear volume reserves about 70 kB and each derivative of `Ersatz()` about 130 kB
   (Gridap's integration), independent of the mesh.
-- **Not yet:** the presets of Otomori, Yamada and Choi, Dirichlet conditions for φ on lines of nodes, the double
-  well (`DoubleWell`, boundary motion from a `hole_seed` start), 3D validation.
+- **Not yet:** the presets of Otomori, Yamada and Choi, Dirichlet conditions for φ on lines of nodes, the second loop of
+  Kim et al. (2020) (explicit double well with a decreasing diffusion, a refinement stage), the double well with an
+  interface map, 3D validation.
+
+### Double well
+
+`ReactionDiffusion(; τ, reaction = DoubleWell())` is the variant that only moves the boundary (Takezawa, Nishiwaki and
+Kitamura 2010; Kim et al. 2020, loop 2): a density `φ ∈ [0, 1]` read through `Identity()` (with an interpolation such as
+`k(φ) = max(φ³, 1e-5)` in the weak forms), started from a design with holes, evolves by
+
+```
+∂φ/∂t = τ ℓ² Δφ − W w′(φ) − 30 w(φ) (η C g/m + λ),     w(φ) = φ² (1 − φ)²
+```
+
+The well keeps the design near 0/1 with an interface of width `ξ = √(τℓ²/2W)`; the sensitivity and the multiplier of
+the volume are both weighted by `30 w(φ)`, which vanishes at 0 and 1, so the reaction moves only the interface and no
+hole is nucleated (the start needs an interface: `solve!` throws otherwise and points to `hole_seed(Vφ; bounds =
+(0.0, 1.0), …)`).
+
+```julia
+φ0 = hole_seed(Vφ; bounds = (0.0, 1.0), radius = 0.1, spacing = 0.4, exclude = ("roller", "pin", "load"))
+z  = OptVariables(φ = FieldVariable(Vφ; bounds = (0.0, 1.0), init = φ0))
+θ  = PhysicalFields(DesignFields(z; φ = Identity()); χ = :φ => Identity())
+# … the state with k(φ) = max(φ³, 1e-5), the compliance C and Vol = Volume(θ, dΩ; max_fraction = 0.3)
+result = solve!(Optimization(z; objective = C, constraints = (volume = Vol,)),
+                ReactionDiffusion(; κ = 1e-5, reaction = DoubleWell()); maxiter = 300)   # τ = κ/|D| = 5e-6, T = 25
+```
+
+The whole script is `examples/bridge_dw.jl`; `validation/bridge_takezawa.jl` reproduces the published bridge.
+
+- **Scheme** (decision of Jesús, 2026-11-25): `scheme = :implicit` (default) splits each of the `n` substeps of an
+  iteration into an implicit diffusion with the operator of the step, factorised once,
+  `(m/Δt + τℓ²K) ψ = m φ/Δt − τℓ² k_d`, and the semi-implicit pointwise reaction of Takezawa et al. (their Eqs. 44–45)
+  applied to `ψ`, with `λ` inside the tilt term: the result stays in `[0, 1]` for any `Δt`. `scheme = :explicit` is
+  their scheme (`ψ = φ − Δt τℓ² m⁻¹(K φ + k_d)`, no linear system). The sensitivity is computed once per iteration and
+  frozen over the substeps.
+- **Physical parameters** (decision of Jesús, 2026-11-26): `κ = τ ℓ²` and the time of the evolution per iteration
+  `T` (`DoubleWell(T = 25)`) are physical, the same on every mesh. `ReactionDiffusion(; κ = …)` takes `κ` directly
+  (exactly one of `τ` and `κ`; the banner shows both): `κ` is the coefficient of `K` in the operator as given, and
+  `τ` enters as `τ ℓ²`, so `τ = κ/ℓ²` with the `ℓ²` of the method (a quadrature of `|D|`) gives the same run bit for
+  bit (`τ = κ/2` on the domain 2 × 1 can differ in the last bits, and the double well amplifies them). With the well `κ` (or `τ`) and `Δt` are numbers: a
+  `Continuation` of them would leave `n` and `Δt` stale, and `ReactionDiffusion` refuses a `Parameter` there. An iteration is `n = ⌈T/(cfl Δt_lim)⌉` substeps of
+  `Δt = T/n`, with `Δt_lim = 2/maxᵢ(τℓ² Σⱼ|Kᵢⱼ|/mᵢ)` (Gershgorin, from the assembled `K` and `m` once at the start:
+  `0.375 h²/(τℓ²)` on squares, any mesh) and `cfl = 4/3` with `:implicit`, `1/3` with `:explicit` (`h²/(8τℓ²)`, the
+  step of Takezawa et al.). The pointwise reaction needs `√(τℓ² Δt) ≲ 0.7 h` (a limit like a CFL condition), so the
+  number of substeps grows like `(h₀/h)²`: with κ = 1e-5 and `T = 25` on the domain 2 × 1, 2, 5, 20 and 80 substeps on
+  100 × 50, 200 × 100, 400 × 200 and 800 × 400. No new factorisation per iteration. `DoubleWell(substeps = n)` fixes
+  `n` instead (`T` is then ignored and `Δt = :auto` of the method is `cfl Δt_lim`; the preset `:takezawa2010`). The
+  event after the setup gives `T`, `n`, `Δt`, `Δt_lim` and `ξ = √(τℓ²/2W)` in mean cell sizes `(|D|/cells)^(1/d)`
+  (`K` and `m` are assembled once, in the setup; the banner gives the formula; once per `solve!`, and again after a
+  rebuild of the discretisation only if it changed). More than 10⁶ substeps per iteration
+  are refused. With `:explicit` the operator of the step is never factorised.
+- **Mesh** (study of 2026-11-25, `validation/mesh_double_well.jl`): with κ = 1e-5 and `T = 25` the compliance of the
+  cantilever 2 × 1 from `:hex` is the same within about 3 % on 100 × 50, 200 × 100 and 400 × 200 (2.558, 2.493, 2.426 with 2, 5 and 20 substeps: within ±2.7 % of the value on 200 × 100), but the
+  topology depends on the seed and on the mesh (no holes are nucleated, and a coarse mesh resolves the seed and the
+  thin bars differently). The bridge of Takezawa et al. has a point load: its compliance grows like `log(1/h)`, so its
+  values on different meshes are not comparable (its validation is on 200 × 100, the mesh of the paper).
+- **Volume:** the same `ExactVolume`; its multiplier acts inside the tilt (only on the interface, no `φ̌` and no extra
+  solve): `G(λ) = g(R(ψ; η C g/m + λ)) − g_j` is non-increasing, its root is found at every substep on vectors (regula
+  falsi, Illinois, from the previous `λ`), the target of the iteration is reached linearly over the substeps and
+  `max_step = :auto` is `0.01` of `|D|` per iteration. A target out of reach in one substep (not enough interface)
+  takes the end of the bracket; the next substeps catch up.
+- **Defaults with the well:** `sensitivity` is `:design` (`:physical` is refused), `normalize = L2Norm()` (with
+  `η = 10` it is `η = 20` of Takezawa et al. on their domain of measure 2), `W = 1/4`.
+- **Settling** (decision of Jesús, 2026-11-25): with the sensitivity frozen over the substeps the interface overshoots
+  and comes back, and 1–2 % of the material changes phase at every iteration. `settle = true` (default) goes to one
+  substep (of the same `Δt`) per iteration when the constraints are met and the relative range of the objective over 10
+  iterations is below `1e-3` (`settle = (window = 10, tol = 1e-3)`, both replaceable); an event says so. It depends
+  only on the objective (no fraction of `maxiter`: a run resumed with a larger `maxiter` is the uninterrupted one), and
+  a continuation jump starts the substeps and the window again. `DoubleWell(settle = false)` keeps the substeps.
+- **Default stop with the well** (decisions of Jesús, 2026-11-25/26): after settling the interface still keeps a cycle
+  of a few per mille of the material per iteration, so the default stop takes `material_tol = 1e-2` with the well
+  (`2e-3` without it), the objective range `1e-3` over 10 iterations and the constraints unchanged. It is checked only
+  from the iteration after the settling (or from the start with one substep, or with `settle = false`).
+  `solve!(…; stop)` replaces it and is not held. The early stops of the study (400 × 200 and 800 × 400 from the seed
+  of Takezawa, iterations 49–53) were not an interface stuck with the windows met: on 400 × 200 (iteration 53) the
+  relative range of the objective over the window was 3.5e-3, above `1e-3`, but `objective_range` measures it against `max(max|f|, 1e-3 |f₁|)`, and the first
+  objective of those runs is huge (holes of the seed over the supports: `f₁ ≈ 3e5`, floor 315 for `J ≈ 25`). The
+  settling uses the range without that floor, so the hold of the default stop masks the false stop on the default
+  path; it remains with `settle = false`, with one substep from the start and with a `stop` of the user. The floor
+  is common to every method and will be corrected in a separate change. Measured (Validation page): the
+  bridge 200 × 100 from `:hex` settles at 74 and stops at 75 (J 23.90; from the seed of Takezawa 72 and 77, J 23.67), the cantilever 200 × 100 at 74 and 75 (J 2.493).
+- **Grey:** `StopCriteria(grey_tol)` stops on the measure of grey `Σᵢ mᵢ 4φ̂ᵢ(1 − φ̂ᵢ)/|D|` (nodal, without
+  allocations); with the well it stays at 1–3 % (the interface), so it is a criterion for a refinement stage, not for
+  the evolution from the seed.
+- **Preset** `:takezawa2010`: `DoubleWell(W = 0.25, η = 20, scheme = :explicit, substeps = 20, settle = false)`, the
+  normalisation `1/‖g‖_L²` (without `|D|`), `ExactVolume(max_step = 0.01)`; the script sets `τ = κ/ℓ²`, the seed and
+  `maxiter = 100, stop = nothing`. Differences with the paper: an exact multiplier instead of their rule for ζ, P1
+  finite elements with lumped mass instead of finite differences.
+- **Per iteration:** one forward solve, one adjoint (none with `SelfAdjoint()`), `n` substitutions (none with
+  `:explicit`) and `n` roots on vectors, no factorisation; the step allocates nothing but the substitutions of
+  UMFPACK (nothing at all with `:explicit`).
+- **Checkpoint:** the multiplier, the settling and the window of the objective that decides it are the memory of the
+  step (the substeps follow from the settling and the setup): a resumed run is the uninterrupted one bit for bit,
+  across the settling and with a larger `maxiter`.
+- **Not offered:** the double well with an interface map (`Ersatz()`, `Step()`: φ ∈ [−1, 1] read through the map gave
+  hundreds of specks in the prototype), `sensitivity = :physical` with the well, and the nucleation of holes.
 
 ## Optimisers
 

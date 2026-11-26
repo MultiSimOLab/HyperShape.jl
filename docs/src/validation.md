@@ -85,3 +85,64 @@ passes for P0 and P1, and the design keeps the symmetry in y.
 OC and SiMPL end in different local minima, about 30 % apart: each one started from the design of the other stays
 there (SiMPL from the OC design: 1.647; OC from the SiMPL design: 1.2749). Without continuation of the penalty the
 result of a nonconvex problem depends on the path.
+
+## Bridge of Takezawa et al. (double well)
+
+Takezawa, Nishiwaki and Kitamura, *Shape and topology optimization based on the phase field method and sensitivity
+analysis*, JCP 229 (2010), section 5.2: domain 2 × 1, roller at (0, 0), pin at (2, 0), unit point load at (1, 0), plane
+stress (E = 1, ν = 0.3), volume 0.3, `k(φ) = max(φ³, 1e-5)`, κ = 1e-5 on a 200 × 100 grid, 100 iterations: published
+J = 23.3. `ReactionDiffusion(; κ, reaction = DoubleWell())` (`τ = κ/|D|`) (the default scheme) and the preset
+`:takezawa2010` (their explicit scheme), from their seed (rows of rectangular holes) and from `hole_seed` (`:hex`,
+radius 0.1, spacing 0.4), 100 iterations (`validation/bridge_takezawa.jl`; 2026-11-26, `T = 25` per iteration: 5
+substeps of 5 with the default scheme, 20 of 1.25 with the preset):
+
+| method | seed | J | vs 23.3 | volume | interior holes |
+|---|---|---|---|---|---|
+| default | Takezawa | 23.668 | +1.58 % | 0.30002 | 9 |
+| default | `:hex` | 23.899 | +2.57 % | 0.30002 | 6 |
+| `:takezawa2010` | Takezawa | 23.614 | +1.35 % | 0.30008 | 9 |
+| `:takezawa2010` | `:hex` | 23.661 | +1.55 % | 0.30007 | 8 |
+
+The published value is met within 3 % in the four cases (the published design has 5–6 holes). The designs are
+symmetric about x = 1 up to a few cells (0–2 % of the cells change phase in the mirror): rounding breaks the symmetry
+and the evolution amplifies it. The seed of Takezawa et al. is used only here, against the published value on their
+mesh; the examples and the tests start from `:hex`.
+
+- **Mesh.** The load is a point load: the compliance grows like `log(1/h)` (the solid domain alone gives a larger J on
+  a finer mesh), so the values of the bridge on different meshes are not comparable with each other nor with 23.3 away
+  from 200 × 100. With κ = 1e-5 and `T = 25` on 400 × 200 (20 substeps of 1.25), the default stop gives J = 24.09 from
+  the seed of Takezawa (175/176, settled/stopped, 9 holes) and 24.31 from `:hex` (141/142, 6 holes). The test suite runs
+  the bridge on 100 × 50 with κ = 4e-5 from `:hex` against its own reference (J 23.34 at 100 iterations, 23.40 with the
+  preset). The mesh independence is checked on the cantilever (next section).
+- **Stop and settling.** With the default stop of the well (`material_tol = 1e-2`, maxiter 300, checked from the
+  iteration after the settling): on 200 × 100 from the seed of Takezawa the run settles at 72 and stops at 77 (J 23.672, 9 holes), from `:hex` at 74 and 75 (J 23.902, 6 holes). 100 × 50 (κ = 4e-5, `:hex`): settles at 105, stops at 116 (J 23.263). The
+  range of the objective alone stopped at 58 with J 24.81, before the merge of the holes. Without the hold until the
+  settling, on 400 × 200 with 10 substeps of 2.5 from the seed of Takezawa the run stopped at iteration 53 (J 25.21,
+  18 holes). That stop is false, and not caused by the substeps: the relative range of the objective over the last 10
+  iterations was 3.5e-3, above `1e-3`, but `objective_range` compares the range with `max(max|f|, 1e-3 |f₁|)` and
+  `f₁ = 3.16e5` (the holes of the seed over the supports), a floor of 315 for `J ≈ 25`. The settling measures the
+  range without the floor, so on the default path the hold masks it (the run settles at 88 and stops at 93, J 24.84,
+  still with 18 holes: on that mesh 10 substeps of 2.5 do not merge the holes of that seed; with `T = 25` from
+  `n = ⌈T/(cfl Δt_lim)⌉`, 20 substeps of 1.25, it has 9 holes). The floor is common to all the methods; its correction
+  is a separate change.
+
+## Mesh independence of the double well (cantilever)
+
+The cantilever 2 × 1 (clamped at x = 0, a unit traction on x = 2, |y − ½| ≤ 0.1, volume 0.5, `k(φ) = max(φ³, 1e-5)`)
+with `ReactionDiffusion(; κ, reaction = DoubleWell())`, κ = 1e-5 and `T = 25` (physical, the same on every
+mesh), from `hole_seed` (`:hex`, radius 0.1, spacing 0.4) and the default stop (`validation/mesh_double_well.jl`;
+2026-11-26, Mac M5 Max, Julia 1.13, 4 threads):
+
+| mesh | substeps × Δt | J | settled / stopped | interior holes | time |
+|---|---|---|---|---|---|
+| 100 × 50 | 2 × 12.5 | 2.5582 | 89 / 92 | 6 | 2.5 s |
+| 200 × 100 | 5 × 5 | 2.4933 | 74 / 75 | 8 | 7.4 s |
+| 400 × 200 | 20 × 1.25 | 2.4255 | 95 / 100 | 14 | 47.6 s |
+
+J is within ±2.7 % of the value on 200 × 100 (V1 from a solid start: 2.380–2.384 on the same meshes), but the topology
+depends on the mesh and on the seed: the double well does not nucleate holes, and the holes of the seed are resolved
+and merged differently on each mesh (6, 8 and 14 interior holes). The substeps grow like `(h₀/h)²`: the pointwise
+reaction needs `√(κ Δt) ≲ 0.7 h`, a limit like a CFL condition (80 substeps on 800 × 400). With κ scaled with `h²`
+instead (the same interface in cells; discarded) the boundary moves a fixed number of cells per iteration and a finer
+mesh does not finish the bridge in 100 iterations. The test suite runs the 100 × 50 case with κ = 4e-5 (5 substeps of
+5, J 2.537).

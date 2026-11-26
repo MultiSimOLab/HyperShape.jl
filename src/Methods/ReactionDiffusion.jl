@@ -48,6 +48,12 @@ Base.show(io::IO, n::L1Mean) = print(io, "L1Mean(", _g(n.c), ")")
 Base.show(io::IO, ::L2Norm) = print(io, "L2Norm()")
 Base.show(io::IO, ::MaxAbs) = print(io, "MaxAbs()")
 
+# The normalisation of Takezawa et al. (2010), `C = 1 / (Σᵢ gᵢ² / mᵢ)^½` (the L² norm without |D|), for the preset
+# :takezawa2010 (internal: a function (g, m, area) -> C of the user replaces it)
+struct _TakezawaNorm end
+(::_TakezawaNorm)(g, m, area) = 1 / sqrt(sum(Broadcast.instantiate(Broadcast.broadcasted((a, b) -> a^2 / b, g, m))))
+Base.show(io::IO, ::_TakezawaNorm) = print(io, "L² norm without |D| (Takezawa et al. 2010)")
+
 # ---------------------------------------------------------------------------------------------------------------
 # Exact volume
 
@@ -103,10 +109,141 @@ Base.show(io::IO, v::ExactVolume) =
         v.constraint === nothing ? "" : ", constraint = $(repr(v.constraint))", ")")
 
 # ---------------------------------------------------------------------------------------------------------------
+# The double-well reaction
+
+"""
+    DoubleWell(; W = 0.25, η = 10.0, T = 25.0, cfl = :auto, scheme = :implicit, settle = true, substeps = nothing)
+
+The double-well reaction of [`ReactionDiffusion`](@ref) (Takezawa, Nishiwaki and Kitamura 2010; Kim et al. 2020, loop
+2), given as `ReactionDiffusion(; κ, reaction = DoubleWell())` (or `τ = κ/ℓ²`). The design is a density `φ ∈ [lb, ub]`
+(normally `bounds = (0.0, 1.0)`, read through `Identity()` and an interpolation in the weak forms) that evolves by
+
+    ∂φ̂/∂t = τ ℓ² Δφ̂ − W w′(φ̂) − 30 w(φ̂) (η C g/m + λ),     w(φ̂) = φ̂² (1 − φ̂)²,   φ̂ = (φ − lb)/(ub − lb),
+
+with `C` the normalisation of the method (`normalize`, [`L2Norm`](@ref)`()` by default with the well), `g/m` the
+sensitivity density and `λ` the multiplier of the volume, found exactly at every substep ([`ExactVolume`](@ref)).
+Both the sensitivity and the multiplier are weighted by `30 w(φ̂)`, which vanishes at `0` and `1`: the reaction only
+moves the interface and holes are not nucleated, so the start needs one (built with
+[`hole_seed`](@ref HyperShape.Variables.hole_seed)`(Vφ; bounds = (0.0, 1.0), …)`). The well keeps the design close to
+0/1 with an interface of width `ξ = √(κ / 2W)`. `κ = τ ℓ²` is a physical parameter, the same on every mesh: on a
+coarse mesh the interface is thinner than a cell. With the well `κ` (or `τ`) is a number: the substeps are set from
+it once at the start, so a `Continuation` of `τ` (or of `Δt`) is refused.
+
+- `W`: height of the well (barrier `W/16`). `η`: gain of the sensitivity. Takezawa et al. use `W = 1/4` and `η = 20` with
+  `g/‖g‖_L²`; `η = 10` with `L2Norm()` (`|D| g/‖g‖_L²`) is the same on their domain of measure 2.
+- `T`: the time of the evolution per iteration (one forward solve, one sensitivity), split into
+  `n = ⌈T / (cfl Δt_lim)⌉` substeps of `Δt = T/n`, with the bound of Gershgorin `Δt_lim = 2 / maxᵢ(κ Σⱼ|Kᵢⱼ| / mᵢ)`
+  of the explicit diffusion, from the assembled `K` and lumped mass `m` once at the start (`0.375 h²/κ` on a
+  uniform mesh of squares; it holds on any mesh). `T` is physical: the evolution per iteration does not depend on the
+  mesh, and the number of substeps grows like `(h₀/h)²` (the pointwise reaction needs `√(κ Δt) ≲ 0.7 h`; more than
+  10⁶ substeps per iteration is refused). The method keeps `Δt = :auto`. An event after the setup gives `T`, `n`,
+  `Δt`, `Δt_lim` and `ξ` in mean cell sizes `h̄ = (|D|/cells)^(1/d)`.
+- `cfl`: the substep relative to `Δt_lim`; `:auto` is `4/3` with `:implicit` and `1/3` with `:explicit` (`h²/(8κ)`,
+  the step of Takezawa et al.).
+- `scheme = :implicit` (default): each substep diffuses implicitly, `(m/Δt + κK) ψ = m φ/Δt` with the operator
+  factorised once (the one of the step), and then applies the semi-implicit pointwise reaction of Takezawa et al.
+  (their Eqs. 44–45) to `ψ`, with `λ` inside the tilt term, by a root on vectors. `scheme = :explicit`: the explicit
+  substeps of Takezawa et al. (`ψ = φ − Δt κ m⁻¹ K φ`, no linear system and no factorisation), the scheme of the preset
+  `:takezawa2010`.
+- `substeps = n` (an integer): `n` substeps of the `Δt` of the method per iteration, and `T` is ignored; `Δt = :auto`
+  of the method is then `cfl Δt_lim` and a number replaces it (with `:explicit`, `Δt ≤ Δt_lim` is checked). With
+  `substeps = nothing` (default) a number `Δt` of the method is refused.
+- `settle`: with the substeps frozen on one sensitivity the interface overshoots and comes back, and a few per cent of
+  the material changes phase at every iteration. `settle = true` (that is `settle = (window = 10, tol = 1e-3)`) goes
+  to one substep (of the same `Δt`) per iteration once the constraints are met and the relative range of the
+  objective over the last `window` iterations is below `tol` (an event says so); a continuation jump starts the
+  substeps and the window again. The default stop is only checked from the iteration after the settling (or from the
+  start when `n = 1`). `settle = (window = w, tol = t)` changes the window and the tolerance (either can be left
+  out). `settle = false` keeps the substeps and does not hold the default stop (give `stop` and `maxiter` yourself).
+- The default stop with the well (`default_stop`): the constraints met, the material changed less than `1e-2` in each
+  of the last 5 iterations and the relative range of the objective over the last 10 below `1e-3`
+  (`StopCriteria(material_tol = 1e-2, objective_range = 1e-3, combine = :all)`; `2e-3` without the well: the interface
+  of the well keeps a cycle of a few per mille of the material per iteration), after the settling. `solve!(…; stop)`
+  replaces it (and is not held until the settling).
+
+Mesh: with `κ` and `T` fixed, the compliance of the cantilever 2 × 1 (κ = 1e-5, `T = 25`, seed `:hex`) is the same
+within about 3 % on 100 × 50, 200 × 100 and 400 × 200 (with 2, 5 and 20 substeps), but the topology depends on the
+seed and on the mesh (the double well does not nucleate holes, and the seed is resolved differently on each mesh). The
+bridge of Takezawa et al. (a point load) is not comparable across meshes: its compliance grows like `log(1/h)`.
+
+With the well, `sensitivity` is not mandatory (it is the exact derivative, `:design`; `:physical` is refused),
+`normalize` defaults to `L2Norm()` and `ExactVolume(max_step = :auto)` lowers the target `1 %` of `|D|` per iteration
+(spread over the substeps). Not with an interface map (`Ersatz()`, `Step()`). Per iteration: one forward solve, one
+adjoint, `n` back-substitutions (`:implicit`; none with `:explicit`) and `n` roots on vectors, no factorisation.
+"""
+struct DoubleWell
+  W::Float64
+  η::Float64
+  T::Float64
+  substeps::Int           # 0: from T
+  cfl::Float64            # NaN: :auto
+  scheme::Symbol
+  settle::Bool
+  settle_window::Int      # the settling: the window of the objective and its relative range
+  settle_tol::Float64
+  function DoubleWell(; W::Real = 0.25, η::Real = 10.0, T::Real = 25.0, cfl = :auto, scheme::Symbol = :implicit,
+                      settle::Union{Bool,NamedTuple} = true, substeps::Union{Nothing,Integer} = nothing)
+    (isfinite(W) && W > 0) || throw(ArgumentError("DoubleWell: W must be positive and finite, got $W"))
+    (isfinite(η) && η > 0) || throw(ArgumentError("DoubleWell: η must be positive and finite, got $η"))
+    (isfinite(T) && T > 0) || throw(ArgumentError("DoubleWell: T must be positive and finite, got $T"))
+    scheme in (:implicit, :explicit) || throw(ArgumentError("DoubleWell: scheme must be :implicit or :explicit, got $(repr(scheme))"))
+    substeps === nothing || substeps >= 1 || throw(ArgumentError("DoubleWell: substeps must be nothing or at least 1, got $substeps"))
+    (cfl === :auto || (cfl isa Real && isfinite(cfl) && cfl > 0)) ||
+      throw(ArgumentError("DoubleWell: cfl must be :auto or a positive number, got $(repr(cfl))"))
+    scheme === :explicit && cfl isa Real && cfl > 1 &&
+      throw(ArgumentError("DoubleWell: with scheme = :explicit cfl must be ≤ 1 (the bound of stability), got $cfl"))
+    on, w, tol = _settle_args(settle)
+    new(Float64(W), Float64(η), Float64(T), substeps === nothing ? 0 : Int(substeps), cfl === :auto ? NaN : Float64(cfl),
+        scheme, on, w, tol)
+  end
+end
+
+const _SETTLE_DEFAULT = (window = 10, tol = 1e-3)
+
+# settle = true / false / (window = w, tol = t) → (on, window, tol)
+_settle_args(on::Bool) = (on, _SETTLE_DEFAULT.window, _SETTLE_DEFAULT.tol)
+function _settle_args(nt::NamedTuple)
+  for k in keys(nt)
+    k in (:window, :tol) || throw(ArgumentError("DoubleWell: settle takes window and tol, as settle = (window = 10, tol = 1e-3); got $k"))
+  end
+  w = get(nt, :window, _SETTLE_DEFAULT.window)
+  tol = get(nt, :tol, _SETTLE_DEFAULT.tol)
+  (w isa Integer && w >= 2) || throw(ArgumentError("DoubleWell: settle window must be an integer ≥ 2, got $(repr(w))"))
+  (tol isa Real && isfinite(tol) && tol > 0) || throw(ArgumentError("DoubleWell: settle tol must be a positive number, got $(repr(tol))"))
+  (true, Int(w), Float64(tol))
+end
+
+# the factor of Δt_lim with Δt = :auto
+_cfl(d::DoubleWell) = isnan(d.cfl) ? (d.scheme === :explicit ? 1 / 3 : 4 / 3) : d.cfl
+
+_settle_text(d::DoubleWell) = !d.settle ? "false" :
+  (d.settle_window == _SETTLE_DEFAULT.window && d.settle_tol == _SETTLE_DEFAULT.tol) ? "true" :
+  "(window = $(d.settle_window), tol = $(_g(d.settle_tol)))"
+
+Base.show(io::IO, d::DoubleWell) =
+  print(io, "DoubleWell(W = ", _g(d.W), ", η = ", _g(d.η), d.substeps == 0 ? ", T = $(_g(d.T))" : ", substeps = $(d.substeps)",
+        ", cfl = ", isnan(d.cfl) ? ":auto" : _g(d.cfl), ", scheme = ", repr(d.scheme), ", settle = ", _settle_text(d), ")")
+
+# more substeps per iteration than this is refused (T far too large for the mesh and κ)
+const _DW_MAX_SUBSTEPS = 10^6
+
+# the substeps of an iteration from T: n = ⌈T/(cfl Δt_lim)⌉ and Δt = T/n (the relative tolerance keeps n when
+# T/(cfl Δt_lim) is an integer up to rounding); with substeps given, those
+function _dw_substeps(d::DoubleWell, Δtlim)
+  d.substeps > 0 && return d.substeps
+  x = d.T / (_cfl(d) * Δtlim) * (1 - 1e-12)
+  x <= _DW_MAX_SUBSTEPS ||
+    throw(ArgumentError("DoubleWell: T = $(_g(d.T)) per iteration needs ⌈T/(cfl Δt_lim)⌉ = $(_g(x)) substeps " *
+                        "(cfl $(_g(_cfl(d))), Δt_lim = $(_g(Δtlim))), more than $(_DW_MAX_SUBSTEPS): lower T, or give " *
+                        "DoubleWell(substeps = n)"))
+  max(1, ceil(Int, x))
+end
+
+# ---------------------------------------------------------------------------------------------------------------
 # The step
 
 # The optimiser of ReactionDiffusion (internal): the implicit step, the operator and the multiplier.
-struct RDStep{T,D,N,V,LS,S,F} <: Optimizer
+struct RDStep{T,D,N,V,LS,S,F,R} <: Optimizer
   τ::T                  # a number or a Parameter
   Δt::D                 # a number, a Parameter or :auto
   sensitivity::Symbol
@@ -119,11 +256,21 @@ struct RDStep{T,D,N,V,LS,S,F} <: Optimizer
   diffusion::F          # nothing or (φ, v) -> ∫(…)dΩ
   degree::Int
   gtol::Base.RefValue{Float64}   # the tolerance of the volume in units of the scaled constraint (set per problem)
-  Δt_auto::Base.RefValue{Float64}  # Δt = :auto resolved for the problem (0.2 with an interface map, 0.4 without)
+  Δt_auto::Base.RefValue{Float64}  # Δt = :auto resolved for the problem (0.2 with an interface map, 0.4 without;
+                                   # cfl Δt_lim with DoubleWell, set by init)
+  reaction::R           # nothing or DoubleWell
+  κgiven::Bool          # the field τ holds κ = τ ℓ² (given as κ): τ = κ/ℓ² once ℓ² is known
 end
+
+# the step with the double-well reaction
+const _DWStep = RDStep{<:Any,<:Any,<:Any,<:Any,<:Any,<:Any,<:Any,DoubleWell}
 
 _value(x::Real) = Float64(x)
 _value(p::Parameter) = p[]
+# the dimensionless τ (from κ = τ ℓ² when κ was given)
+_τ(opt::RDStep, ℓ2) = opt.κgiven ? _value(opt.τ) / ℓ2 : _value(opt.τ)
+# the coefficient of the diffusion in the operator, κ = τ ℓ²: κ as given (no round trip through τ), or τ ℓ²
+_coef(opt::RDStep, ℓ2) = opt.κgiven ? _value(opt.τ) : _value(opt.τ) * ℓ2
 
 mutable struct RDState{NS,C,MT,MM,ME}
   m::Vector{Float64}            # lumped mass (free rows)
@@ -139,6 +286,7 @@ mutable struct RDState{NS,C,MT,MM,ME}
   unit::Bool                    # φ̌ = Δt (no Dirichlet values and the default diffusion)
   nfrozen::Int
   τ::Float64
+  c::Float64                    # κ = τ ℓ², the coefficient of K in the operator (κ as given, or τ ℓ²)
   Δt::Float64                   # current (reduced after a rejected step)
   Δt_nom::Float64               # nominal
   ns::NS                        # numerical setup of ls (nothing with a solve of the user)
@@ -166,6 +314,18 @@ mutable struct RDState{NS,C,MT,MM,ME}
   nmeter::Int                   # evaluations of the volume by the material meter (Step())
   vref::Float64                 # V_max + r of the native Volume (its value from the meter: (∫χ − vref)/vscale)
   vscale::Float64
+  lb::Float64                   # the bounds of the design field (the grey measure, the double well)
+  ub::Float64
+  # the double well (empty or unused without it)
+  gn::Vector{Float64}           # η C g/m
+  substeps::Int                 # current substeps (1 once settled)
+  nsub::Int                     # the substeps of an iteration before the settling (from T, or given)
+  settled::Bool
+  settle_iter::Int              # the iteration at which it settled (0: not yet)
+  fwin::Vector{Float64}         # the last objectives with the constraints met (oldest first; the window of settle)
+  nwin::Int
+  Δtlim::Float64                # the bound of Gershgorin of the explicit diffusion, 2/maxᵢ(τℓ² Σⱼ|Kᵢⱼ|/mᵢ)
+  hmean::Float64                # the mean cell size (|D|/cells)^(1/d) (the width of the interface in the event)
 end
 
 # the union of the patterns of the matrices and the diagonal, with zero values
@@ -233,21 +393,32 @@ function Optimizers.init(opt::RDStep, z, oracle)
   Kmap, Dmap = _positions(A, K), _diagonal_positions(A)
   Mmap = M === nothing ? Int[] : _positions(A, M)
   _resolve_Δt!(opt, (fo.J, (c.F for c in fo.cons)...))
-  τ, Δt = _check_τΔt(opt)
+  ℓ2 = area^(2 / d)
+  Δtlim, nsub = opt.reaction === nothing ? (NaN, 0) : _dw_resolve_Δt!(opt, K, m, ℓ2)
+  τ, Δt = _check_τΔt(opt, ℓ2)
+  c = _coef(opt, ℓ2)
   ns = nothing
-  if opt.solve === nothing
-    _fill_operator!(A, K, M, m, Kmap, Mmap, Dmap, τ * area^(2 / d), Δt)
+  if opt.solve === nothing && _factorizes(opt)
+    _fill_operator!(A, K, M, m, Kmap, Mmap, Dmap, c, Δt)
     ns = numerical_setup(symbolic_setup(opt.ls, A), A)
   end
   v() = zeros(n)
-  s = RDState(m, K, M, A, Kmap, Mmap, Dmap, kd, area, area^(2 / d), nd == 0 && opt.diffusion === nothing, nd, τ, Δt, Δt,
+  dw = opt.reaction
+  blk = zv.blocks[1]
+  s = RDState(m, K, M, A, Kmap, Mmap, Dmap, kd, area, ℓ2, nd == 0 && opt.diffusion === nothing, nd, τ, c, Δt, Δt,
               ns, true, v(), v(), v(), v(), v(), v(), v(), v(), 0.0, false, :none,
-              _has_interface_map(physical_fields(fo.J)), NaN, _material_meter(fo, z), z, Inf, fo.ctx, 0, 0, 0, 0, NaN, NaN)
-  if opt.solve === nothing
-    s.nfactor += 1
-    _unit_response!(opt, s)
-  else
-    _rebuild!(opt, s)
+              _has_interface_map(physical_fields(fo.J)), NaN, _material_meter(fo, z), z, Inf, fo.ctx, 0, 0, 0, 0, NaN, NaN,
+              Float64(blk.lb), Float64(blk.ub), dw === nothing ? Float64[] : v(), nsub, nsub,
+              false, 0, dw === nothing ? Float64[] : fill(NaN, dw.settle_window), 0, Δtlim, (area / num_cells(Ω))^(1 / d))
+  if dw === nothing
+    if opt.solve === nothing
+      s.nfactor += 1
+      _unit_response!(opt, s)
+    else
+      _rebuild!(opt, s)
+    end
+  elseif _factorizes(opt)
+    opt.solve === nothing ? (s.nfactor += 1) : _rebuild!(opt, s)
   end
   _rd_constraint!(opt, s, oracle, fo)
   s
@@ -260,10 +431,43 @@ function _resolve_Δt!(opt::RDStep, Fs)
   opt.Δt_auto[] = any(F -> _has_interface_map(physical_fields(F)), Fs) ? 0.2 : 0.4
   opt
 end
+_resolve_Δt!(opt::_DWStep, Fs) = opt                 # from K and m, in init (_dw_resolve_Δt!)
+
+# The bound of Gershgorin of the explicit diffusion, Δt_lim = 2/maxᵢ(τℓ² Σⱼ|Kᵢⱼ|/mᵢ) (K symmetric: the sums of the
+# columns)
+function _gershgorin_Δt(K, m, c)
+  rmax = 0.0
+  @inbounds for j in 1:size(K, 2)
+    a = 0.0
+    for p in K.colptr[j]:(K.colptr[j+1]-1)
+      a += abs(K.nzval[p])
+    end
+    rmax = max(rmax, a / m[j])
+  end
+  c * rmax > 0 ? 2 / (c * rmax) : Inf
+end
+
+# Δt_lim, the substeps n of an iteration and Δt = :auto: T/n with n = ⌈T/(cfl Δt_lim)⌉, or cfl Δt_lim with the substeps
+# given; with scheme = :explicit a Δt above Δt_lim is refused
+function _dw_resolve_Δt!(opt::_DWStep, K, m, ℓ2)
+  dw = opt.reaction
+  Δtlim = _gershgorin_Δt(K, m, _coef(opt, ℓ2))
+  if opt.Δt === :auto
+    isfinite(Δtlim) || throw(ArgumentError("ReactionDiffusion: with DoubleWell the substep comes from Δt_lim of the " *
+                                           "diffusion, which needs τ > 0: give τ > 0 (or substeps = n and a number Δt)"))
+  end
+  n = isfinite(Δtlim) ? _dw_substeps(dw, Δtlim) : dw.substeps
+  opt.Δt === :auto && (opt.Δt_auto[] = dw.substeps == 0 ? dw.T / n : _cfl(dw) * Δtlim)
+  Δt = _Δt_value(opt)
+  dw.scheme === :explicit && Δt > Δtlim * (1 + 1e-12) &&
+    throw(ArgumentError("ReactionDiffusion: DoubleWell(scheme = :explicit) with Δt = $(_g(Δt)) above the bound of " *
+                        "stability of the explicit diffusion, Δt_lim = $(_g(Δtlim)): use Δt ≤ Δt_lim (or Δt = :auto)"))
+  Δtlim, n
+end
 _Δt_value(opt::RDStep) = opt.Δt === :auto ? opt.Δt_auto[] : _value(opt.Δt)
 
-function _check_τΔt(opt)
-  τ, Δt = _value(opt.τ), _Δt_value(opt)
+function _check_τΔt(opt, ℓ2)
+  τ, Δt = _τ(opt, ℓ2), _Δt_value(opt)
   (isfinite(τ) && τ >= 0) || throw(ArgumentError("ReactionDiffusion: τ must be ≥ 0, got $τ"))
   (isfinite(Δt) && Δt > 0) || throw(ArgumentError("ReactionDiffusion: Δt must be positive, got $Δt"))
   τ, Δt
@@ -289,9 +493,13 @@ function _fill_operator!(A, K, M, m, Kmap, Mmap, Dmap, c, Δt)
   A
 end
 
+# the double well with :explicit has no linear system (nothing to factorise)
+_factorizes(::RDStep) = true
+_factorizes(opt::_DWStep) = opt.reaction.scheme === :implicit
+
 # the operator for the current τ and Δt, factorised again, and φ̌
 function _rebuild!(opt::RDStep, s::RDState)
-  _fill_operator!(s.A, s.K, s.M, s.m, s.Kmap, s.Mmap, s.Dmap, s.τ * s.ℓ2, s.Δt)
+  _fill_operator!(s.A, s.K, s.M, s.m, s.Kmap, s.Mmap, s.Dmap, s.c, s.Δt)
   if opt.solve === nothing
     numerical_setup!(s.ns, s.A)
   else
@@ -299,6 +507,19 @@ function _rebuild!(opt::RDStep, s::RDState)
   end
   s.nfactor += 1
   _unit_response!(opt, s)
+  s
+end
+
+# with the double well: the operator only with :implicit, and no φ̌ (the multiplier acts inside the reaction)
+function _rebuild!(opt::_DWStep, s::RDState)
+  _factorizes(opt) || return s
+  _fill_operator!(s.A, s.K, s.M, s.m, s.Kmap, s.Mmap, s.Dmap, s.c, s.Δt)
+  if opt.solve === nothing
+    numerical_setup!(s.ns, s.A)
+  else
+    s.stale = true
+  end
+  s.nfactor += 1
   s
 end
 
@@ -349,11 +570,16 @@ function _rd_constraint!(opt::RDStep, s::RDState, oracle, fo)
     s.vref = F.J.vmax + _reference(fo.cons[i])
     s.vscale = get_scale(F)
   end
-  ms = opt.volume.max_step === :auto ? (interface ? 0.02 : nothing) : opt.volume.max_step
+  ms = _max_step(opt, interface)
   s.dg = ms === nothing ? Inf : ms * s.area / get_scale(F)
   opt.gtol[] = opt.volume.tol * s.area / get_scale(F)
   s
 end
+
+# max_step = :auto: 0.02 with an interface map, 0.01 with the double well (decision of Jesús, 2026-11-25), none for a
+# density
+_max_step(opt::RDStep, interface) =
+  opt.volume.max_step !== :auto ? opt.volume.max_step : opt.reaction !== nothing ? 0.01 : interface ? 0.02 : nothing
 
 _has_interface_map(θ) = θ isa PhysicalFields && (has_ersatz(θ) || !is_differentiable(θ))
 _has_step(θ) = θ isa PhysicalFields && !is_differentiable(θ)
@@ -481,9 +707,10 @@ end
 
 # τ or Δt continued (Parameter), a rejected step, or the nominal Δt back after one
 function _sync_parameters!(opt::RDStep, s::RDState, retry::Bool)
-  τ, Δt = _check_τΔt(opt)
-  changed = τ != s.τ || Δt != s.Δt_nom
-  s.τ, s.Δt_nom = τ, Δt
+  τ, Δt = _check_τΔt(opt, s.ℓ2)
+  c = _coef(opt, s.ℓ2)
+  changed = c != s.c || Δt != s.Δt_nom
+  s.τ, s.c, s.Δt_nom = τ, c, Δt
   if changed || (!retry && s.Δt != Δt)
     retry || (s.Δt = Δt)
     _rebuild!(opt, s)
@@ -517,7 +744,7 @@ end
 # r = −τℓ²(K z + k_d) − C g, φ* = z + A⁻¹ r (the arithmetic of the step, without allocations, and one solve)
 function _rd_rhs!(s::RDState, z, C)
   mul!(s.r, s.K, z)
-  c = s.τ * s.ℓ2
+  c = s.c
   @. s.r = -c * (s.r + s.kd) - C * s.g
   s
 end
@@ -554,6 +781,215 @@ function Optimizers.step!(opt::RDStep, s::RDState, z, oracle, ctx)
   s.phase = s.interface ?
     sum(Broadcast.instantiate(Broadcast.broadcasted((a, b, w) -> ((a >= 0) != (b >= 0)) ? w : 0.0, s.zold, z, s.m))) / s.area : NaN
   StepInfo{1}(true, f, NaN, NaN, maximum(abs, s.δ), s.Δt, 1, NaN, (viol,), (λ,))
+end
+
+# ---------------------------------------------------------------------------------------------------------------
+# The step with the double well: `substeps` times diffusion (implicit with the factorised operator, or explicit) and
+# then the semi-implicit pointwise reaction of Takezawa et al. (2010, Eqs. 44–45) with the multiplier λ of the volume
+# inside the tilt term, found by a root on vectors at every substep
+
+# The pointwise reaction of a value φ diffused to ψ, with the tilt G = η C g/m + λ, on φ̂ = (φ − lb)/(ub − lb):
+# ∂φ̂/∂t = φ̂(1 − φ̂) r with r = 4W(φ̂ − ½) − 30 G φ̂(1 − φ̂), integrated semi-implicitly so that the result stays in
+# [0, 1] for any Δt (the factor that would leave it is taken implicitly). Non-increasing in G; 0 and 1 are fixed points.
+@inline function _dw_point(φ, ψ, G, Δt, W, lb, ub)
+  w = ub - lb
+  p = (φ - lb) / w
+  a = clamp((ψ - lb) / w, 0.0, 1.0)
+  r = 4W * (p - 0.5) - 30 * G * p * (1 - p)
+  v = r <= 0 ? a / (1 - Δt * (1 - p) * r) : (a + Δt * p * r) / (1 + Δt * p * r)
+  lb + w * clamp(v, 0.0, 1.0)
+end
+
+# the reaction of every free value for the multiplier λ into out (out may be z itself)
+function _dw_react!(out, z, s::RDState, λ, W, lb, ub)
+  φs, gn, Δt = s.φs, s.gn, s.Δt
+  @inbounds for i in eachindex(out)
+    out[i] = _dw_point(z[i], φs[i], gn[i] + λ, Δt, W, _bound(lb, i), _bound(ub, i))
+  end
+  out
+end
+
+# the diffusion of a substep, ψ into s.φs: implicit (m/Δt + τℓ²K) ψ = m z/Δt − τℓ² k_d (one back-substitution), or
+# explicit ψ = z − Δt τℓ² (K z + k_d)/m
+function _dw_diffuse!(opt::_DWStep, s::RDState, z)
+  c = s.c
+  if opt.reaction.scheme === :explicit
+    mul!(s.r, s.K, z)
+    @. s.φs = z - s.Δt * c * (s.r + s.kd) / s.m
+  else
+    if s.M === nothing
+      @. s.r = s.m * z / s.Δt - c * s.kd
+    else
+      mul!(s.r, s.M, z)
+      @. s.r = s.r / s.Δt - c * s.kd
+    end
+    _rd_solve!(s.φs, opt, s, s.r)
+  end
+  all(isfinite, s.φs) ||
+    throw(OptimizationFailure("ReactionDiffusion: the diffusion of a substep of the double well gave values that are not finite"))
+  s
+end
+
+# G(λ) = g(R(z, ψ; η C g/m + λ)) − g_j: a linear constraint (vectors only) or one evaluated by the oracle
+struct _DWLinearG{A,Z,L,U,S}
+  a::A
+  V::Float64
+  z::Z
+  s::S
+  lb::L
+  ub::U
+  W::Float64
+  gk::Float64
+end
+function (G::_DWLinearG)(λ)
+  s = G.s
+  _dw_react!(s.zt, G.z, s, λ, G.W, G.lb, G.ub)
+  s.nvol += 1
+  dot(G.a, s.zt) - G.V - G.gk
+end
+
+struct _DWOracleG{O,Z,L,U,S}
+  oracle::O
+  z::Z
+  s::S
+  lb::L
+  ub::U
+  W::Float64
+  gk::Float64
+end
+function (G::_DWOracleG)(λ)
+  s = G.s
+  _dw_react!(s.zt, G.z, s, λ, G.W, G.lb, G.ub)
+  s.nvol += 1
+  constraint(G.oracle, 1, s.zt) - G.gk
+end
+
+# the multiplier of a substep: G is non-increasing in λ (the reaction is); the bracket ±Λ is wide enough to saturate
+# the reaction at the interface. A target out of reach in this substep (it cannot remove or add that much material
+# at the interface) takes the end of the bracket: the next substeps and iterations catch up (the violation is reported)
+function _dw_multiplier!(opt::_DWStep, s::RDState, oracle, z, gj, lb, ub)
+  W = opt.reaction.W
+  sc = 1 + maximum(abs, s.gn)
+  Λ = 1e3 * sc
+  lo = gj > 0 ? -Λ : 0.0                       # descending target: equality; at the final one: λ ≥ 0
+  maxit = max(opt.volume.maxiter, 100)
+  λ, Gλ, status = if s.kind === :linear
+    a, V = linear_constraint(oracle, 1)
+    _root(_DWLinearG(a, V, z, s, lb, ub, W, gj), nothing, s.λ, lo, Λ, 0.1 * sc, opt.gtol[], maxit)
+  else
+    _root(_DWOracleG(oracle, z, s, lb, ub, W, gj), nothing, s.λ, lo, Λ, 0.1 * sc, opt.gtol[], maxit)
+  end
+  status === :nonfinite &&
+    throw(OptimizationFailure("ReactionDiffusion: the constraint is not finite at a trial design of the multiplier"))
+  λ, Gλ
+end
+
+function Optimizers.step!(opt::_DWStep, s::RDState, z, oracle, ctx)
+  retry = s.shrunk
+  s.shrunk = false
+  _sync_parameters!(opt, s, retry)
+  f = objective(oracle, z)
+  isfinite(f) || return StepInfo{1}(false, f, NaN, NaN, 0.0, s.Δt, 1, NaN, (0.0,), (NaN,))
+  _rd_gradient!(s.g, opt, s, oracle, z)
+  g0 = s.kind === :none ? 0.0 : constraint(oracle, 1, z)
+  C = _normalization(opt, s)
+  dw = opt.reaction
+  η = dw.η
+  @. s.gn = η * C * s.g / s.m
+  copyto!(s.zold, z)
+  lb, ub = bounds(oracle)
+  # the target of the iteration, lowered at most dg (in proportion to Δt after a rejection), reached linearly over
+  # the substeps
+  gk = (s.kind === :none || !isfinite(s.dg)) ? 0.0 : max(0.0, g0 - s.dg * s.Δt / s.Δt_nom)
+  n = s.substeps
+  λ = s.kind === :none ? NaN : s.λ
+  viol = 0.0
+  for j in 1:n
+    _dw_diffuse!(opt, s, z)
+    if s.kind === :none
+      _dw_react!(z, z, s, 0.0, dw.W, lb, ub)
+    else
+      gj = g0 > gk ? gk + (g0 - gk) * (n - j) / n : gk
+      λ, Gλ = _dw_multiplier!(opt, s, oracle, z, gj, lb, ub)
+      s.λ = λ
+      _dw_react!(z, z, s, λ, dw.W, lb, ub)
+      viol = max(0.0, Gλ + gj)
+    end
+  end
+  @. s.δ = z - s.zold
+  StepInfo{1}(true, f, NaN, NaN, maximum(abs, s.δ), s.Δt, 1, NaN, (viol,), (λ,))
+end
+
+# grey measure of the design, M_nd = Σᵢ mᵢ 4φ̂ᵢ(1 − φ̂ᵢ)/|D| (nodal, the free values; frozen values are 0 or 1)
+function grey_measure(::RDStep, s::RDState)
+  lb, w = s.lb, s.ub - s.lb
+  4 * sum(Broadcast.instantiate(Broadcast.broadcasted((z, m) -> (p = (z - lb) / w; m * p * (1 - p)), s.zref, s.m))) / s.area
+end
+
+# The events of the double well once the state is set up (init, and the memory of a resumed run restored): T, the
+# substeps, Δt, Δt_lim and the width of the interface in mean cell sizes
+function setup_events(opt::_DWStep, s::RDState, first::Bool)
+  dw = opt.reaction
+  c = s.c
+  wtxt = c > 0 ? ", width of the interface ξ = √(τℓ²/2W) = $(_g(sqrt(c / (2dw.W)) / s.hmean)) h̄ (h̄ = (|D|/cells)^(1/d) = " *
+                 "$(_g(s.hmean)), the mean cell size)" : ", no diffusion (τ = 0): no width of the interface"
+  ev = [("· double well: " * _dw_time_text(dw, s) * " (Δt_lim = $(_g(s.Δtlim)))" * wtxt, :cyan)]
+  first && s.settled && push!(ev, ("· double well settled at iteration $(s.settle_iter) (resumed): one substep per iteration", :cyan))
+  ev
+end
+
+# The settling of the double well, after each accepted iteration: with settle, one substep from the iteration where the
+# constraints are met and the relative range of the objective over the window is below its tolerance (no events and
+# no allocation otherwise)
+function iteration_events!(opt::_DWStep, s::RDState, k, maxiter, met, f)
+  dw = opt.reaction
+  (dw.settle && !s.settled && s.substeps > 1) || return nothing
+  if met && isfinite(f)
+    _push_window!(s, f)
+  else
+    fill!(s.fwin, NaN)
+    s.nwin = 0
+  end
+  (s.nwin >= dw.settle_window && _window_range(s.fwin) <= dw.settle_tol) || return nothing
+  s.substeps = 1
+  s.settled = true
+  s.settle_iter = k
+  [("· double well settled at iteration $k (constraints met and objective range below $(_g(dw.settle_tol)) over " *
+    "$(dw.settle_window) iterations): one substep per iteration from now on", :cyan)]
+end
+
+# T = n × Δt per iteration (the nominal substeps)
+_dw_time_text(dw::DoubleWell, s::RDState) =
+  "T = $(_g(s.nsub * s.Δt_nom)) per iteration = $(s.nsub) substep" * (s.nsub == 1 ? "" : "s") * " × Δt = $(_g(s.Δt_nom))" *
+  (dw.substeps == 0 ? "" : " (substeps given)")
+
+# the default stop is held until the iteration after the settling (with settle and more than one substep): before it
+# the frozen substeps keep a cycle of the interface and the material and objective windows can be met while the
+# design is still changing
+stop_allowed(opt::_DWStep, s::RDState, k) = !opt.reaction.settle || s.nsub == 1 || (s.settled && s.settle_iter < k)
+
+# a continuation jump: the substeps and the window of the settling start again (the stage changes the problem)
+function _restart_settling!(s::RDState)
+  s.substeps = s.nsub
+  s.settled = false
+  s.settle_iter = 0
+  fill!(s.fwin, NaN)
+  s.nwin = 0
+  s
+end
+
+function _push_window!(s::RDState, f)
+  w = s.fwin
+  @inbounds for i in 1:length(w)-1
+    w[i] = w[i+1]
+  end
+  w[end] = f
+  s.nwin = min(s.nwin + 1, length(w))
+  s
+end
+function _window_range(w)
+  lo, hi = extrema(w)
+  (hi - lo) / maximum(abs, w)
 end
 
 # G(λ) = g(clamp(φ* − λ φ̌)) − g_k: a linear constraint (vectors only) or one evaluated by the oracle
@@ -780,6 +1216,7 @@ function Optimizers.shrink!(opt::RDStep, s::RDState, factor)
 end
 
 Optimizers.reset!(opt::RDStep, s::RDState) = (s.shrunk = false; s)
+Optimizers.reset!(opt::_DWStep, s::RDState) = (s.shrunk = false; _restart_settling!(s))
 Optimizers.objective_changed!(::RDStep, s::RDState) = s
 Optimizers.handles(opt::RDStep, c::ConstraintInfo) =
   opt.volume !== nothing && is_upper(c) && c.hi == 0 && c.design_only && !c.field
@@ -818,17 +1255,45 @@ function Optimizers.restore_memory!(::RDStep, s::RDState, z, v::NamedTuple)
   s.λ = v.λ
   s
 end
+# with the double well: also the settling and the window of the objective that decides it (the substeps follow: 1
+# once settled, those of the current setup otherwise)
+_dw_memory_keys(w) = (:λ, :settled, :settle_iter, :nwin, ntuple(i -> Symbol("f", i), w)...)
+Optimizers.memory(::_DWStep, s::RDState, z) =
+  NamedTuple{_dw_memory_keys(length(s.fwin))}((s.λ, Float64(s.settled), Float64(s.settle_iter), Float64(s.nwin),
+                                               ntuple(i -> s.fwin[i], length(s.fwin))...))
+function Optimizers.restore_memory!(::_DWStep, s::RDState, z, v::NamedTuple)
+  keys(v) == _dw_memory_keys(length(s.fwin)) ||
+    throw(ArgumentError("ReactionDiffusion: the saved memory has entries $(keys(v)), expected " *
+                        "$(_dw_memory_keys(length(s.fwin))) (DoubleWell with a settle window of $(length(s.fwin)))"))
+  s.λ = v.λ
+  s.settled = v.settled != 0
+  s.substeps = s.settled ? 1 : s.nsub
+  s.settle_iter = Int(v.settle_iter)
+  s.nwin = Int(v.nwin)
+  for i in eachindex(s.fwin)
+    s.fwin[i] = v[Symbol("f", i)]
+  end
+  s
+end
 
 # ReactionDiffusion stops when the constraints are met, the material changes less than 2e-3 (relative) in each of the
 # last 5 iterations and the objective varies less than 1e-3 (relative range) over the last 10, the windows counted with
 # the constraints met (decision of Jesús, 2026-11-24, from the study of stopping criteria on the cantilever)
 default_stop(::RDStep) = StopCriteria(material_tol = 2e-3, material_window = 5, objective_range = 1e-3, window = 10,
                                       combine = :all)
+# with the double well the interface keeps a small cycle (1–2 % of the material per iteration before settling, a few
+# per mille after it): material_tol = 1e-2, the rest the same (decision of Jesús, 2026-11-25)
+default_stop(::_DWStep) = StopCriteria(material_tol = 1e-2, material_window = 5, objective_range = 1e-3, window = 10,
+                                       combine = :all)
 
 summary_note(::Optimizer, state) = ""
 summary_note(::RDStep, s::RDState) =
   "  reaction–diffusion: $(s.nsolves) solves of the step, $(s.nfactor) factorisation" * (s.nfactor == 1 ? "" : "s") *
-  ", $(s.nvol) evaluations of the constraint" * (s.nmeter == 0 ? "" : ", $(s.nmeter) of the volume by the material meter")
+  ", $(s.nvol) evaluations of the constraint" * (s.nmeter == 0 ? "" : ", $(s.nmeter) of the volume by the material meter") *
+  _dw_note(s)
+_dw_note(s::RDState) = isempty(s.gn) ? "" :
+  "; double well: $(s.nsub) substep" * (s.nsub == 1 ? "" : "s") * " of Δt = $(_g(s.Δt_nom)) per iteration (Δt_lim $(_g(s.Δtlim)))" *
+  (s.settled ? ", 1 from iteration $(s.settle_iter + 1) (settled)" : "")
 
 Base.show(io::IO, ::RDStep) = print(io, "RDStep")
 
@@ -836,17 +1301,21 @@ Base.show(io::IO, ::RDStep) = print(io, "RDStep")
 # The method
 
 const _RD_DEFAULTS = (Δt = :auto, normalize = L1Mean(), volume = ExactVolume(), mass = :lumped, void_weight = 1e-3,
-                      ls = LUSolver(), solve = nothing, diffusion = nothing, degree = 2, lagrangian = AugmentedLagrangian())
+                      ls = LUSolver(), solve = nothing, diffusion = nothing, degree = 2, lagrangian = AugmentedLagrangian(),
+                      reaction = nothing)
 
 const _RD_PRESETS = Dict{Symbol,NamedTuple}(
   :kim2020 => (Δt = 0.1, normalize = L2Norm(), mass = :consistent, volume = nothing,
                lagrangian = AugmentedLagrangian(Bertsekas(μ0 = 0.2, growth = 1.025, window = 1, progress = Inf, μmax = 2.0);
-                                                native = ())))
+                                                native = ())),
+  :takezawa2010 => (reaction = DoubleWell(W = 0.25, η = 20.0, scheme = :explicit, substeps = 20, settle = false),
+                    normalize = _TakezawaNorm(), volume = ExactVolume(max_step = 0.01)))
 
 """
     ReactionDiffusion(; τ, sensitivity, Δt = :auto, normalize = L1Mean(), volume = ExactVolume(), mass = :lumped,
                       void_weight = 1e-3, ls = LUSolver(), solve = nothing, diffusion = nothing, degree = 2,
-                      lagrangian = AugmentedLagrangian())
+                      lagrangian = AugmentedLagrangian(), reaction = nothing)
+    ReactionDiffusion(; κ, reaction = DoubleWell(), kwargs...)
     ReactionDiffusion(preset::Symbol; τ, sensitivity, kwargs...)
 
 Reaction–diffusion method (Yamada et al. 2010, Choi et al. 2011, Otomori et al. 2015, Kim et al. 2020): the design
@@ -866,16 +1335,21 @@ are not variables: the step leaves them as they are.
 
 Mandatory (modelling decisions):
 - `τ`: diffusion coefficient (dimensionless; a number or a [`Parameter`](@ref HyperShape.Operators.Parameter), which a
-  `Continuation` can change); larger values give simpler designs with thicker members.
-- `sensitivity`: `:physical` takes the derivative with respect to the material, the interface map taken as the
+  `Continuation` can change, not with `DoubleWell`); larger values give simpler designs with thicker members. Or
+  `κ = τ ℓ²` instead (exactly one of the two): the same diffusion as a physical length squared, `τ = κ/ℓ²` with
+  `ℓ² = |D|^(2/d)` computed on the mesh (the banner shows both). The operator takes `κ` as given; with `τ` it takes
+  `τ ℓ²`, so `τ = κ/ℓ²` with that `ℓ²` gives the run of `κ` bit for bit, while `τ = κ/2` on a domain of measure 2
+  can differ in the last bits (the measure is a sum of quadratures, not exactly 2).
+- `sensitivity` (not with `reaction = DoubleWell(…)`, where it is `:design`): `:physical` takes the derivative with
+  respect to the material, the interface map taken as the
   identity weighted by the material, `(w₀ + (1 − w₀) χ) ∂j/∂χ` (`w₀ = void_weight`): it nucleates holes, and the exact
   derivative through the map would refill the void (its value there is large: weak material, large strains); `:design`
-  the exact derivative with respect to φ (with `Ersatz()`, nonzero only on the cells cut by the interface: no holes are
-  nucleated, so the starting design must have an interface; `Step()` has none). `:design` with an interface map is
-  not a method offered by this release: a variant that only moves the boundary, from a start with holes
-  ([`hole_seed`](@ref HyperShape.Variables.hole_seed)), comes with the double-well reaction `DoubleWell` (next
-  release), which will redefine `:design`. Without an interface map in the chain (a density) both are the same.
-  `hole_seed` also gives perforated starts for `:physical` (studies of the dependence on the start). [`check_consistency`](@ref HyperShape.Checks.check_consistency) always checks the
+  the exact derivative with respect to φ, for a density (without an interface map in the chain both are the same) and
+  with the double well, where it is the default. `:design` with an interface map (`Ersatz()`, `Step()`) is not a
+  method: the exact derivative lives on the cut cells and nothing holds the plateaus (`solve!` throws). The variant
+  that only moves the boundary, from a start with holes ([`hole_seed`](@ref HyperShape.Variables.hole_seed)), is a
+  density with `reaction = DoubleWell(…)` (then `sensitivity` is not mandatory). `hole_seed` also gives perforated
+  starts for `:physical` (studies of the dependence on the start). [`check_consistency`](@ref HyperShape.Checks.check_consistency) always checks the
   exact derivative; with `Ersatz()` give it steps smaller than the default (`h0 = 1e-3`): larger ones cross the
   kinks of the cell fractions (a node changing sign) and the observed rates fall below 2 for a correct derivative.
 
@@ -898,23 +1372,36 @@ Optional (each one replaceable, shown in the banner):
   degree `degree`), for an anisotropic diffusion or a Robin term.
 - `lagrangian`: the [`AugmentedLagrangian`](@ref HyperShape.Optimizers.AugmentedLagrangian) of the constraints the
   step does not treat (everything but the volume).
+- `reaction`: `nothing` (default: the linear reaction `−C g − λ` above) or [`DoubleWell`](@ref)`(…)`, the double-well
+  reaction of Takezawa et al. (2010) for a density that only moves its interface, from a start with holes: then
+  `sensitivity` defaults to `:design`, `normalize` to `L2Norm()`, `Δt = :auto` is `T/n` per substep (the time `T` of
+  the well per iteration in `n` substeps) and the
+  multiplier of `ExactVolume` acts inside the tilt term of the well (its `max_step = :auto` is `0.01`). See its
+  docstring for the scheme, the substeps and the settling.
 
 Presets (`ReactionDiffusion(:kim2020; τ, sensitivity)`): the keywords given replace those of the preset (the banner
 says which). `:kim2020` (Kim et al. 2020, density): `Δt = 0.1, normalize = L2Norm(), mass = :consistent, volume = nothing,
 lagrangian = AugmentedLagrangian(Bertsekas(μ0 = 0.2, growth = 1.025, window = 1, progress = Inf, μmax = 2.0); native = ())`;
 `τ` is still mandatory (`5e-4` for their cantilever, `1e-3` for their half MBB beam). The script sets the rest:
 a density `φ₀ = 0.5` with `bounds = (0.0, 1.0)`, SIMP `p = 3`, `Volume(…; scale = |Ω|)`.
+`:takezawa2010` (Takezawa, Nishiwaki and Kitamura 2010, the double well): `reaction = DoubleWell(W = 0.25, η = 20,
+scheme = :explicit, substeps = 20, settle = false)`, the normalisation `1/‖g‖_L²` (without `|D|`) and
+`volume = ExactVolume(max_step = 0.01)`; the script sets `κ` (their `κ = 1e-5` on the bridge 2 × 1, that is
+`τ = 5e-6`), the start with holes, `k = max(φ³, 1e-5)` and 100 iterations (`stop = nothing`). Differences with the
+paper: the multiplier of the volume is exact (instead of their rule for ζ) and the discretisation is P1 finite
+elements with lumped mass (instead of finite differences).
 
 Per iteration: one forward solve, one adjoint (none with `SelfAdjoint()`), one assembly of the sensitivity, one
 product `K z` and one solve of the step (no factorisation); the volume costs a few evaluations of the constraint per
 step (vectors only for a density; the map and an integral each with an interface map, plus one derivative per Newton
 iteration with `Ersatz()`; the summary of `solve!` counts them). The default stop
 ([`default_stop`](@ref)) needs the constraints met, the change of the material `∫|χ_k − χ_{k−1}| / ∫χ_k` below `2e-3`
-in each of the last 5 iterations and the relative range of the objective below `1e-3` over the last 10, the windows
+(`1e-2` with [`DoubleWell`](@ref)) in each of the last 5 iterations and the relative range of the objective below `1e-3` over the last 10, the windows
 counted with the constraints met; `StopCriteria(rate_tol)`, `change_tol` and `phase_tol` are options. `√(τ|D|)` is the
 length of the diffusion (a perimeter energy), not a minimum thickness: bars of one or two cells can remain. Neither the interface map nor the
 stopping criterion is a recommendation: the choice will be validated with more cases. The starting design is not made feasible (the volume goes down from a solid start, `max_step` of `|D|` per
-iteration). Checkpoints save the multiplier and the windows of the stop (a resumed run is the uninterrupted one).
+iteration). Checkpoints save the multiplier and the windows of the stop (a resumed run is the uninterrupted one, also
+with a larger `maxiter`).
 `gtol` and the resolved `Δt` live in the method: one method object serves one `solve!` at a time (not concurrent
 runs).
 """
@@ -929,14 +1416,17 @@ ReactionDiffusion(; kwargs...) = _reaction_diffusion(nothing; kwargs...)
 ReactionDiffusion(preset::Symbol; kwargs...) = _reaction_diffusion(preset; kwargs...)
 
 function _reaction_diffusion(preset; kwargs...)
-  allowed = (:τ, :sensitivity, keys(_RD_DEFAULTS)...)
+  allowed = (:τ, :κ, :sensitivity, keys(_RD_DEFAULTS)...)
   for k in keys(kwargs)
     k in allowed || throw(ArgumentError("ReactionDiffusion: unknown keyword $k; the keywords are $(join(allowed, ", "))"))
   end
-  haskey(kwargs, :τ) || throw(ArgumentError("ReactionDiffusion: τ is mandatory (the diffusion, dimensionless; for example τ = 2e-4)"))
-  haskey(kwargs, :sensitivity) ||
-    throw(ArgumentError("ReactionDiffusion: sensitivity is mandatory: :physical (with respect to the material, nucleates " *
-                        "holes) or :design (the exact derivative with respect to φ)"))
+  haskey(kwargs, :τ) && haskey(kwargs, :κ) &&
+    throw(ArgumentError("ReactionDiffusion: give τ or κ = τ ℓ² (ℓ² = |D|^(2/d)), not both"))
+  (haskey(kwargs, :τ) || haskey(kwargs, :κ)) ||
+    throw(ArgumentError("ReactionDiffusion: τ is mandatory (the diffusion, dimensionless; for example τ = 2e-4), or give " *
+                        "κ = τ ℓ² instead (ℓ² = |D|^(2/d), a physical length squared; for example κ = 1e-5)"))
+  κgiven = haskey(kwargs, :κ)
+  dname = κgiven ? :κ : :τ
   p = if preset === nothing
     (;)
   else
@@ -947,15 +1437,36 @@ function _reaction_diffusion(preset; kwargs...)
   end
   sources = Dict{Symbol,Symbol}(k => (haskey(kwargs, k) ? :given : haskey(p, k) ? :preset : :default) for k in keys(_RD_DEFAULTS))
   val(k) = haskey(kwargs, k) ? kwargs[k] : haskey(p, k) ? p[k] : _RD_DEFAULTS[k]
-  τ, sens, Δt = kwargs[:τ], kwargs[:sensitivity], val(:Δt)
-  for (n, x, pos) in ((:τ, τ, false), (:Δt, Δt, true))
+  rx = val(:reaction)
+  rx === nothing || rx isa DoubleWell ||
+    throw(ArgumentError("ReactionDiffusion: reaction must be nothing or DoubleWell(…), got $(repr(rx))"))
+  if rx === nothing
+    haskey(kwargs, :sensitivity) ||
+      throw(ArgumentError("ReactionDiffusion: sensitivity is mandatory: :physical (with respect to the material, nucleates " *
+                          "holes) or :design (the exact derivative with respect to φ)"))
+  else
+    get(kwargs, :sensitivity, :design) === :physical &&
+      throw(ArgumentError("ReactionDiffusion: sensitivity = :physical is not offered with DoubleWell: the double well " *
+                          "already confines the reaction to the interface; leave sensitivity out (the exact derivative, :design)"))
+  end
+  τ, sens, Δt = kwargs[dname], get(kwargs, :sensitivity, :design), val(:Δt)
+  for (n, x, pos) in ((dname, τ, false), (:Δt, Δt, true))
     (x isa Parameter || (n === :Δt && x === :auto)) && continue
     (x isa Real && isfinite(x) && (pos ? x > 0 : x >= 0)) ||
       throw(ArgumentError("ReactionDiffusion: $n must be a number $(pos ? "> 0" : "≥ 0") or a Parameter, got $(repr(x))"))
   end
   sens in (:physical, :design) || throw(ArgumentError("ReactionDiffusion: sensitivity must be :physical or :design, got $(repr(sens))"))
-  norm = val(:normalize)
-  (norm isa Union{L1Mean,L2Norm,MaxAbs} || norm isa Function) ||
+  # the substeps and Δt are set once from Δt_lim(τ) at the start: a continued τ or Δt would leave them stale
+  rx isa DoubleWell && (τ isa Parameter || Δt isa Parameter) &&
+    throw(ArgumentError("ReactionDiffusion: with DoubleWell, $(τ isa Parameter ? dname : :Δt) must be a number, not a " *
+                        "Parameter: the substeps n and Δt are set once at the start from Δt_lim of the diffusion, and a " *
+                        "Continuation would leave them stale (above the bound of stability with :explicit)"))
+  rx isa DoubleWell && rx.substeps == 0 && Δt !== :auto &&
+    throw(ArgumentError("ReactionDiffusion: with DoubleWell the substep is T/n (the time per iteration T of the well, " *
+                        "n = ⌈T/(cfl Δt_lim)⌉): leave Δt out, or give DoubleWell(substeps = n) to set Δt per substep"))
+  # with the double well the default normalisation is L2Norm() (decision of Jesús, 2026-11-25)
+  norm = (rx !== nothing && sources[:normalize] === :default) ? L2Norm() : val(:normalize)
+  (norm isa Union{L1Mean,L2Norm,MaxAbs,_TakezawaNorm} || norm isa Function) ||
     throw(ArgumentError("ReactionDiffusion: normalize must be L1Mean(c), L2Norm(), MaxAbs() or a function (g, m, area) -> C"))
   vol = val(:volume)
   vol === nothing || vol isa ExactVolume || throw(ArgumentError("ReactionDiffusion: volume must be ExactVolume(…) or nothing"))
@@ -975,7 +1486,7 @@ function _reaction_diffusion(preset; kwargs...)
   vol === nothing && lag.native !== () &&
     throw(ArgumentError("ReactionDiffusion: volume = nothing gives every constraint to the augmented Lagrangian: " *
                         "say it with lagrangian = AugmentedLagrangian(…; native = ())"))
-  step = RDStep(τ, Δt, sens, norm, vol, mass, Float64(w0), ls, solvef, diff, Int(deg), Ref(NaN), Ref(NaN))
+  step = RDStep(τ, Δt, sens, norm, vol, mass, Float64(w0), ls, solvef, diff, Int(deg), Ref(NaN), Ref(NaN), rx, κgiven)
   ReactionDiffusion(step, lag, preset, sources)
 end
 
@@ -984,8 +1495,8 @@ build_oracle(::ReactionDiffusion, problem) = FunctionalOracle(problem, LumpedMas
 augmented_lagrangian(m::ReactionDiffusion) = m.lagrangian
 method_label(m::ReactionDiffusion) = m.preset === nothing ? "ReactionDiffusion" : "ReactionDiffusion($(repr(m.preset)))"
 feasible_start(::ReactionDiffusion) = false
-Base.show(io::IO, m::ReactionDiffusion) = print(io, method_label(m), "(τ = ", m.step.τ, ", sensitivity = ",
-                                                repr(m.step.sensitivity), ")")
+Base.show(io::IO, m::ReactionDiffusion) = print(io, method_label(m), m.step.κgiven ? "(κ = " : "(τ = ", m.step.τ,
+                                                ", sensitivity = ", repr(m.step.sensitivity), ")")
 
 # a nodal P1 scalar field (H¹): one value per vertex of each cell, shared between cells
 function _is_nodal_p1(U)
@@ -997,7 +1508,7 @@ function _is_nodal_p1(U)
   num_free_dofs(U) + num_dirichlet_dofs(U) <= length(Gridap.Geometry.get_node_coordinates(Ω))
 end
 
-# the starting design changes sign (an interface for Ersatz(), whose derivative lives on the cut cells)
+# the starting design changes sign (a level set with an interface; used by the tests of hole_seed)
 function _has_interface(z)
   U = z.blocks[1].space
   v, dv = get_values(z), get_dirichlet_dof_values(U)
@@ -1016,6 +1527,7 @@ function check_problem(m::ReactionDiffusion, problem)
   native = _native_split(problem, m.step, m.lagrangian)
   _set_tolerance!(m.step, problem, native)
   _resolve_Δt!(m.step, (problem.objective, (c.F for c in problem.constraints)...))
+  m.step.reaction === nothing || return _check_double_well(m, problem)
   m.step.sensitivity === :design || return nothing
   for (j, (n, F)) in enumerate(pairs((objective = problem.objective, map(c -> c.F, problem.constraints)...)))
     j > 1 && (j - 1) in native && continue      # the native constraint is only evaluated (the root), never differentiated
@@ -1024,13 +1536,34 @@ function check_problem(m::ReactionDiffusion, problem)
     _has_step(θ) &&
       throw(ArgumentError("ReactionDiffusion: $who reads a field through Step(), which has no derivative with respect " *
                           "to the design: use sensitivity = :physical, or Ersatz()"))
-    θ isa PhysicalFields && has_ersatz(θ) && !_has_interface(z) &&
-      throw(ArgumentError("ReactionDiffusion: with sensitivity = :design the derivative through Ersatz() lives on the " *
-                          "cells cut by the interface, and the starting design has none (φ does not change sign): no " *
-                          "hole can appear. Use sensitivity = :physical (it nucleates holes). A method that only moves " *
-                          "the boundary, from a start with holes built with hole_seed, comes with DoubleWell (next " *
-                          "release), which will redefine sensitivity = :design"))
+    # decision of Jesús (2026-11-25): :design with an interface map and without the double well is not a method
+    θ isa PhysicalFields && has_ersatz(θ) &&
+      throw(ArgumentError("ReactionDiffusion: sensitivity = :design with an interface map is not a method of " *
+                          "ReactionDiffusion: the exact derivative lives on the cut cells and nothing holds the plateaus. " *
+                          "To move only the boundary from a start with holes use a density field (bounds = (0.0, 1.0), " *
+                          "no interface map) with reaction = DoubleWell(…) and hole_seed; to nucleate holes use " *
+                          "sensitivity = :physical"))
   end
+  nothing
+end
+
+# DoubleWell: a density (no interface map in any functional) whose start has an interface (values on both sides of
+# the middle of the bounds)
+function _check_double_well(m::ReactionDiffusion, problem)
+  for (n, F) in pairs((objective = problem.objective, map(c -> c.F, problem.constraints)...))
+    who = n === :objective ? "the objective" : "the constraint $n"
+    _has_interface_map(physical_fields(F)) &&
+      throw(ArgumentError("ReactionDiffusion: $who reads the design through an interface map (Ersatz() or Step()): the " *
+                          "double well with an interface map is not offered. Use a density field (bounds = (0.0, 1.0), " *
+                          "Identity()) with an interpolation of the material in the weak forms (for example max(φ^3, 1e-5))"))
+  end
+  b = problem.z.blocks[1]
+  mid = (b.lb + b.ub) / 2
+  v, dv = get_values(problem.z), get_dirichlet_dof_values(b.space)
+  ((any(<(mid), v) || any(<(mid), dv)) && (any(>=(mid), v) || any(>=(mid), dv))) ||
+    throw(ArgumentError("ReactionDiffusion: the double well only moves the interface (its reaction vanishes at the bounds) " *
+                        "and the starting design has none (all its values on one side of $(_g(mid))): start from a design " *
+                        "with holes, hole_seed(Vφ; bounds = ($(b.lb), $(b.ub)), radius, spacing, …)"))
   nothing
 end
 
@@ -1060,10 +1593,25 @@ function banner_lines(m::ReactionDiffusion, problem)
   ℓ2 = area^(2 / num_cell_dims(Ω))
   lines = Tuple{String,Symbol}[]
   sens = opt.sensitivity === :physical ? ":physical (void weight $(_g(opt.void_weight))$(mark(:void_weight)))" : ":design"
-  Δtl = opt.Δt === :auto ? _g(opt.Δt_auto[]) * " (default: " * (opt.Δt_auto[] == 0.2 ? "interface map)" : "no interface map)") :
-        _rd_value(opt.Δt) * mark(:Δt)
-  push!(lines, ("method: sensitivity = $sens · Δt = $Δtl · τ = $(_rd_value(opt.τ)) " *
-                "(× ℓ² = $(_g(ℓ2))) · clip [$(_g(b.lb)), $(_g(b.ub))]", :normal))
+  dw = opt.reaction
+  # with the double well n and Δt need K and m: the event after the setup gives them
+  Δtl = dw !== nothing && opt.Δt === :auto ? (dw.substeps == 0 ?
+                                                ":auto = T/n = $(_g(dw.T))/n per substep (n = ⌈T/(cfl Δt_lim)⌉, cfl $(_g(_cfl(dw))))" :
+                                                ":auto = $(_g(_cfl(dw))) Δt_lim per substep") * mark(:Δt) :
+        opt.Δt === :auto ? _g(opt.Δt_auto[]) * " (default: " * (opt.Δt_auto[] == 0.2 ? "interface map)" : "no interface map)") :
+        _rd_value(opt.Δt) * mark(:Δt) * (dw === nothing ? "" : " per substep")
+  dw === nothing || (sens = ":design (with DoubleWell)")
+  dtext = opt.κgiven ? "κ = $(_rd_value(opt.τ)) (τ = κ/ℓ² = $(_g(_value(opt.τ) / ℓ2)), ℓ² = $(_g(ℓ2)))" :
+                       "τ = $(_rd_value(opt.τ)) (κ = τℓ² = $(_g(_value(opt.τ) * ℓ2)), ℓ² = $(_g(ℓ2)))"
+  push!(lines, ("method: sensitivity = $sens · Δt = $Δtl · $dtext · clip [$(_g(b.lb)), $(_g(b.ub))]", :normal))
+  if dw !== nothing
+    push!(lines, ("reaction: $dw$(mark(:reaction)) · " * (dw.scheme === :implicit ? "implicit diffusion" : "explicit diffusion") *
+                  " and semi-implicit reaction, multiplier inside the tilt · " *
+                  (dw.settle ? "settles to 1 substep when the constraints are met and the objective range over " *
+                               "$(dw.settle_window) iterations is below $(_g(dw.settle_tol)) (the default stop of the " *
+                               "method is held until then; a stop given to solve! is not)" :
+                               "no settling"), :normal))
+  end
   solver = opt.solve === nothing ? "$(nameof(typeof(opt.ls)))$(mark(:ls))" : "solve function of the user"
   nfrozen = b.zone === nothing ? 0 : b.zone.ndofs
   push!(lines, ("step operator: $(opt.mass) mass$(mark(:mass)) + " *
@@ -1087,7 +1635,9 @@ function banner_lines(m::ReactionDiffusion, problem)
       F = problem.constraints[native[1]].F
       θ = physical_fields(F)
       kind = is_linear(F) ? "Newton on the clipped vector" : _has_step(θ) ? "Illinois" : "Newton"
-      ms = opt.volume.max_step === :auto ? (_has_interface_map(θ) ? 0.02 : nothing) : opt.volume.max_step
+      ms = _max_step(opt, _has_interface_map(θ))
+      opt.reaction === nothing || (kind = "inside the tilt of the double well, Illinois on " *
+                                          (is_linear(F) ? "vectors" : "the constraint"))
       push!(lines, ("$n: native" * (opt.volume.constraint === nothing ? " (the Volume)" : " (named)") *
                     ", exact multiplier ($kind, tol $(_g_or_e(opt.volume.tol)) |D|), " *
                     (ms === nothing ? "target from the first iteration" : "target lowered $(_g(100 * ms)) % of |D| per iteration") *

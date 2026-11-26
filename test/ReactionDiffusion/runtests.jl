@@ -1,3 +1,4 @@
 # The reaction–diffusion method and the volumes of Ersatz() it relies on (CI group rd)
 include("ersatz_volumes.jl")
 include("reaction_diffusion.jl")
+include("double_well.jl")

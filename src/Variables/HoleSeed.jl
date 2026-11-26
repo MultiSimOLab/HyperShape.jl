@@ -851,7 +851,8 @@ Two uses:
    (optional; Yamada et al. 2010 start from perforated designs too): studies of the dependence of the design on the
    start. A solid start is still the default of the examples.
 2. The start of a method that only moves the boundary and cannot create holes (the double-well reaction–diffusion
-   `DoubleWell`, next release; Takezawa et al. 2010): there the holes of the seed are all the holes the design can
+   `ReactionDiffusion(…; reaction = DoubleWell())` with `bounds = (0.0, 1.0)`; Takezawa et al. 2010): there the holes
+   of the seed are all the holes the design can
    have, and the seed is mandatory.
 
 Holes of radius `radius` (a length, in the units of the mesh) about `spacing` apart:
