@@ -1026,6 +1026,13 @@ same_history(a, b) = all(isequal(getproperty(a, c), getproperty(b, c)) for c in 
       _record!(h0, (h0.n + 1, f, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1), (), (), (), ())
     end
     @test _stop_reason(StopCriteria(objective_range = 1e-3, window = 4), info(), h0, 0) === :objective_range
+    # a huge first objective: the floor 1e-3 |f₁| hides a range of 3.5e-3 above the tolerance (the false stop of the
+    # double well from the seed of Takezawa on 400 × 200); the correction of the floor is a separate change
+    hb = OptHistory(20, ())
+    for f in (3.16e5, (25.0 .+ 0.0875 .* (0:9) ./ 9)...)
+      _record!(hb, (hb.n + 1, f, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1), (), (), (), ())
+    end
+    @test_broken _stop_reason(StopCriteria(objective_range = 1e-3, window = 10), info(), hb, 0) === nothing
     hn = OptHistory(10, ())
     for f in (-1.0, -2.0, -2.0005, -2.0004)
       _record!(hn, (hn.n + 1, f, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1), (), (), (), ())

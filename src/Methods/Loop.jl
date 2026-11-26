@@ -66,8 +66,8 @@ it was built with `close_early = true` (then a criterion met in an earlier stage
   material still changing says so.
 - `grey_tol`: the measure of grey of the design below this value, `M_nd = Σᵢ mᵢ 4φ̂ᵢ(1 − φ̂ᵢ) / |D|` (`φ̂` the design
   scaled to `[0, 1]` by its bounds, `mᵢ` the lumped mass of the free values; nodal, without allocations; Kim et al.
-  2020). For `ReactionDiffusion` (`grey_measure` of the method); `solve!` throws with other methods (for a physical
-  density use the monitor [`Grey`](@ref)).
+  2020). For `ReactionDiffusion` (`grey_measure` of the method); with other methods `solve!` throws before the first
+  iteration (for a physical density use the monitor [`Grey`](@ref)).
 - `combine`: `:any` (default) stops when the first criterion given is met; `:all` when all of them are met in the
   same iteration, and then the window of `objective_range` also counts only iterations with the constraints met
   (the reason is `:all`). The default of `ReactionDiffusion` is
@@ -140,6 +140,10 @@ grey_measure(::Optimizer, state) = NaN
 # events of the step after each accepted iteration `k` (with `met` the constraints met and `f` the objective): nothing
 # or a vector of (message, color); a step may change its own state here (ReactionDiffusion with DoubleWell settles)
 iteration_events!(::Optimizer, state, k, maxiter, met, f) = nothing
+
+# events of the step once its state is set up (after init and, for a resumed run, its memory restored): nothing or a
+# vector of (message, color) (ReactionDiffusion with DoubleWell gives its substeps and Δt, which need the matrices)
+setup_events(::Optimizer, state) = nothing
 
 # whether the default stop may end the run at the accepted iteration `k` (ReactionDiffusion with DoubleWell holds it
 # until the iteration after the settling); a stop given to solve! is not held
@@ -1170,6 +1174,12 @@ function _segment!(problem, method, opt, resume, isfirst, run, hist, ctx, cont_b
       _print_event(pr, "· the memory of the optimiser was not restored (checkpoint written by $(resume.optimizer))", :yellow)
     end
   end
+  if stop isa StopCriteria && stop.grey_tol !== nothing && isnan(grey_measure(opt, state))
+    throw(ArgumentError("StopCriteria: grey_tol needs a method that computes the measure of grey of the design " *
+                        "(ReactionDiffusion); $(method_label(method)) does not (use the monitor Grey)"))
+  end
+  evs = setup_events(opt, state)
+  evs === nothing || foreach(e -> _print_event(pr, e[1], e[2]), evs)
   _set_output!(post, problem)
   if !isfirst
     # a rebuild: the forward solve of the next iteration, done now, gives the objective at the rebuilt problem
@@ -1681,12 +1691,7 @@ function _iterate!(problem, method, opt, oracle, state, zk, zprev, hist, run, ct
     met ? push!(run.material, mc) : empty!(run.material)
     evs = iteration_events!(opt, state, k, maxiter, met, f_acc)
     evs === nothing || foreach(e -> _print_event(pr, e[1], e[2]), evs)
-    gr = NaN
-    if stop isa StopCriteria && stop.grey_tol !== nothing
-      gr = grey_measure(opt, state)
-      isnan(gr) && throw(ArgumentError("StopCriteria: grey_tol needs a method that computes the measure of grey of the " *
-                                       "design (ReactionDiffusion); $(method_label(method)) does not (use the monitor Grey)"))
-    end
+    gr = (stop isa StopCriteria && stop.grey_tol !== nothing) ? grey_measure(opt, state) : NaN
     r = _stop_decision(stop, info, hist, run.stage_start, ctx, run.phase, run.material, run.streak, gr)
     # convergence also needs the constraints met to their tolerances
     (r !== nothing && !_constraints_met(oracle, info, opt, viols)) && (r = nothing)

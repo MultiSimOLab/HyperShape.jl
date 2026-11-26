@@ -14,6 +14,7 @@ julia --project=examples -t auto examples/mbb.jl
   ersatz material (`Ersatz()`), solid start, frozen cells under the load, exact volume lowered 2 % per iteration.
 - `bridge_dw.jl`: the bridge of Takezawa et al. (2010), compliance minimisation with the double-well reaction–diffusion
   (`reaction = DoubleWell()`): a density from a start with holes (`hole_seed`), whose interface is the only thing that
-  moves; a load spread over two cells, volume lowered 1 % per iteration, settling and default stop.
+  moves; κ = 1e-5 given as `κ`, a load spread over a fixed width (0.2), volume lowered 1 % per iteration, settling and
+  default stop.
 
 The test suite runs every example at a small size.

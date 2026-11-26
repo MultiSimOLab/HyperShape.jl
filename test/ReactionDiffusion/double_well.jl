@@ -26,12 +26,15 @@ end
 # a physical diffusion, the same on every mesh of these tests: κ = τ ℓ² = 4e-4 (ℓ² = |D| = 2), ξ = √(κ/2W) ≈ 0.028
 const DW_τ = 2e-4
 # references of the CI cases (Mac M5 Max, Julia 1.13): the cantilever 100×50 and the bridge 100×50 with κ = 4e-5
-# (measured 2.5371 at 67 iterations; the bridge: 23.3817 at 100 iterations, 23.4039 with :takezawa2010, 23.2632 with
+# (measured 2.5371 at 67 iterations; the bridge: 23.3366 at 100 iterations, not settled, 23.4039 with :takezawa2010, 23.2632 with
 # the default stop)
 const JCA100_LO, JCA100_HI = 2.50, 2.58
 const JBR100_LO, JBR100_HI = 23.0, 23.8
 const JBR100T_LO, JBR100T_HI = 23.0, 23.8
 dw(; kw...) = ReactionDiffusion(; τ = DW_τ, reaction = DoubleWell(; kw...))
+
+# the back-substitutions of a run with the well from iteration k + 1 on (n substeps before the settling, 1 after it)
+count_substeps(r, k) = sum(i -> i <= r.state.settle_iter ? r.state.nsub : 1, k+1:r.iterations)
 
 # the semi-implicit update of Takezawa et al. (2010, Eqs. 44–45) solved by hand: φ⁺ = a + Δt φ⁺(1 − φ) r when r ≤ 0,
 # φ⁺ = a + Δt φ (1 − φ⁺) r when r > 0 (a the diffused value, r = 4W(φ − ½) − 30 G φ(1 − φ))
@@ -190,6 +193,11 @@ end
     ct = dw_cantilever(; nx = 20, ny = 10, frozen = false, simplex = true)
     fo, z, st = rd_start(ct, dw())
     @test isfinite(st.Δtlim) && st.Δtlim > 0
+    @test st.hmean ≈ sqrt(2 / 400) rtol = 1e-12                    # the mean cell size of the event
+    @test s.hmean ≈ 2 / 40 rtol = 1e-12
+    # T far too large for the mesh: a clear error (not an InexactError)
+    @test_throws r"more than 1000000" RDM._dw_substeps(DoubleWell(T = 1e30), 1.0)
+    @test_throws r"more than 1000000" solve!(dw_cantilever(; nx = 20, ny = 10).problem, dw(; T = 1e30); maxiter = 1, verbose = 0)
     # the explicit diffusion alone at cfl 1/3 and at the bound: values in [0, 1], energy zᵀKz not increasing
     for cfl in (1 / 3, 1.0)
       m = dw(; scheme = :explicit, cfl, substeps = 1)
@@ -222,7 +230,7 @@ end
       a = stepalloc(m.step, s, z, fo, c.problem.ctx, z0)
       @test s.nfactor == nf
       if scheme === :explicit
-        @test a == 0 && s.nsolves == ns
+        @test a == 0 && s.nsolves == ns && s.nfactor == 0 && s.ns === nothing    # no linear system, no factorisation
       else
         @test s.nsolves == ns + s.nsub
         RDM._rd_solve!(s.φs, m.step, s, s.r)
@@ -234,9 +242,15 @@ end
       G(0.1)
       @test (@allocated G(0.1)) == 0
       @test (@allocated RDM.grey_measure(m.step, s)) == 0
+      # the events of an iteration allocate nothing unless there is an event
+      evalloc(st, s, k, met, f) = @allocated RDM.iteration_events!(st, s, k, 100, met, f)
+      evalloc(m.step, s, 1, true, 1.0)
+      evalloc(m.step, s, 2, false, 1.0)
+      @test evalloc(m.step, s, 3, true, 1.0) == 0 && evalloc(m.step, s, 4, false, 1.0) == 0
+      @test (@allocated RDM.stop_allowed(m.step, s, 5)) == 0
     end
     r = solve!(dw_cantilever(; nx = 40, ny = 20).problem, dw(; settle = false); maxiter = 10, stop = nothing, verbose = 0)
-    @test r.state.nsolves == 1 + 8 * 10 && r.state.nfactor == 1          # φ̌ at the start, 8 substeps per iteration
+    @test r.state.nsolves == 8 * 10 && r.state.nfactor == 1             # 8 substeps per iteration, one factorisation
     @test all(==(1), r.history.forward[2:end]) && all(==(0), r.history.adjoint)
   end
 
@@ -248,13 +262,13 @@ end
     k = r.state.settle_iter
     @test r.state.nsub == 5 && r.state.Δt == 5.0
     @test occursin("double well: T = 25 per iteration = 5 substeps × Δt = 5 (Δt_lim = 3.75)", out)
-    @test occursin("Δt = :auto = T/n = 25/5 = 5 per substep", out)
+    @test occursin("Δt = :auto = T/n = 25/n per substep (n = ⌈T/(cfl Δt_lim)⌉, cfl 1.33)", out)
     # the default stop waits for the iteration after the settling (with the windows met at the settling it stopped
     # there before: 66 on this case; now settles at 66 and stops at 67)
     @test r.status === :converged && r.reason === :all
     @test r.state.settled && r.state.substeps == 1 && 10 <= k < r.iterations
-    @test occursin("double well settled at iteration $k (constraints met and objective steady over 10 iterations)", out)
-    @test occursin("the default stop waits for it", out)
+    @test occursin("double well settled at iteration $k (constraints met and objective range below 0.001 over 10 iterations)", out)
+    @test occursin("(the default stop of the method is held until then; a stop given to solve! is not)", out)
     @test abs(c.volume - 0.5) <= 1e-3
     @test JCA100_LO <= r.objective <= JCA100_HI
   end
@@ -330,12 +344,14 @@ end
     solve!(dw_cantilever(; nx = 20, ny = 10).problem, dw(); maxiter = 2, stop = nothing, verbose = 1, io)
     s = String(take!(io))
     @test occursin("sensitivity = :design (with DoubleWell)", s) && occursin("L2Norm() (default)", s)
-    # 20×10: Δt_lim = 0.375 h²/κ = 9.375, T/(4/3 Δt_lim) = 2 up to rounding: 2 substeps of 12.5
-    @test occursin("Δt = :auto = T/n = 25/2 = 12.5 per substep (n = ⌈T/(cfl Δt_lim)⌉, cfl 1.33, Δt_lim = 9.38)", s)
+    # 20×10: Δt_lim = 0.375 h²/κ = 9.375, T/(4/3 Δt_lim) = 2 up to rounding: 2 substeps of 12.5 (the event after the
+    # setup; the banner gives the formula and does not assemble K and m)
+    @test occursin("Δt = :auto = T/n = 25/n per substep (n = ⌈T/(cfl Δt_lim)⌉, cfl 1.33)", s)
     @test occursin("target lowered 1 % of |D| per iteration", s)
-    @test occursin("double well: T = 25 per iteration = 2 substeps × Δt = 12.5", s) && occursin("width of the interface ξ = √(τℓ²/2W) = 0.28", s)
+    @test occursin("double well: T = 25 per iteration = 2 substeps × Δt = 12.5 (Δt_lim = 9.38), width of the interface " *
+                   "ξ = √(τℓ²/2W) = 0.283 h̄ (h̄ = (|D|/cells)^(1/d) = 0.1, the mean cell size)", s)
     @test occursin("inside the tilt of the double well", s) && occursin("2 substeps of Δt = 12.5 per iteration (Δt_lim 9.38)", s)
-    @test occursin(", 1 from iteration 3 (settled)", s)
+    @test !occursin("settled", s)                              # 2 iterations: nothing settles (no fraction of maxiter)
     # substeps given: the banner and the event say so
     io = IOBuffer()
     solve!(dw_cantilever(; nx = 20, ny = 10).problem, dw(; substeps = 3); maxiter = 1, stop = nothing, verbose = 1, io)
@@ -368,6 +384,41 @@ end
     @test_throws r"reaction must be nothing or DoubleWell" ReactionDiffusion(; τ = 1e-4, sensitivity = :design, reaction = :well)
     cz = dw_cantilever(; nx = 20, ny = 10)
     @test_throws r"needs τ > 0" solve!(cz.problem, ReactionDiffusion(; τ = 0.0, reaction = DoubleWell()); maxiter = 1, verbose = 0)
+    # τ = 0 with the substeps and Δt given: no width of the interface in the event (no NaN)
+    io = IOBuffer()
+    solve!(dw_cantilever(; nx = 20, ny = 10).problem, ReactionDiffusion(; τ = 0.0, Δt = 1.0, reaction = DoubleWell(substeps = 2));
+           maxiter = 1, stop = nothing, verbose = 1, io)
+    out = String(take!(io))
+    @test occursin("no diffusion (τ = 0): no width of the interface", out) && !occursin("NaN h", out)
+    # τ, κ or Δt continued (a Parameter) with the well: refused (n and Δt are set once from Δt_lim at the start)
+    @test_throws r"τ must be a number, not a Parameter" ReactionDiffusion(; τ = Parameter(DW_τ), reaction = DoubleWell())
+    @test_throws r"κ must be a number, not a Parameter" ReactionDiffusion(; κ = Parameter(2DW_τ), reaction = DoubleWell())
+    @test_throws r"Δt must be a number, not a Parameter" ReactionDiffusion(; τ = DW_τ, Δt = Parameter(1.0),
+                                                                          reaction = DoubleWell(substeps = 2))
+    @test_throws r"τ must be a number, not a Parameter" ReactionDiffusion(:takezawa2010; τ = Parameter(5e-6))
+    @test ReactionDiffusion(; τ = Parameter(DW_τ), sensitivity = :physical).step.τ isa Parameter   # without the well: as before
+  end
+
+  @testset "11b. κ = τℓ² instead of τ" begin
+    @test_throws r"give τ or κ = τ ℓ².*not both" ReactionDiffusion(; τ = DW_τ, κ = 2DW_τ, reaction = DoubleWell())
+    @test_throws r"τ is mandatory.*or give κ = τ ℓ² instead" ReactionDiffusion(; reaction = DoubleWell())
+    @test_throws r"κ must be a number ≥ 0" ReactionDiffusion(; κ = -1.0, reaction = DoubleWell())
+    c = dw_cantilever(; nx = 20, ny = 10)
+    fo, z, s = rd_start(c, ReactionDiffusion(; κ = 2DW_τ, reaction = DoubleWell()))
+    fo, z, s2 = rd_start(c, dw())
+    @test s.τ ≈ DW_τ rtol = 1e-14
+    @test s.Δtlim ≈ s2.Δtlim rtol = 1e-12
+    @test s.nsub == s2.nsub
+    fo, z, s3 = rd_start(rd_cantilever(; nx = 20, ny = 10), ReactionDiffusion(; κ = 4e-4, sensitivity = :physical))
+    @test s3.τ ≈ 2e-4 rtol = 1e-14                                       # also without the well
+    @test startswith(sprint(show, ReactionDiffusion(; κ = 1e-5, reaction = DoubleWell())), "ReactionDiffusion(κ = 1.0e-5")
+    io = IOBuffer()
+    solve!(dw_cantilever(; nx = 20, ny = 10).problem, ReactionDiffusion(; κ = 2DW_τ, reaction = DoubleWell()); maxiter = 1,
+           stop = nothing, verbose = 1, io)
+    @test occursin("κ = 0.0004 (τ = κ/ℓ² = 0.0002, ℓ² = 2)", String(take!(io)))
+    io = IOBuffer()
+    solve!(dw_cantilever(; nx = 20, ny = 10).problem, dw(); maxiter = 1, stop = nothing, verbose = 1, io)
+    @test occursin("τ = 0.0002 (κ = τℓ² = 0.0004, ℓ² = 2)", String(take!(io)))
   end
 
   @testset "12. the grey measure and grey_tol; the settling" begin
@@ -386,34 +437,109 @@ end
     @test r.status === :converged && r.reason === :grey_tol && r.iterations < 60   # once the volume is met
     cd = rd_cantilever(; nx = 20, ny = 10, design = :density)
     @test_throws r"grey_tol needs" solve!(cd.problem, DensityMethod(OC()); maxiter = 2, verbose = 0, stop = StopCriteria(grey_tol = 0.01))
+    @test HyperShape.Operators.num_solves(cd.S) == 0                       # refused at the setup, before any solve
     @test StopCriteria(grey_tol = 0.01).grey_tol == 0.01 && StopCriteria().grey_tol === nothing
     @test_throws ArgumentError StopCriteria(grey_tol = 0.0)
     # settle = false keeps the substeps (the settling of a run: test 8)
     r = solve!(dw_cantilever(; nx = 40, ny = 20).problem, dw(; settle = false); maxiter = 20, stop = nothing, verbose = 0)
     @test !r.state.settled && r.state.substeps == r.state.nsub == 8
-    # at 75 % of maxiter
+    # the settling depends only on the objective: a short run does not settle
+    r = solve!(dw_cantilever(; nx = 40, ny = 20).problem, dw(); maxiter = 8, stop = nothing, verbose = 0)
+    @test !r.state.settled && r.state.substeps == 8
+    # settle = (window, tol): the window and the tolerance of the settling
     io = IOBuffer()
-    r = solve!(dw_cantilever(; nx = 40, ny = 20).problem, dw(); maxiter = 8, stop = nothing, verbose = 1, io)
-    @test r.state.settle_iter == 6 && occursin("settled at iteration 6 (75 % of maxiter)", String(take!(io)))
+    r = solve!(dw_cantilever(; nx = 40, ny = 20).problem, dw(; settle = (window = 5, tol = 1e-2)); maxiter = 60,
+               stop = nothing, verbose = 1, io)
+    out = String(take!(io))
+    k = r.state.settle_iter
+    f = r.history.objective
+    @test r.state.settled && length(r.state.fwin) == 5 && k >= 5
+    @test (maximum(f[k-4:k]) - minimum(f[k-4:k])) / maximum(abs, f[k-4:k]) <= 1e-2
+    @test occursin("objective range below 0.01 over 5 iterations", out) && occursin("settle = (window = 5, tol = 0.01)", out)
+    r10 = solve!(dw_cantilever(; nx = 40, ny = 20).problem, dw(); maxiter = k, stop = nothing, verbose = 0)
+    @test !r10.state.settled                                   # the default window and tolerance: not yet at k
+    @test DoubleWell(settle = (window = 20,)).settle_tol == 1e-3 && DoubleWell(settle = (tol = 1e-2,)).settle_window == 10
+    @test DoubleWell(settle = true).settle && !DoubleWell(settle = false).settle
+    @test_throws r"settle takes window and tol" DoubleWell(settle = (windows = 5,))
+    @test_throws r"settle window must be an integer ≥ 2" DoubleWell(settle = (window = 1,))
+    @test_throws r"settle tol must be a positive number" DoubleWell(settle = (tol = 0.0,))
   end
 
-  @testset "13. checkpoint and resume bit for bit, across the settling" begin
+  @testset "13. checkpoint and resume bit for bit, across the settling, with a larger maxiter" begin
     c0 = dw_cantilever(; nx = 40, ny = 20)
     r0 = solve!(c0.problem, dw(); maxiter = 200, verbose = 0)
     @test r0.state.settled
-    k = r0.state.settle_iter - 3                              # the window of the objective partly filled
-    dir = mktempdir()
-    c1 = dw_cantilever(; nx = 40, ny = 20)
-    # the same maxiter (the settling at 75 % of maxiter depends on it), stopped at k by a function
-    r1 = solve!(c1.problem, dw(); maxiter = 200, stop = (info, h, ctx) -> h.n >= k, verbose = 0,
-                checkpoint = Checkpoint(filepath = dir, every = 1000))
-    @test r1.iterations == k
-    c2 = dw_cantilever(; nx = 40, ny = 20)
-    r2 = solve!(c2.problem, dw(); maxiter = 200, verbose = 0, resume = dir)
-    @test r2.iterations == r0.iterations && r2.status === r0.status && r2.state.settle_iter == r0.state.settle_iter
-    @test get_values(r2.z) == get_values(r0.z) && r2.history.objective == r0.history.objective
-    st = load_checkpoint(dir)
-    @test keys(st.memory) == RDM._DW_MEMORY_KEYS
+    for k in (r0.state.settle_iter - 3, r0.state.settle_iter)   # the window partly filled; settled at k (stop held)
+      dir = mktempdir()
+      c1 = dw_cantilever(; nx = 40, ny = 20)
+      # a short run (maxiter = k), resumed with maxiter = 200: the uninterrupted run
+      r1 = solve!(c1.problem, dw(); maxiter = k, verbose = 0, checkpoint = Checkpoint(filepath = dir, every = 1000))
+      @test r1.iterations == k && r1.status === :maxiter
+      c2 = dw_cantilever(; nx = 40, ny = 20)
+      r2 = solve!(c2.problem, dw(); maxiter = 200, verbose = 0, resume = dir)
+      @test r2.iterations == r0.iterations && r2.status === r0.status && r2.state.settle_iter == r0.state.settle_iter
+      @test get_values(r2.z) == get_values(r0.z) && r2.history.objective == r0.history.objective
+      @test r2.state.nsolves == count_substeps(r0, k)            # the substeps of the iterations after k
+      st = load_checkpoint(dir)
+      @test keys(st.memory) == RDM._dw_memory_keys(10)
+    end
+    # the substeps follow the settling and the setup: a memory saved with other substeps (another T) is not stale
+    m, m2 = dw(), dw(; T = 50.0)
+    fo, z, s = rd_start(dw_cantilever(; nx = 20, ny = 10), m)
+    fo2, z2, s2 = rd_start(dw_cantilever(; nx = 20, ny = 10), m2)
+    @test s.nsub == 2 && s2.nsub == 4
+    OPT.restore_memory!(m2.step, s2, z2, OPT.memory(m.step, s, z))
+    @test s2.substeps == 4 && !s2.settled
+    s.settled, s.substeps, s.settle_iter = true, 1, 7
+    OPT.restore_memory!(m2.step, s2, z2, OPT.memory(m.step, s, z))
+    @test s2.substeps == 1 && s2.settled && s2.settle_iter == 7
+    m5 = dw(; settle = (window = 5,))
+    fo5, z5, s5 = rd_start(dw_cantilever(; nx = 20, ny = 10), m5)
+    @test_throws r"settle window of 5" OPT.restore_memory!(m5.step, s5, z5, OPT.memory(m.step, s, z))
+  end
+
+  @testset "15. a continuation jump starts the settling again" begin
+    P = Parameter(1.0)                                         # continued but not used: only the jump matters
+    io = IOBuffer()
+    r = solve!(dw_cantilever(; nx = 40, ny = 20).problem, dw(); maxiter = 100, stop = nothing, verbose = 1, io,
+               continuation = Continuation(pc = P => [1.0, 1.0]; every = 50))
+    ks = [parse(Int, m.captures[1]) for m in eachmatch(r"double well settled at iteration (\d+)", String(take!(io)))]
+    s = r.state
+    @test length(ks) == 2 && ks[1] < 50 < ks[2] && s.settled && s.settle_iter == ks[2]
+    # n substeps before each settling, 1 after it, n again from the jump (iteration 51)
+    n = s.nsub
+    @test s.nsolves == n * ks[1] + (50 - ks[1]) + n * (ks[2] - 50) + (100 - ks[2])
+  end
+
+  @testset "16. with the well: a rejected step, a nonlinear native constraint, consistent mass, a solve of the user" begin
+    for scheme in (:implicit, :explicit)
+      c = dw_cantilever(; nx = 20, ny = 10, solve_flag = ctx -> !(ctx.iteration == 3 && ctx.attempt == 1))
+      r = solve!(c.problem, dw(; scheme); maxiter = 5, stop = nothing, verbose = 0)
+      st = r.history.step
+      @test r.iterations == 5 && st[3] == st[2] / 2 && st[4] == st[2]          # halved, then back
+      # the target of the rejected iteration lowered in proportion (half of 1 % of |D|)
+      g = r.history.constraints.volume
+      @test abs(g[3] - (g[2] - 0.01)) <= VT && abs(g[4] - (g[3] - 0.02)) <= VT
+      @test r.state.nfactor == (scheme === :implicit ? 3 : 0)                 # the start, the shrink and back
+    end
+    # a native constraint that is not linear: the root through the oracle
+    c = dw_cantilever(; nx = 20, ny = 10, left_cap = 0.3)
+    r = solve!(c.problem, ReactionDiffusion(; τ = DW_τ, reaction = DoubleWell(), volume = ExactVolume(constraint = :left));
+               maxiter = 40, stop = nothing, verbose = 0)
+    @test r.state.kind === :newton && r.history.constraints.left[end] <= 1e-4 * 2 / 0.6
+    @test all(isfinite, r.history.objective) && all(v -> 0 <= v <= 1, get_values(r.z))
+    # consistent mass, and a solve of the user (the same as LU)
+    r = solve!(dw_cantilever(; nx = 20, ny = 10).problem, ReactionDiffusion(; τ = DW_τ, reaction = DoubleWell(), mass = :consistent);
+               maxiter = 10, stop = nothing, verbose = 0)
+    g = r.history.constraints.volume                            # the target lowered 1 % of |D| per iteration
+    @test all(k -> abs(g[k] - (g[k-1] - 0.02)) <= VT, 2:length(g)) && all(isfinite, r.history.objective)
+    calls = Ref(0)
+    lusolve = (A, b, x, ctx, stale) -> (calls[] += 1; x .= A \ b)
+    r1 = solve!(dw_cantilever(; nx = 20, ny = 10).problem, ReactionDiffusion(; τ = DW_τ, reaction = DoubleWell(), solve = lusolve);
+                maxiter = 10, stop = nothing, verbose = 0)
+    r2 = solve!(dw_cantilever(; nx = 20, ny = 10).problem, dw(); maxiter = 10, stop = nothing, verbose = 0)
+    @test r1.history.objective ≈ r2.history.objective rtol = 1e-10
+    @test calls[] == r1.state.nsolves == r2.state.nsolves
   end
 
   @testset "14. P1 triangles and a small 3D case: they run, the volume is exact" begin

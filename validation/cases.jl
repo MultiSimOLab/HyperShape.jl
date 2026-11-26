@@ -7,7 +7,7 @@
 #                                     DoubleWell): J = 23.3 published at 100 iterations
 #   cantilever_dw(; …)                the cantilever 2 × 1 with the double well from hole_seed (mesh independence)
 #
-# Both return a named tuple with the result of `solve!` and the cell means of the physical density.
+# Each returns a named tuple with the result of `solve!` and the cell means of the physical density.
 using Gridap, Gridap.Geometry, HyperFEM, HyperShape, Printf
 
 include(joinpath(@__DIR__, "top88.jl"))
@@ -236,7 +236,9 @@ function bridge(; nx = 200, ny = nx ÷ 2, seed = :hex, method = :default, κ = 1
   σ(e) = λ * tr(e) * one(e) + 2μ * e
   k(φ) = max(φ^3, 1e-5)
   dk(φ) = φ^3 > 1e-5 ? 3φ^2 : 0.0
-  # unit point load at (1, 0): the traction dual to the shape function of that node on the edge [1, 1 + h]
+  # unit point load at (1, 0) as in Takezawa et al. (it reproduces their J = 23.3 on 200 × 100, so it is kept here;
+  # examples/bridge_dw.jl spreads the load over a fixed width instead): the traction dual to the shape function of
+  # that node on the edge [1, 1 + h]
   t(x) = VectorValue(0.0, (1 - 1e-12 <= x[1] <= 1 + h + 1e-12) ? -(4 - 6 * (x[1] - 1) / h) / h : 0.0)
   a(u, v) = ∫((k ∘ θ.χ) * (ε(v) ⊙ (σ ∘ ε(u))))dΩ
   S = StateOperator(StaticLinearModel(v -> ∫(t ⋅ v)dΓ, a, U, V, bc; ls = LUSolver(), backend = :compiled), θ;
@@ -244,7 +246,7 @@ function bridge(; nx = 200, ny = nx ÷ 2, seed = :hex, method = :default, κ = 1
   C = Functional((u, θ) -> ∫(t ⋅ u)dΓ, S; dJdu = SelfAdjoint(), scale = 1.0)
   Vol = Volume(θ, dΩ; max_fraction = 0.3)
   problem = Optimization(z; objective = C, constraints = (volume = Vol,))
-  τ = κ / 2                                            # ℓ² = |D| = 2
+  τ = κ / 2                  # ℓ² = |D| = 2 (τ, not κ = …: the references were measured with this τ, bit for bit)
   m = method === :default ? ReactionDiffusion(; τ, merge((; reaction = DoubleWell()), kwargs)...) :
       method === :takezawa2010 ? ReactionDiffusion(:takezawa2010; τ, kwargs...) :
       throw(ArgumentError("bridge: method must be :default or :takezawa2010"))

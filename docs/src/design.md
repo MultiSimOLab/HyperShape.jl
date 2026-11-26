@@ -509,7 +509,7 @@ z  = OptVariables(φ = FieldVariable(Vφ; bounds = (0.0, 1.0), init = φ0))
 θ  = PhysicalFields(DesignFields(z; φ = Identity()); χ = :φ => Identity())
 # … the state with k(φ) = max(φ³, 1e-5), the compliance C and Vol = Volume(θ, dΩ; max_fraction = 0.3)
 result = solve!(Optimization(z; objective = C, constraints = (volume = Vol,)),
-                ReactionDiffusion(; τ = 5e-6, reaction = DoubleWell()); maxiter = 300)   # κ = τ|D| = 1e-5, T = 25
+                ReactionDiffusion(; κ = 1e-5, reaction = DoubleWell()); maxiter = 300)   # τ = κ/|D| = 5e-6, T = 25
 ```
 
 The whole script is `examples/bridge_dw.jl`; `validation/bridge_takezawa.jl` reproduces the published bridge.
@@ -521,14 +521,18 @@ The whole script is `examples/bridge_dw.jl`; `validation/bridge_takezawa.jl` rep
   their scheme (`ψ = φ − Δt τℓ² m⁻¹(K φ + k_d)`, no linear system). The sensitivity is computed once per iteration and
   frozen over the substeps.
 - **Physical parameters** (decision of Jesús, 2026-11-26): `κ = τ ℓ²` and the time of the evolution per iteration
-  `T` (`DoubleWell(T = 25)`) are physical, the same on every mesh. An iteration is `n = ⌈T/(cfl Δt_lim)⌉` substeps of
+  `T` (`DoubleWell(T = 25)`) are physical, the same on every mesh. `ReactionDiffusion(; κ = …)` takes `κ` directly
+  (exactly one of `τ` and `κ`; the banner shows both). With the well `κ` (or `τ`) and `Δt` are numbers: a
+  `Continuation` of them would leave `n` and `Δt` stale, and `ReactionDiffusion` refuses a `Parameter` there. An iteration is `n = ⌈T/(cfl Δt_lim)⌉` substeps of
   `Δt = T/n`, with `Δt_lim = 2/maxᵢ(τℓ² Σⱼ|Kᵢⱼ|/mᵢ)` (Gershgorin, from the assembled `K` and `m` once at the start:
   `0.375 h²/(τℓ²)` on squares, any mesh) and `cfl = 4/3` with `:implicit`, `1/3` with `:explicit` (`h²/(8τℓ²)`, the
   step of Takezawa et al.). The pointwise reaction needs `√(τℓ² Δt) ≲ 0.7 h` (a limit like a CFL condition), so the
   number of substeps grows like `(h₀/h)²`: with κ = 1e-5 and `T = 25` on the domain 2 × 1, 2, 5, 20 and 80 substeps on
   100 × 50, 200 × 100, 400 × 200 and 800 × 400. No new factorisation per iteration. `DoubleWell(substeps = n)` fixes
   `n` instead (`T` is then ignored and `Δt = :auto` of the method is `cfl Δt_lim`; the preset `:takezawa2010`). The
-  banner gives `T`, `n` and `Δt`, and the first iteration `ξ = √(τℓ²/2W)` in cells.
+  event after the setup gives `T`, `n`, `Δt`, `Δt_lim` and `ξ = √(τℓ²/2W)` in mean cell sizes `(|D|/cells)^(1/d)`
+  (`K` and `m` are assembled once, in the setup; the banner gives the formula). More than 10⁶ substeps per iteration
+  are refused. With `:explicit` the operator of the step is never factorised.
 - **Mesh** (study of 2026-11-25, `validation/mesh_double_well.jl`): with κ = 1e-5 and `T = 25` the compliance of the
   cantilever 2 × 1 from `:hex` is the same within about 3 % on 100 × 50, 200 × 100 and 400 × 200 (2.558, 2.493, 2.426 with 2, 5 and 20 substeps: within ±2.7 % of the value on 200 × 100), but the
   topology depends on the seed and on the mesh (no holes are nucleated, and a coarse mesh resolves the seed and the
@@ -544,14 +548,20 @@ The whole script is `examples/bridge_dw.jl`; `validation/bridge_takezawa.jl` rep
 - **Settling** (decision of Jesús, 2026-11-25): with the sensitivity frozen over the substeps the interface overshoots
   and comes back, and 1–2 % of the material changes phase at every iteration. `settle = true` (default) goes to one
   substep (of the same `Δt`) per iteration when the constraints are met and the relative range of the objective over 10
-  iterations is below `1e-3` (or at 75 % of `maxiter`); an event says so. `DoubleWell(settle = false)` keeps the
-  substeps.
+  iterations is below `1e-3` (`settle = (window = 10, tol = 1e-3)`, both replaceable); an event says so. It depends
+  only on the objective (no fraction of `maxiter`: a run resumed with a larger `maxiter` is the uninterrupted one), and
+  a continuation jump starts the substeps and the window again. `DoubleWell(settle = false)` keeps the substeps.
 - **Default stop with the well** (decisions of Jesús, 2026-11-25/26): after settling the interface still keeps a cycle
   of a few per mille of the material per iteration, so the default stop takes `material_tol = 1e-2` with the well
   (`2e-3` without it), the objective range `1e-3` over 10 iterations and the constraints unchanged. It is checked only
-  from the iteration after the settling (or from the start with one substep, or with `settle = false`): before it, on
-  fine meshes (400 × 200, 800 × 400) the windows were met with the interface stuck between the holes of the seed and
-  the run stopped at iterations 49–53. `solve!(…; stop)` replaces it and is not held. Measured (Validation page): the
+  from the iteration after the settling (or from the start with one substep, or with `settle = false`).
+  `solve!(…; stop)` replaces it and is not held. The early stops of the study (400 × 200 and 800 × 400 from the seed
+  of Takezawa, iterations 49–53) were not an interface stuck with the windows met: on 400 × 200 (iteration 53) the
+  relative range of the objective over the window was 3.5e-3, above `1e-3`, but `objective_range` measures it against `max(max|f|, 1e-3 |f₁|)`, and the first
+  objective of those runs is huge (holes of the seed over the supports: `f₁ ≈ 3e5`, floor 315 for `J ≈ 25`). The
+  settling uses the range without that floor, so the hold of the default stop masks the false stop on the default
+  path; it remains with `settle = false`, with one substep from the start and with a `stop` of the user. The floor
+  is common to every method and will be corrected in a separate change. Measured (Validation page): the
   bridge 200 × 100 from `:hex` settles at 74 and stops at 75 (J 23.90; from the seed of Takezawa 72 and 77, J 23.67), the cantilever 200 × 100 at 74 and 75 (J 2.493).
 - **Grey:** `StopCriteria(grey_tol)` stops on the measure of grey `Σᵢ mᵢ 4φ̂ᵢ(1 − φ̂ᵢ)/|D|` (nodal, without
   allocations); with the well it stays at 1–3 % (the interface), so it is a criterion for a refinement stage, not for
@@ -563,8 +573,9 @@ The whole script is `examples/bridge_dw.jl`; `validation/bridge_takezawa.jl` rep
 - **Per iteration:** one forward solve, one adjoint (none with `SelfAdjoint()`), `n` substitutions (none with
   `:explicit`) and `n` roots on vectors, no factorisation; the step allocates nothing but the substitutions of
   UMFPACK (nothing at all with `:explicit`).
-- **Checkpoint:** the multiplier, the substeps, the settling and the window of the objective that decides it are the
-  memory of the step: a resumed run is the uninterrupted one bit for bit, across the settling.
+- **Checkpoint:** the multiplier, the settling and the window of the objective that decides it are the memory of the
+  step (the substeps follow from the settling and the setup): a resumed run is the uninterrupted one bit for bit,
+  across the settling and with a larger `maxiter`.
 - **Not offered:** the double well with an interface map (`Ersatz()`, `Step()`: φ ∈ [−1, 1] read through the map gave
   hundreds of specks in the prototype), `sensitivity = :physical` with the well, and the nucleation of holes.
 

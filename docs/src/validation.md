@@ -91,7 +91,7 @@ result of a nonconvex problem depends on the path.
 Takezawa, Nishiwaki and Kitamura, *Shape and topology optimization based on the phase field method and sensitivity
 analysis*, JCP 229 (2010), section 5.2: domain 2 × 1, roller at (0, 0), pin at (2, 0), unit point load at (1, 0), plane
 stress (E = 1, ν = 0.3), volume 0.3, `k(φ) = max(φ³, 1e-5)`, κ = 1e-5 on a 200 × 100 grid, 100 iterations: published
-J = 23.3. `ReactionDiffusion(; τ = κ/|D|, reaction = DoubleWell())` (the default scheme) and the preset
+J = 23.3. `ReactionDiffusion(; κ, reaction = DoubleWell())` (`τ = κ/|D|`) (the default scheme) and the preset
 `:takezawa2010` (their explicit scheme), from their seed (rows of rectangular holes) and from `hole_seed` (`:hex`,
 radius 0.1, spacing 0.4), 100 iterations (`validation/bridge_takezawa.jl`; 2026-11-26, `T = 25` per iteration: 5
 substeps of 5 with the default scheme, 20 of 1.25 with the preset):
@@ -112,18 +112,24 @@ mesh; the examples and the tests start from `:hex`.
   a finer mesh), so the values of the bridge on different meshes are not comparable with each other nor with 23.3 away
   from 200 × 100. With κ = 1e-5 and `T = 25` on 400 × 200 (20 substeps of 1.25), the default stop gives J = 24.09 from
   the seed of Takezawa (175/176, settled/stopped, 9 holes) and 24.31 from `:hex` (141/142, 6 holes). The test suite runs
-  the bridge on 100 × 50 with κ = 4e-5 from `:hex` against its own reference (J 23.38 at 100 iterations, 23.40 with the
+  the bridge on 100 × 50 with κ = 4e-5 from `:hex` against its own reference (J 23.34 at 100 iterations, 23.40 with the
   preset). The mesh independence is checked on the cantilever (next section).
 - **Stop and settling.** With the default stop of the well (`material_tol = 1e-2`, maxiter 300, checked from the
   iteration after the settling): on 200 × 100 from the seed of Takezawa the run settles at 72 and stops at 77 (J 23.672, 9 holes), from `:hex` at 74 and 75 (J 23.902, 6 holes). 100 × 50 (κ = 4e-5, `:hex`): settles at 105, stops at 116 (J 23.263). The
   range of the objective alone stopped at 58 with J 24.81, before the merge of the holes. Without the hold until the
-  settling, on 400 × 200 with 10 substeps of 2.5 from the seed of Takezawa the windows were met at iteration 53 with
-  the interface stuck between the holes (J 25.21, 18 holes): with the hold the run settles at 88 and stops at 93 (J 24.84), but still with 18 holes: on that mesh 10 substeps of 2.5 do not merge the holes of that seed (with `T = 25` from `n = ⌈T/(cfl Δt_lim)⌉`, 20 substeps of 1.25, it has 9 holes).
+  settling, on 400 × 200 with 10 substeps of 2.5 from the seed of Takezawa the run stopped at iteration 53 (J 25.21,
+  18 holes). That stop is false, and not caused by the substeps: the relative range of the objective over the last 10
+  iterations was 3.5e-3, above `1e-3`, but `objective_range` compares the range with `max(max|f|, 1e-3 |f₁|)` and
+  `f₁ = 3.16e5` (the holes of the seed over the supports), a floor of 315 for `J ≈ 25`. The settling measures the
+  range without the floor, so on the default path the hold masks it (the run settles at 88 and stops at 93, J 24.84,
+  still with 18 holes: on that mesh 10 substeps of 2.5 do not merge the holes of that seed; with `T = 25` from
+  `n = ⌈T/(cfl Δt_lim)⌉`, 20 substeps of 1.25, it has 9 holes). The floor is common to all the methods; its correction
+  is a separate change.
 
 ## Mesh independence of the double well (cantilever)
 
 The cantilever 2 × 1 (clamped at x = 0, a unit traction on x = 2, |y − ½| ≤ 0.1, volume 0.5, `k(φ) = max(φ³, 1e-5)`)
-with `ReactionDiffusion(; τ = κ/|D|, reaction = DoubleWell())`, κ = 1e-5 and `T = 25` (physical, the same on every
+with `ReactionDiffusion(; κ, reaction = DoubleWell())`, κ = 1e-5 and `T = 25` (physical, the same on every
 mesh), from `hole_seed` (`:hex`, radius 0.1, spacing 0.4) and the default stop (`validation/mesh_double_well.jl`;
 2026-11-26, Mac M5 Max, Julia 1.13, 4 threads):
 
