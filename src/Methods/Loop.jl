@@ -40,7 +40,8 @@ it was built with `close_early = true` (then a criterion met in an earlier stage
   a run whose first objective is much larger than the final one (a seed with holes over the supports) is not stopped
   early. An objective that tends to zero may never meet a relative range: give `objective_atol` too.
 - `objective_atol`: only together with `objective_range`: the criterion is also met when the range of the window is
-  below this absolute value (units of the scaled objective), for objectives that tend to zero. Off by default.
+  below this absolute value (units of the scaled objective; positive and finite), for objectives that tend to zero.
+  Off by default. A run that ends at `maxiter` with the objective range not met says so.
 - `kkt_tol`: optimality measure of the optimiser below this value (absolute: units of the scaled objective).
   `kkt_rtol`: the same, relative to the one of the first iteration of the run (off if that one is not a positive
   number). Only with optimisers that compute it (SiMPL; with OC `solve!` throws before the first iteration).
@@ -104,6 +105,8 @@ struct StopCriteria
                    (:objective_atol, objective_atol))
       v === nothing || v > 0 || throw(ArgumentError("StopCriteria: $k must be positive"))
     end
+    objective_atol === nothing || isfinite(objective_atol) ||
+      throw(ArgumentError("StopCriteria: objective_atol must be finite"))
     objective_atol === nothing || objective_range !== nothing ||
       throw(ArgumentError("StopCriteria: objective_atol only acts together with objective_range"))
     window >= 2 || throw(ArgumentError("StopCriteria: window must be at least 2"))
@@ -1266,6 +1269,15 @@ function _segment!(problem, method, opt, resume, isfirst, run, hist, ctx, cont_b
      maximum(view(run.material, max(1, length(run.material)-stop.material_window+1):length(run.material))) >= stop.material_tol
     _print_event(pr, "⚠ maxiter with the material still changing: M = " * @sprintf("%.2e", run.material[end]) *
                      " (material_tol $(_g_or_e(stop.material_tol))); the design has not settled", :yellow)
+  end
+  if status === :maxiter && stop isa StopCriteria && stop.objective_range !== nothing && hist.n >= stop.window &&
+     !_objective_steady(stop, hist)
+    w = view(hist.objective, hist.n-stop.window+1:hist.n)
+    _print_event(pr, "⚠ maxiter with the objective range not met: " * @sprintf("%.2e", maximum(w) - minimum(w)) *
+                     " over the last $(stop.window) iterations, relative " * @sprintf("%.2e", (maximum(w) - minimum(w)) / maximum(abs, w)) *
+                     " (objective_range $(_g_or_e(stop.objective_range))" *
+                     (stop.objective_atol === nothing ? "; for an objective that tends to zero give objective_atol)" :
+                      ", objective_atol $(_g_or_e(stop.objective_atol)))"), :yellow)
   end
   _print_summary(pr, map(_count, ops) .- run.cstart .+ run.acc, run.k - run.k0, run.events, summary_note(opt, state))
   final = _save_state!(checkpoint, problem, method, opt, state, zk, hist, run, cont_names, oracle)

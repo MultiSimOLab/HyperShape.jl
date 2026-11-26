@@ -812,6 +812,12 @@ same_history(a, b) = all(isequal(getproperty(a, c), getproperty(b, c)) for c in 
     info = HyperShape.Optimizers.StepInfo(true, 1.0, 1.0, NaN, 0.1, 0.1, 0.0, 1, 0.0, NaN)
     _stop_reason(st, info, h, 0)
     @test (@allocated _stop_reason(st, info, h, 0)) == 0
+    for sa in (StopCriteria(change_tol = 1e-3, objective_range = 1e-3, window = 2, objective_atol = 1e-6),
+               StopCriteria(change_tol = 1e-3, objective_range = 1e-3, window = 2, combine = :all),
+               StopCriteria(change_tol = 1e-3, objective_range = 1e-3, window = 2, combine = :all, objective_atol = 1e-6))
+      _stop_reason(sa, info, h, 0)
+      @test (@allocated _stop_reason(sa, info, h, 0)) == 0
+    end
     @test_throws ArgumentError Continuation(step = q.H => [1.0]; every = 2)    # history column name
     @test_throws ArgumentError Continuation(β = q.H => [1.0, -2.0]; every = 2)
   end
@@ -1059,6 +1065,8 @@ same_history(a, b) = all(isequal(getproperty(a, c), getproperty(b, c)) for c in 
     @test_throws ArgumentError StopCriteria(objective_range = 1e-3, objective_atol = -1.0)
     @test_throws ArgumentError StopCriteria(objective_atol = 1e-6)
     @test_throws ArgumentError StopCriteria(kkt_tol = 1e-3, objective_atol = 1e-6)
+    @test_throws ArgumentError StopCriteria(objective_range = 1e-3, objective_atol = Inf)
+    @test_throws ArgumentError StopCriteria(objective_range = 1e-3, objective_atol = NaN)
     s14 = StopCriteria(1e-3, 10, nothing, nothing, nothing, nothing, nothing, nothing, nothing, 5, 1e-2, 5, :all, nothing)
     @test s14 isa StopCriteria && s14.objective_atol === nothing && s14.material_tol == 1e-2 && s14.combine === :all
     s15 = StopCriteria(1e-3, 10, nothing, nothing, nothing, nothing, nothing, nothing, nothing, 5, nothing, 5, :any, nothing, 1e-8)
@@ -1066,9 +1074,9 @@ same_history(a, b) = all(isequal(getproperty(a, c), getproperty(b, c)) for c in 
     @test HyperShape.Methods._without_material(StopCriteria(objective_range = 1e-3, material_tol = 1e-2, objective_atol = 1e-8)).objective_atol === 1e-8
     # the banner
     @test HyperShape.Methods._describe_stop(StopCriteria(objective_range = 1e-3)) ==
-          "relative objective range < 0.001 over 10 iterations"
+          "relative objective range ≤ 0.001 over 10 iterations"
     @test HyperShape.Methods._describe_stop(StopCriteria(objective_range = 1e-3, objective_atol = 1e-8)) ==
-          "relative objective range < 0.001 or < 1.0e-8 absolute over 10 iterations"
+          "relative objective range ≤ 0.001 or < 1.0e-8 absolute over 10 iterations"
     hn = OptHistory(10, ())
     for f in (-1.0, -2.0, -2.0005, -2.0004)
       _record!(hn, (hn.n + 1, f, NaN, NaN, 0.1, 0.1, 1, 1, 0, 1), (), (), (), ())
@@ -1131,6 +1139,36 @@ same_history(a, b) = all(isequal(getproperty(a, c), getproperty(b, c)) for c in 
     solve!(compliance_problem().problem, DensityMethod(OC()); maxiter = 1, io, verbose = 1, stop = StopCriteria(),
            continuation = Continuation(β = q.H => [1.0, 2.0]; every = 2))
     @test !occursin("last stage only", String(take!(io)))
+  end
+
+  @testset "Stopping: objective_atol and the warning at maxiter, end to end" begin
+    srun(maxiter, stop; kw...) = (q = compliance_problem();
+                                 solve!(q.problem, DensityMethod(SiMPL(); metric = LumpedMass(q.dΩ)); maxiter, stop, kw...))
+    h = srun(8, nothing; verbose = 0).history.objective
+    ranges = [maximum(view(h, k-2:k)) - minimum(view(h, k-2:k)) for k in 3:8]
+    atol = 1.01 * ranges[end]
+    kstop = 2 + findfirst(<(atol), ranges)             # the first iteration whose window of 3 is below atol
+    io = IOBuffer()
+    r = srun(20, StopCriteria(objective_range = 1e-12, window = 3, objective_atol = atol); verbose = 2, io)
+    out = String(take!(io))
+    @test r.status === :converged && r.reason === :objective_range && r.iterations == kstop
+    @test r.history.objective == h[1:kstop]
+    @test occursin("relative objective range ≤ 1.0e-12 or < $(atol) absolute over 3 iterations", out)
+    @test !occursin("objective range not met", out)
+    # objective_range never met: the run ends at maxiter and says so (with the hint of objective_atol)
+    io = IOBuffer()
+    r = srun(8, StopCriteria(objective_range = 1e-12, window = 3); verbose = 1, io)
+    out = String(take!(io))
+    @test r.status === :maxiter && r.history.objective == h
+    @test occursin("maxiter with the objective range not met", out) && occursin("give objective_atol", out)
+    io = IOBuffer()
+    r = srun(8, StopCriteria(objective_range = 1e-12, window = 3, objective_atol = 1e-30); verbose = 1, io)
+    out = String(take!(io))
+    @test r.status === :maxiter && occursin("maxiter with the objective range not met", out) &&
+          occursin("objective_atol 1e-30", out)
+    io = IOBuffer()                                    # no warning without objective_range
+    srun(8, StopCriteria(change_tol = 1e-30); verbose = 1, io)
+    @test !occursin("objective range not met", String(take!(io)))
   end
 
   @testset "Defaults: metric of OC, stopping criteria, failure handling and the banner" begin

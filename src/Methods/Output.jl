@@ -52,7 +52,7 @@ function _describe_stop(stop)
   stop isa StopCriteria || return "function of the user"
   parts = String[]
   stop.objective_range !== nothing &&
-    push!(parts, "relative objective range < $(stop.objective_range)" *
+    push!(parts, "relative objective range ≤ $(stop.objective_range)" *
                  (stop.objective_atol === nothing ? "" : " or < $(stop.objective_atol) absolute") *
                  " over $(stop.window) iterations")
   stop.kkt_tol !== nothing && push!(parts, "kkt < $(stop.kkt_tol)")

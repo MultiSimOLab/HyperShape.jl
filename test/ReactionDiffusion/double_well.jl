@@ -359,6 +359,19 @@ end
     @test occursin("material change < 0.002 over 5 iterations", out) && !occursin("(default) · maxiter", out)
   end
 
+  @testset "9c. a first objective over 1000 times the final one does not stop the range of the objective early" begin
+    # the seed of Takezawa et al. on 40 × 20 (holes over the supports: J₁ ≈ 1.2e5, J ≈ 28): the former floor
+    # 1e-3 |J₁| of objective_range was met from iteration 43 (measured), before the range relative to the window
+    b = bridge(; nx = 40, seed = :takezawa, stop = StopCriteria(objective_range = 1e-3), maxiter = 300)
+    r = b.result
+    h = r.history.objective
+    steady(k, d) = (w = view(h, k-9:k); maximum(w) - minimum(w) <= 1e-3 * d(w))
+    @test r.status === :converged && r.reason === :objective_range
+    @test h[1] > 1000 * h[end]
+    @test findfirst(k -> steady(k, w -> maximum(abs, w)), 10:length(h)) + 9 == r.iterations
+    @test findfirst(k -> steady(k, w -> max(maximum(abs, w), 1e-3 * abs(h[1]))), 10:length(h)) + 9 < r.iterations - 10
+  end
+
   @testset "10. presets: :takezawa2010, keywords that replace it, banner" begin
     m = ReactionDiffusion(:takezawa2010; τ = 5e-6)
     dwp = m.step.reaction
