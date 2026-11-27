@@ -2,3 +2,4 @@
 include("ersatz_volumes.jl")
 include("reaction_diffusion.jl")
 include("double_well.jl")
+include("phi_bc.jl")

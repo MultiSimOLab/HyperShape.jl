@@ -242,6 +242,18 @@ end
 # ---------------------------------------------------------------------------------------------------------------
 # The step
 
+# The values held by phi_bc (ReactionDiffusion(…; phi_bc)) in one design space: their indices in z, their values, how
+# many nodes of the boundary or of the tags are frozen values of a zone (the zone wins: they are not in z), and the
+# values of z held per tag (one entry for :zero_boundary)
+struct _Pins
+  space::UInt                   # objectid of the design space they were computed for
+  idx::Vector{Int}
+  val::Vector{Float64}
+  nfrozen::Int
+  pertag::Vector{Int}
+end
+const _NO_PINS = _Pins(UInt(0), Int[], Float64[], 0, Int[])
+
 # The optimiser of ReactionDiffusion (internal): the implicit step, the operator and the multiplier.
 struct RDStep{T,D,N,V,LS,S,F,R} <: Optimizer
   τ::T                  # a number or a Parameter
@@ -260,6 +272,8 @@ struct RDStep{T,D,N,V,LS,S,F,R} <: Optimizer
                                    # cfl Δt_lim with DoubleWell, set by init)
   reaction::R           # nothing or DoubleWell
   κgiven::Bool          # the field τ holds κ = τ ℓ² (given as κ): τ = κ/ℓ² once ℓ² is known
+  phi_bc::Union{Symbol,Vector{Pair{String,Float64}}}   # :neumann, :zero_boundary or "tag" => value pairs
+  pins::Base.RefValue{_Pins}    # the values held by phi_bc in the problem (set by check_problem; read at the setup only)
 end
 
 # the step with the double-well reaction
@@ -326,6 +340,10 @@ mutable struct RDState{NS,C,MT,MM,ME}
   nwin::Int
   Δtlim::Float64                # the bound of Gershgorin of the explicit diffusion, 2/maxᵢ(τℓ² Σⱼ|Kᵢⱼ|/mᵢ)
   hmean::Float64                # the mean cell size (|D|/cells)^(1/d) (the width of the interface in the event)
+  # phi_bc: the values of z held fixed by the step (all empty with phi_bc = :neumann)
+  pin::Vector{Int}              # their indices in z
+  pinned::Vector{Bool}          # mask over z (empty without pins)
+  mp::Vector{Float64}           # the lumped mass with zeros at the pins: the source of φ̌
 end
 
 # the union of the patterns of the matrices and the diagonal, with zero values
@@ -398,18 +416,27 @@ function Optimizers.init(opt::RDStep, z, oracle)
   τ, Δt = _check_τΔt(opt, ℓ2)
   c = _coef(opt, ℓ2)
   ns = nothing
+  pins = _pins_for(opt, U, Float64(zv.blocks[1].lb), Float64(zv.blocks[1].ub))
+  pin = pins.idx
+  pinned = isempty(pin) ? Bool[] : (b = fill(false, n); b[pin] .= true; b)
+  mp = isempty(pin) ? Float64[] : (w = copy(m); w[pin] .= 0.0; w)
+  for (i, v) in zip(pin, pins.val)                # the held values (the loop wrote them already: start_design!)
+    z[i] = v
+  end
   if opt.solve === nothing && _factorizes(opt)
     _fill_operator!(A, K, M, m, Kmap, Mmap, Dmap, c, Δt)
+    isempty(pin) || _pin_operator!(A, pinned)
     ns = numerical_setup(symbolic_setup(opt.ls, A), A)
   end
   v() = zeros(n)
   dw = opt.reaction
   blk = zv.blocks[1]
-  s = RDState(m, K, M, A, Kmap, Mmap, Dmap, kd, area, ℓ2, nd == 0 && opt.diffusion === nothing, nd, τ, c, Δt, Δt,
+  s = RDState(m, K, M, A, Kmap, Mmap, Dmap, kd, area, ℓ2, nd == 0 && opt.diffusion === nothing && isempty(pin), nd, τ, c, Δt, Δt,
               ns, true, v(), v(), v(), v(), v(), v(), v(), v(), 0.0, false, :none,
               _has_interface_map(physical_fields(fo.J)), NaN, _material_meter(fo, z), z, Inf, fo.ctx, 0, 0, 0, 0, NaN, NaN,
               Float64(blk.lb), Float64(blk.ub), dw === nothing ? Float64[] : v(), nsub, nsub,
-              false, 0, dw === nothing ? Float64[] : fill(NaN, dw.settle_window), 0, Δtlim, (area / num_cells(Ω))^(1 / d))
+              false, 0, dw === nothing ? Float64[] : fill(NaN, dw.settle_window), 0, Δtlim, (area / num_cells(Ω))^(1 / d),
+              pin, pinned, mp)
   if dw === nothing
     if opt.solve === nothing
       s.nfactor += 1
@@ -500,6 +527,7 @@ _factorizes(opt::_DWStep) = opt.reaction.scheme === :implicit
 # the operator for the current τ and Δt, factorised again, and φ̌
 function _rebuild!(opt::RDStep, s::RDState)
   _fill_operator!(s.A, s.K, s.M, s.m, s.Kmap, s.Mmap, s.Dmap, s.c, s.Δt)
+  isempty(s.pin) || _pin_operator!(s.A, s.pinned)
   if opt.solve === nothing
     numerical_setup!(s.ns, s.A)
   else
@@ -526,14 +554,29 @@ end
 function _unit_response!(opt::RDStep, s::RDState)
   if s.unit
     fill!(s.φc, s.Δt)                           # A (Δt 1) = m exactly: no solve
-  else
+  elseif isempty(s.pin)
     _rd_solve!(s.φc, opt, s, s.m)
+  else
+    _rd_solve!(s.φc, opt, s, s.mp)              # no source at the held values: φ̌ = 0 there
+    _zero_pins!(s.φc, s.pin)
   end
   all(isfinite, s.φc) ||
     throw(OptimizationFailure("ReactionDiffusion: the solve of the step gave values that are not finite (the response φ̌ to a uniform source)"))
-  minimum(s.φc) > 0 || throw(ArgumentError("ReactionDiffusion: the response of the step to a uniform source has " *
-                                           "non-positive values (minimum $(minimum(s.φc))); use mass = :lumped"))
+  φmin = _free_minimum(s.φc, s.pinned)
+  φmin > 0 || throw(ArgumentError("ReactionDiffusion: the response of the step to a uniform source has " *
+                                  "non-positive values (minimum $(φmin)); use mass = :lumped"))
   s
+end
+
+# the minimum of φ̌ over the values that are not held (all of them without phi_bc)
+_free_minimum(φc, pinned) = isempty(pinned) ? minimum(φc) :
+  minimum(Broadcast.instantiate(Broadcast.broadcasted((c, q) -> q ? Inf : c, φc, pinned)))
+
+function _zero_pins!(x, pin)
+  @inbounds for i in pin
+    x[i] = 0.0
+  end
+  x
 end
 
 function _rd_solve!(x, opt::RDStep, s::RDState, b)
@@ -759,7 +802,9 @@ function Optimizers.step!(opt::RDStep, s::RDState, z, oracle, ctx)
   g0 = s.kind === :none ? 0.0 : constraint(oracle, 1, z)
   C = _normalization(opt, s)
   _rd_rhs!(s, z, C)
+  _zero_pins!(s.r, s.pin)                       # phi_bc: identity rows, no increment at the held values
   _rd_solve!(s.δ, opt, s, s.r)
+  _zero_pins!(s.δ, s.pin)
   @. s.φs = z + s.δ
   all(isfinite, s.φs) ||
     throw(OptimizationFailure("ReactionDiffusion: the solve of the step gave values that are not finite"))
@@ -1102,8 +1147,14 @@ end
 function _multiplier!(opt::RDStep, s::RDState, oracle, gk, lb, ub)
   vol = opt.volume
   # bracket from the bounds: below λlo every value is at its upper bound, above λhi at its lower bound
-  λlo = minimum(Broadcast.instantiate(Broadcast.broadcasted((p, u, c) -> (p - u) / c, s.φs, ub, s.φc)))
-  λhi = maximum(Broadcast.instantiate(Broadcast.broadcasted((p, l, c) -> (p - l) / c, s.φs, lb, s.φc)))
+  # (the values held by phi_bc have φ̌ = 0 and do not move with λ: left out, or a held value at a bound gives 0/0)
+  λlo, λhi = if isempty(s.pinned)
+    (minimum(Broadcast.instantiate(Broadcast.broadcasted((p, u, c) -> (p - u) / c, s.φs, ub, s.φc))),
+     maximum(Broadcast.instantiate(Broadcast.broadcasted((p, l, c) -> (p - l) / c, s.φs, lb, s.φc))))
+  else
+    (minimum(Broadcast.instantiate(Broadcast.broadcasted((p, u, c, q) -> q ? Inf : (p - u) / c, s.φs, ub, s.φc, s.pinned))),
+     maximum(Broadcast.instantiate(Broadcast.broadcasted((p, l, c, q) -> q ? -Inf : (p - l) / c, s.φs, lb, s.φc, s.pinned))))
+  end
   lo = gk > 0 ? λlo : 0.0                       # descending target: equality; at the final one: λ ≥ 0
   hi = max(λhi, lo)
   s0 = 0.02 / s.Δt                              # a shift of 0.02 of φ
@@ -1126,7 +1177,9 @@ function _multiplier!(opt::RDStep, s::RDState, oracle, gk, lb, ub)
   status === :infeasible &&
     throw(ArgumentError("ReactionDiffusion: the constraint cannot be met within the bounds: with every free value at " *
                         "its lower bound it is still violated by $(@sprintf("%.3g", Gλ + gk)) (scaled)" *
-                        _zone_hint(_fo(oracle))))
+                        _zone_hint(_fo(oracle)) *
+                        (isempty(s.pin) ? "" : "; the $(length(s.pin)) values held by phi_bc count as they are: is " *
+                                                "their material above the bound?")))
   λ, Gλ
 end
 
@@ -1298,11 +1351,131 @@ _dw_note(s::RDState) = isempty(s.gn) ? "" :
 Base.show(io::IO, ::RDStep) = print(io, "RDStep")
 
 # ---------------------------------------------------------------------------------------------------------------
+# phi_bc: values of the design field held fixed by the step (Otomori et al. 2015: φ = 0 on ∂D; Yamada et al. 2010,
+# Cui et al. 2023: φ = 1 on the boundary where the load acts)
+
+# phi_bc as given → :neumann, :zero_boundary or a vector of "tag" => value
+function _phi_bc_arg(x)
+  x isa Symbol && (x in (:neumann, :zero_boundary) ? (return x) :
+    throw(ArgumentError("ReactionDiffusion: phi_bc must be :neumann, :zero_boundary or \"tag\" => value pairs, got $(repr(x))")))
+  pairs_ = x isa Pair ? (x,) : x
+  ok = (pairs_ isa Tuple || pairs_ isa AbstractVector) && !isempty(pairs_) &&
+       all(q -> q isa Pair && q.first isa AbstractString && q.second isa Real && isfinite(q.second), pairs_)
+  ok || throw(ArgumentError("ReactionDiffusion: phi_bc must be :neumann, :zero_boundary or \"tag\" => value pairs " *
+                            "(a pair or a tuple of pairs, the tag a String and the value a finite number), got $(repr(x))"))
+  v = Pair{String,Float64}[String(q.first) => Float64(q.second) for q in pairs_]
+  allunique(first.(v)) || throw(ArgumentError("ReactionDiffusion: phi_bc gives a tag more than once: " *
+                                              join(unique(filter(t -> count(==(t), first.(v)) > 1, first.(v))), ", ")))
+  v
+end
+
+_phi_bc_text(x::Symbol) = repr(x)
+_phi_bc_text(x::Vector) = "(" * join(("\"$(q.first)\" => $(_g(q.second))" for q in x), ", ") * (length(x) == 1 ? ",)" : ")")
+
+
+# the vertices of the background model on the boundary of the design domain Ω: those of the facets of exactly one
+# cell of Ω (its topology, not a tag)
+function _boundary_vertex_mask(Ω, topo, cells, D)
+  mask = fill(false, Gridap.Geometry.num_faces(topo, 0))
+  active = fill(false, Gridap.Geometry.num_faces(topo, D))
+  active[cells] .= true
+  f2c = Gridap.Geometry.get_faces(topo, D - 1, D)
+  f2v = Gridap.Geometry.get_faces(topo, D - 1, 0)
+  for f in 1:length(f2c)
+    count(c -> active[c], f2c[f]) == 1 || continue
+    for v in f2v[f]
+      mask[v] = true
+    end
+  end
+  mask
+end
+
+function _phi_bc_nodes(spec, U, lb, ub)
+  spec === :neumann && return _NO_PINS
+  Ω = get_triangulation(U)
+  D = num_cell_dims(Ω)
+  items = spec === :zero_boundary ? [("", 0.0)] : [(q.first, q.second) for q in spec]
+  for (tag, x) in items
+    lb <= x <= ub || throw(ArgumentError(spec === :zero_boundary ?
+      "ReactionDiffusion: phi_bc = :zero_boundary holds 0, outside the bounds [$(_g(lb)), $(_g(ub))] of the design field" :
+      "ReactionDiffusion: phi_bc: the value $(_g(x)) of \"$tag\" is outside the bounds [$(_g(lb)), $(_g(ub))] of the design field"))
+  end
+  model = get_background_model(Ω)
+  topo = Gridap.Geometry.get_grid_topology(model)
+  c2v = Gridap.Geometry.get_faces(topo, D, 0)
+  cells = Gridap.Geometry.get_glue(Ω, Val(D)).tface_to_mface
+  labels = get_face_labeling(model)
+  ids = get_cell_dof_ids(U)
+  nfree = num_free_dofs(U)
+  dval = fill(NaN, nfree)                       # the value held at each value of z (NaN: none)
+  dtag = zeros(Int, nfree)                      # the tag that gave it
+  seen = zeros(Int, nfree)                      # the last tag that counted it
+  frozen = Set{Int}()
+  pertag = zeros(Int, length(items))
+  for (k, (tag, x)) in enumerate(items)
+    vmask = if spec === :zero_boundary
+      _boundary_vertex_mask(Ω, topo, cells, D)
+    else
+      # the vertices of the tag: those that Gridap makes Dirichlet with dirichlet_tags = tag (a P1 field)
+      tag in labels.tag_to_name ||
+        throw(ArgumentError("ReactionDiffusion: phi_bc: \"$tag\" is not a tag of the model of the design field"))
+      Gridap.Geometry.get_face_mask(labels, tag, 0)
+    end
+    nfro = 0
+    for t in eachindex(cells)
+      vs = c2v[cells[t]]
+      dofs = ids[t]
+      for a in eachindex(vs)                    # P1: the local dofs follow the local vertices
+        vmask[vs[a]] || continue
+        d = dofs[a]
+        if d < 0                                # a frozen value of a zone: the zone wins
+          push!(frozen, d)
+          nfro += 1
+        else
+          if dtag[d] == 0
+            dval[d], dtag[d] = x, k
+          elseif dval[d] != x                   # only values of z: a frozen node shared by two tags is no conflict
+            throw(ArgumentError("ReactionDiffusion: phi_bc gives two values to a node shared by two tags " *
+                                "(\"$(items[dtag[d]][1])\" => $(_g(dval[d])) and \"$tag\" => $(_g(x)))"))
+          end
+          seen[d] == k || (seen[d] = k; pertag[k] += 1)
+        end
+      end
+    end
+    spec === :zero_boundary || pertag[k] > 0 || nfro > 0 ||
+      throw(ArgumentError("ReactionDiffusion: phi_bc: the tag \"$tag\" has no node in the design domain"))
+  end
+  idx = findall(!isnan, dval)
+  length(idx) == nfree && throw(ArgumentError("ReactionDiffusion: phi_bc holds every value of the design field: nothing to optimise"))
+  _Pins(objectid(U), idx, dval[idx], length(frozen), pertag)
+end
+
+# the pins of the design space U: those check_problem computed for it, or computed now
+function _pins_for(opt::RDStep, U, lb, ub)
+  opt.phi_bc === :neumann && return _NO_PINS
+  p = opt.pins[]
+  p.space == objectid(U) && return p
+  _phi_bc_nodes(opt.phi_bc, U, lb, ub)
+end
+
+# identity rows and columns of the operator at the held values (their increment is 0, and they leave the free rows)
+function _pin_operator!(A, pinned)
+  nz, rv = A.nzval, A.rowval
+  @inbounds for j in 1:size(A, 2)
+    for p in A.colptr[j]:(A.colptr[j+1]-1)
+      i = rv[p]
+      (pinned[i] || pinned[j]) && (nz[p] = i == j ? 1.0 : 0.0)
+    end
+  end
+  A
+end
+
+# ---------------------------------------------------------------------------------------------------------------
 # The method
 
 const _RD_DEFAULTS = (Δt = :auto, normalize = L1Mean(), volume = ExactVolume(), mass = :lumped, void_weight = 1e-3,
                       ls = LUSolver(), solve = nothing, diffusion = nothing, degree = 2, lagrangian = AugmentedLagrangian(),
-                      reaction = nothing)
+                      reaction = nothing, phi_bc = :neumann)
 
 const _RD_PRESETS = Dict{Symbol,NamedTuple}(
   :kim2020 => (Δt = 0.1, normalize = L2Norm(), mass = :consistent, volume = nothing,
@@ -1314,7 +1487,7 @@ const _RD_PRESETS = Dict{Symbol,NamedTuple}(
 """
     ReactionDiffusion(; τ, sensitivity, Δt = :auto, normalize = L1Mean(), volume = ExactVolume(), mass = :lumped,
                       void_weight = 1e-3, ls = LUSolver(), solve = nothing, diffusion = nothing, degree = 2,
-                      lagrangian = AugmentedLagrangian(), reaction = nothing)
+                      lagrangian = AugmentedLagrangian(), reaction = nothing, phi_bc = :neumann)
     ReactionDiffusion(; κ, reaction = DoubleWell(), kwargs...)
     ReactionDiffusion(preset::Symbol; τ, sensitivity, kwargs...)
 
@@ -1378,6 +1551,21 @@ Optional (each one replaceable, shown in the banner):
   the well per iteration in `n` substeps) and the
   multiplier of `ExactVolume` acts inside the tilt term of the well (its `max_step = :auto` is `0.01`). See its
   docstring for the scheme, the substeps and the settling.
+- `phi_bc`: the condition of the design field on the boundary. `:neumann` (default): none, the natural condition of
+  the diffusion. `:zero_boundary`: `φ = 0` held on every node of the boundary of the design domain (from the
+  topology of its cells, not from a tag; Otomori et al. 2015). `"tag" => value`, or a tuple of such pairs: `φ` held at
+  `value` on the nodes of each tag of the model (the nodes that `dirichlet_tags = tag` would make Dirichlet in a P1
+  space; Yamada et al. 2010 and Cui et al. 2023 hold `φ = 1` where the load acts), for example
+  `phi_bc = ("load" => 1.0,)`. The values must be inside the bounds. They are written into the design when `solve!`
+  starts (before the first evaluation) and the step keeps them: identity rows of its operator, no increment and
+  `φ̌ = 0` there, so the multiplier of the volume does not move them. They are still values of `z` (their derivative
+  is computed, enters the normalisation `C` and is not used). Not a frozen zone: a frozen zone is a set of cells of
+  material, not a line of nodes; where a tag touches the frozen values of a zone, the zone wins (the banner says how
+  many); a tag with no node in the design domain, a tag given twice and two values on a node of `z` shared by two
+  tags are errors. With held values `φ̌` needs one more back-substitution per factorisation. Not with `DoubleWell`.
+  A run resumed from a checkpoint starts from the design of the checkpoint (the held values are written into it
+  again) and keeps its `scale = :initial` values: those of the design it was started from, with or without
+  `phi_bc`.
 
 Presets (`ReactionDiffusion(:kim2020; τ, sensitivity)`): the keywords given replace those of the preset (the banner
 says which). `:kim2020` (Kim et al. 2020, density): `Δt = 0.1, normalize = L2Norm(), mass = :consistent, volume = nothing,
@@ -1486,7 +1674,13 @@ function _reaction_diffusion(preset; kwargs...)
   vol === nothing && lag.native !== () &&
     throw(ArgumentError("ReactionDiffusion: volume = nothing gives every constraint to the augmented Lagrangian: " *
                         "say it with lagrangian = AugmentedLagrangian(…; native = ())"))
-  step = RDStep(τ, Δt, sens, norm, vol, mass, Float64(w0), ls, solvef, diff, Int(deg), Ref(NaN), Ref(NaN), rx, κgiven)
+  pbc = _phi_bc_arg(val(:phi_bc))
+  rx isa DoubleWell && pbc !== :neumann &&
+    throw(ArgumentError("ReactionDiffusion: phi_bc = $(_phi_bc_text(pbc)) is not offered with DoubleWell (the diffusion " *
+                        "of the well is not incremental and its reaction would have to skip the held values): leave " *
+                        "phi_bc out (:neumann)"))
+  step = RDStep(τ, Δt, sens, norm, vol, mass, Float64(w0), ls, solvef, diff, Int(deg), Ref(NaN), Ref(NaN), rx, κgiven,
+                pbc, Ref(_NO_PINS))
   ReactionDiffusion(step, lag, preset, sources)
 end
 
@@ -1524,6 +1718,7 @@ function check_problem(m::ReactionDiffusion, problem)
     throw(ArgumentError("ReactionDiffusion: the design field must be a nodal P1 scalar field (ReferenceFE(lagrangian, " *
                         "Float64, 1), conformity = :H1)"))
   (isfinite(b.lb) && isfinite(b.ub)) || throw(ArgumentError("ReactionDiffusion: the bounds of z must be finite"))
+  m.step.pins[] = _phi_bc_nodes(m.step.phi_bc, b.space, Float64(b.lb), Float64(b.ub))
   native = _native_split(problem, m.step, m.lagrangian)
   _set_tolerance!(m.step, problem, native)
   _resolve_Δt!(m.step, (problem.objective, (c.F for c in problem.constraints)...))
@@ -1544,6 +1739,20 @@ function check_problem(m::ReactionDiffusion, problem)
                           "no interface map) with reaction = DoubleWell(…) and hole_seed; to nucleate holes use " *
                           "sensitivity = :physical"))
   end
+  nothing
+end
+
+# Writes the held values into the design before anything is evaluated (the loop calls it right after check_problem,
+# before the scales :initial and the first evaluation)
+function start_design!(m::ReactionDiffusion, problem)
+  p = m.step.pins[]
+  isempty(p.idx) && return nothing
+  v = get_values(problem.z)
+  all(i -> v[p.idx[i]] == p.val[i], eachindex(p.idx)) && return nothing
+  for (i, x) in zip(p.idx, p.val)
+    v[i] = x
+  end
+  set_values!(problem.z, v)
   nothing
 end
 
@@ -1617,6 +1826,14 @@ function banner_lines(m::ReactionDiffusion, problem)
   push!(lines, ("step operator: $(opt.mass) mass$(mark(:mass)) + " *
                 (opt.diffusion === nothing ? "∇φ⋅∇v" : "diffusion of the user") * " · $solver" *
                 (nfrozen == 0 ? "" : " · $nfrozen frozen values"), :normal))
+  if opt.phi_bc !== :neumann
+    pins = _pins_for(opt, b.space, Float64(b.lb), Float64(b.ub))
+    held = opt.phi_bc === :zero_boundary ? "at 0 on the boundary of the design domain" :
+           "on the tags (" * join(("\"$(q.first)\" at $(_g(q.second)): $(n) value$(n == 1 ? "" : "s")"
+                                    for (q, n) in zip(opt.phi_bc, pins.pertag)), ", ") * ")"
+    push!(lines, ("phi_bc = $(_phi_bc_text(opt.phi_bc))$(mark(:phi_bc)): $(length(pins.idx)) nodal values held $held" *
+                  (pins.nfrozen == 0 ? "" : "; $(pins.nfrozen) nodes there are frozen values of a zone (the zone wins)"), :normal))
+  end
   U = b.space
   if _meter_volume((problem.objective, (c.F for c in problem.constraints)...), U) === nothing
     push!(lines, ("material meter: none (no Volume over the design domain read through Identity(), Step() or Ersatz()): " *

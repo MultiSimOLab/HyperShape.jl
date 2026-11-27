@@ -243,6 +243,9 @@ function stepper end
 function build_oracle end
 function augmented_lagrangian end
 check_problem(::AbstractMethod, problem) = nothing
+# internal: writes into the design what the method fixes in it (ReactionDiffusion: the values held by phi_bc), right
+# after check_problem and before anything is evaluated (default: nothing)
+start_design!(::AbstractMethod, problem) = nothing
 method_label(m::AbstractMethod) = string(nameof(typeof(m)))
 metric_label(::AbstractMethod) = nothing
 banner_lines(::AbstractMethod, problem) = Tuple{String,Symbol}[]
