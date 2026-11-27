@@ -11,7 +11,7 @@ and the rule for comparing methods, and collects the tables of the cases that ex
 
 ```
 julia --project=validation -e 'using Pkg; Pkg.instantiate()'
-julia --project=validation -t 4 validation/run_all.jl                    # every case, about TOTAL_MIN min
+julia --project=validation -t 4 validation/run_all.jl                    # every case, about 17 min
 julia --project=validation -t 4 validation/run_all.jl mbb_top88 bridge_takezawa   # some of them
 ```
 
@@ -73,76 +73,78 @@ each case is on the [Validation](validation.md) page). The first row of the top8
 reference code; "–" marks what a row does not have. The SVG figures of the designs beside their reference
 (`mbb_top88_<mesh>.svg`, `otomori_levelset88.svg`) are written to the results folder.
 
-### MBB beam against top88 (Octave, density filter)
+### MBB beam against top88 (Andreassen et al. 2011)
 
-Rule between methods on `J_bin` (two filters, same mesh); reference: `top88.m` run in Octave 9.1, `ft = 2`, with `r = rmin/(2√3)` for the Helmholtz filter of HyperShape. `validation/mbb_top88.jl`; Apple M5 Max, 4 threads, Julia 1.13.0, 2026-11-27 19:48.
+Two references: Fig. 4 of the paper (PDE filter), 1 % on J, for the cell mean with OC as top88; `top88.m` run in Octave 9.1 with its density filter (`ft = 2`; its compliance is that of Fig. 3), 5 % on `J_bin`, for the other rows (the script checks every row against it). `validation/mbb_top88.jl`; Apple M5 Max, 4 threads, Julia 1.13.0 · commit 8780088 · 2026-11-27 22:32.
 
-| case | variant | J | J_bin | ref | vs ref | V | V_bin | grey | perimeter | holes | iterations | solves state/adjoint/filter/step | time (s) | time / state solve (s) |
+| case | variant | J | J_bin | ref | vs ref | V | V_bin | grey | perimeter | holes | iterations | solves state/adjoint/filter/step | time (s) | time ÷ state solves (s) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| MBB top88 60×20 | top88.m in Octave 9.1, density filter ft = 2, rmin = 2.4 (reference) | 233.713 | 187.446 | – | – | 0.5000 | 0.5100 | 0.330 | 217 | 2 | 144 | – | – | – |
-| MBB top88 60×20 | P0, cell mean, OC as top88 | 237.606 | 187.333 | 187.446 | -0.06 % (J_bin) | 0.5000 | 0.5100 | 0.349 | 219 | 2 | 138 (converged, change_tol) | 139/0/277/– | 2.7 | 0.0191 |
-| MBB top88 60×20 | P0, Gauss points, OC as top88 | 235.032 | 188.342 | 187.446 | +0.48 % (J_bin) | 0.5000 | 0.5108 | 0.358 | 220 | 2 | 88 (converged, change_tol) | 89/0/177/– | 1.4 | 0.0162 |
-| MBB top88 60×20 | P1, Gauss points, OC as top88 | 237.555 | 187.347 | 187.446 | -0.05 % (J_bin) | 0.5000 | 0.5217 | 0.367 | 219 | 2 | 137 (converged, change_tol) | 138/0/275/– | 1.8 | 0.013 |
-| MBB top88 60×20 | P0, cell mean, OC() | 238.978 | 188.369 | 187.446 | +0.49 % (J_bin) | 0.5000 | 0.5108 | 0.360 | 220 | 2 | 72 (converged, objective_range) | 73/0/145/– | 0.8 | 0.0113 |
-| MBB top88 60×20 | P0, Gauss points, SiMPL() | 235.069 | 188.056 | 187.446 | +0.33 % (J_bin) | 0.5000 | 0.5125 | 0.357 | 220 | 2 | 39 (converged, objective_range) | 50/0/89/– | 0.4 | 0.00844 |
-| MBB top88 60×20 | P1, Gauss points, SiMPL() | 239.291 | 187.242 | 187.446 | -0.11 % (J_bin) | 0.5000 | 0.5242 | 0.377 | 220 | 2 | 36 (converged, objective_range) | 45/0/81/– | 0.4 | 0.00909 |
-| MBB top88 150×50 | top88.m in Octave 9.1, density filter ft = 2, rmin = 6.0 (reference) | 235.735 | 189.651 | – | – | 0.5000 | 0.5129 | 0.334 | 549 | 2 | 362 | – | – | – |
-| MBB top88 150×50 | P0, cell mean, OC as top88 | 235.363 | 190.528 | 189.651 | +0.46 % (J_bin) | 0.5000 | 0.5077 | 0.326 | 564 | 2 | 457 (converged, change_tol) | 458/0/915/– | 25.0 | 0.0545 |
-| MBB top88 150×50 | P0, Gauss points, OC as top88 | 234.75 | 190.473 | 189.651 | +0.43 % (J_bin) | 0.5000 | 0.5076 | 0.326 | 564 | 2 | 543 (converged, change_tol) | 544/0/1087/– | 28.9 | 0.0531 |
-| MBB top88 150×50 | P1, Gauss points, OC as top88 | 235.373 | 190.21 | 189.651 | +0.29 % (J_bin) | 0.5000 | 0.5108 | 0.327 | 562 | 2 | 365 (converged, change_tol) | 366/0/731/– | 16.9 | 0.0461 |
-| MBB top88 150×50 | P0, cell mean, OC() | 237.021 | 191.381 | 189.651 | +0.91 % (J_bin) | 0.5000 | 0.5093 | 0.332 | 561 | 2 | 58 (converged, objective_range) | 59/0/117/– | 3.2 | 0.0551 |
-| MBB top88 150×50 | P0, Gauss points, SiMPL() | 235.542 | 190.702 | 189.651 | +0.55 % (J_bin) | 0.5000 | 0.5087 | 0.329 | 566 | 2 | 45 (converged, objective_range) | 59/0/104/– | 2.6 | 0.044 |
-| MBB top88 150×50 | P1, Gauss points, SiMPL() | 235.934 | 191.007 | 189.651 | +0.72 % (J_bin) | 0.5000 | 0.5092 | 0.331 | 564 | 2 | 48 (converged, objective_range) | 59/0/107/– | 2.5 | 0.0419 |
+| MBB top88 60×20 | Andreassen et al. (2011), Fig. 4, PDE density filter (published) | 237.6 | – | – | – | – | – | – | – | – | – | – | – | – |
+| MBB top88 60×20 | top88.m in Octave 9.1, density filter ft = 2, rmin = 2.4 (Fig. 3: 233.71) | 233.713 | 187.446 | – | – | 0.5000 | 0.5100 | 0.330 | 217 | 2 | 144 | – | – | – |
+| MBB top88 60×20 | P0, cell mean, OC as top88 | 237.606 | 187.333 | 237.6 | +0.00 % (J) | 0.5000 | 0.5100 | 0.349 | 219 | 2 | 138 (converged, change_tol) | 139/0/277/– | 1.4 | 0.0101 |
+| MBB top88 60×20 | P0, Gauss points, OC as top88 | 235.032 | 188.342 | 187.446 | +0.48 % (J_bin) | 0.5000 | 0.5108 | 0.358 | 220 | 2 | 88 (converged, change_tol) | 89/0/177/– | 0.9 | 0.00974 |
+| MBB top88 60×20 | P1, Gauss points, OC as top88 | 237.555 | 187.347 | 187.446 | -0.05 % (J_bin) | 0.5000 | 0.5217 | 0.367 | 219 | 2 | 137 (converged, change_tol) | 138/0/275/– | 1.3 | 0.00972 |
+| MBB top88 60×20 | P0, cell mean, OC() | 238.978 | 188.369 | 187.446 | +0.49 % (J_bin) | 0.5000 | 0.5108 | 0.360 | 220 | 2 | 72 (converged, objective_range) | 73/0/145/– | 0.7 | 0.0101 |
+| MBB top88 60×20 | P0, Gauss points, SiMPL() | 235.069 | 188.056 | 187.446 | +0.33 % (J_bin) | 0.5000 | 0.5125 | 0.357 | 220 | 2 | 39 (converged, objective_range) | 50/0/89/– | 0.4 | 0.00778 |
+| MBB top88 60×20 | P1, Gauss points, SiMPL() | 239.291 | 187.242 | 187.446 | -0.11 % (J_bin) | 0.5000 | 0.5242 | 0.377 | 220 | 2 | 36 (converged, objective_range) | 45/0/81/– | 0.3 | 0.00743 |
+| MBB top88 150×50 | Andreassen et al. (2011), Fig. 4, PDE density filter (published) | 235.36 | – | – | – | – | – | – | – | – | – | – | – | – |
+| MBB top88 150×50 | top88.m in Octave 9.1, density filter ft = 2, rmin = 6.0 (Fig. 3: 235.73) | 235.735 | 189.651 | – | – | 0.5000 | 0.5129 | 0.334 | 549 | 2 | 362 | – | – | – |
+| MBB top88 150×50 | P0, cell mean, OC as top88 | 235.363 | 190.528 | 235.36 | +0.00 % (J) | 0.5000 | 0.5077 | 0.326 | 564 | 2 | 457 (converged, change_tol) | 458/0/915/– | 18.7 | 0.0407 |
+| MBB top88 150×50 | P0, Gauss points, OC as top88 | 234.75 | 190.473 | 189.651 | +0.43 % (J_bin) | 0.5000 | 0.5076 | 0.326 | 564 | 2 | 543 (converged, change_tol) | 544/0/1087/– | 21.4 | 0.0393 |
+| MBB top88 150×50 | P1, Gauss points, OC as top88 | 235.373 | 190.21 | 189.651 | +0.29 % (J_bin) | 0.5000 | 0.5108 | 0.327 | 562 | 2 | 365 (converged, change_tol) | 366/0/731/– | 15.0 | 0.041 |
+| MBB top88 150×50 | P0, cell mean, OC() | 237.021 | 191.381 | 189.651 | +0.91 % (J_bin) | 0.5000 | 0.5093 | 0.332 | 561 | 2 | 58 (converged, objective_range) | 59/0/117/– | 2.4 | 0.0415 |
+| MBB top88 150×50 | P0, Gauss points, SiMPL() | 235.542 | 190.702 | 189.651 | +0.55 % (J_bin) | 0.5000 | 0.5087 | 0.329 | 566 | 2 | 45 (converged, objective_range) | 59/0/104/– | 2.2 | 0.0369 |
+| MBB top88 150×50 | P1, Gauss points, SiMPL() | 235.934 | 191.007 | 189.651 | +0.72 % (J_bin) | 0.5000 | 0.5092 | 0.331 | 564 | 2 | 48 (converged, objective_range) | 59/0/107/– | 2.2 | 0.0378 |
 
 ### MBB beam against SiMPL, 768 × 256
 
-Published values (tables 1 and 2 of the paper), compared on J. `validation/mbb_simpl.jl`; Apple M5 Max, 4 threads, Julia 1.13.0, 2026-11-27 20:00.
+Published values (tables 1 and 2 of the paper), compared on J: 1 % with the sensitivity of the authors' code, 5 % with the exact one and with OC. `validation/mbb_simpl.jl`; Apple M5 Max, 4 threads, Julia 1.13.0 · commit 8780088+dirty · 2026-11-27 22:49.
 
-| case | variant | J | J_bin | ref | vs ref | V | V_bin | grey | perimeter | holes | iterations | solves state/adjoint/filter/step | time (s) | time / state solve (s) |
+| case | variant | J | J_bin | ref | vs ref | V | V_bin | grey | perimeter | holes | iterations | solves state/adjoint/filter/step | time (s) | time ÷ state solves (s) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| MBB SiMPL 768×256 | rmin 0.05, P0, SiMPL, authors' sensitivity, S ≤ 1e-5 (table 1) | 0.0012078 | 0.000967674 | 0.0012078 | +0.00 % (J) | 0.3000 | 0.3016 | 0.197 | 17.7 | 6 | 50 (converged, stationarity_tol) | 58/0/108/– | 91.2 | 1.57 |
-| MBB SiMPL 768×256 | rmin 0.05, P0, SiMPL, exact sensitivity, S ≤ 1e-5 | 0.00119603 | 0.000964159 | 0.0012078 | -0.97 % (J) | 0.3000 | 0.3005 | 0.190 | 17.2 | 4 | 104 (converged, stationarity_tol) | 114/0/218/– | 174.4 | 1.53 |
-| MBB SiMPL 768×256 | rmin 0.05, P1, SiMPL, exact sensitivity, S ≤ 1e-5 | 0.00120303 | 0.000966876 | 0.0012078 | -0.40 % (J) | 0.3000 | 0.3002 | 0.195 | 17.71 | 6 | 73 (converged, stationarity_tol) | 81/0/154/– | 125.3 | 1.55 |
-| MBB SiMPL 768×256 | rmin 0.02, P0, SiMPL, authors' sensitivity, 29 iterations (table 2) | 0.00105663 | 0.000971927 | 0.0010566 | +0.00 % (J) | 0.3000 | 0.3008 | 0.089 | 19.03 | 10 | 29 (maxiter) | 31/0/60/– | 51.1 | 1.65 |
-| MBB SiMPL 768×256 | rmin 0.05, P0, OC(), default stop (vs OC of table 1) | 0.00121132 | 0.00098081 | 0.0012234 | -0.99 % (J) | 0.3000 | 0.2993 | 0.196 | 17.97 | 7 | 102 (converged, objective_range) | 103/0/205/– | 168.4 | 1.63 |
+| MBB SiMPL 768×256 | rmin 0.05, P0, SiMPL, authors' sensitivity, S ≤ 1e-5 (table 1) | 0.0012078 | 0.000967674 | 0.0012078 | +0.00 % (J) | 0.3000 | 0.3016 | 0.197 | 17.7 | 6 | 50 (converged, stationarity_tol) | 58/0/108/– | 68.1 | 1.17 |
+| MBB SiMPL 768×256 | rmin 0.05, P0, SiMPL, exact sensitivity, S ≤ 1e-5 | 0.00119603 | 0.000964159 | 0.0012078 | -0.97 % (J) | 0.3000 | 0.3005 | 0.190 | 17.2 | 4 | 104 (converged, stationarity_tol) | 114/0/218/– | 128.4 | 1.13 |
+| MBB SiMPL 768×256 | rmin 0.05, P1, SiMPL, exact sensitivity, S ≤ 1e-5 | 0.00120303 | 0.000966876 | 0.0012078 | -0.40 % (J) | 0.3000 | 0.3002 | 0.195 | 17.71 | 6 | 73 (converged, stationarity_tol) | 81/0/154/– | 94.6 | 1.17 |
+| MBB SiMPL 768×256 | rmin 0.02, P0, SiMPL, authors' sensitivity, 29 iterations (table 2) | 0.00105663 | 0.000971927 | 0.0010566 | +0.00 % (J) | 0.3000 | 0.3008 | 0.089 | 19.03 | 10 | 29 (maxiter) | 31/0/60/– | 33.9 | 1.09 |
+| MBB SiMPL 768×256 | rmin 0.05, P0, OC(), default stop (vs OC of table 1) | 0.00121132 | 0.00098081 | 0.0012234 | -0.99 % (J) | 0.3000 | 0.2993 | 0.196 | 17.97 | 7 | 102 (converged, objective_range) | 103/0/205/– | 117.3 | 1.14 |
 
 ### 3D cantilever 24 × 12 × 12
 
-No reference; the perimeter is an area and the holes are closed cavities. `validation/cantilever3d.jl`; Apple M5 Max, 4 threads, Julia 1.13.0, 2026-11-27 20:02.
+No reference; the perimeter is an area and the holes are closed cavities. `validation/cantilever3d.jl`; Apple M5 Max, 4 threads, Julia 1.13.0 · commit 8780088+dirty · 2026-11-27 22:34.
 
-| case | variant | J | J_bin | ref | vs ref | V | V_bin | grey | perimeter | holes | iterations | solves state/adjoint/filter/step | time (s) | time / state solve (s) |
+| case | variant | J | J_bin | ref | vs ref | V | V_bin | grey | perimeter | holes | iterations | solves state/adjoint/filter/step | time (s) | time ÷ state solves (s) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| cantilever 3D 24×12×12 | P0, OC() | 1.65812 | 0.874251 | – | – | 0.3000 | 0.2847 | 0.483 | 7.264 | 0 | 82 (converged, objective_range) | 83/0/165/– | 17.8 | 0.215 |
-| cantilever 3D 24×12×12 | P0, SiMPL() | 1.27693 | 0.738577 | – | – | 0.3000 | 0.2969 | 0.407 | 5.792 | 0 | 30 (converged, objective_range) | 34/0/64/– | 11.5 | 0.339 |
-| cantilever 3D 24×12×12 | P1, OC() | 1.71558 | 0.893944 | – | – | 0.3000 | 0.2784 | 0.500 | 7.264 | 0 | 90 (converged, objective_range) | 91/0/181/– | 27.3 | 0.3 |
-| cantilever 3D 24×12×12 | P1, SiMPL() | 1.31487 | 0.777166 | – | – | 0.3000 | 0.2859 | 0.420 | 5.556 | 0 | 30 (converged, objective_range) | 36/0/66/– | 12.7 | 0.353 |
+| cantilever 3D 24×12×12 | P0, OC() | 1.65812 | 0.874251 | – | – | 0.3000 | 0.2847 | 0.483 | 7.264 | 0 | 82 (converged, objective_range) | 83/0/165/– | 15.4 | 0.186 |
+| cantilever 3D 24×12×12 | P0, SiMPL() | 1.27693 | 0.738577 | – | – | 0.3000 | 0.2969 | 0.407 | 5.792 | 0 | 30 (converged, objective_range) | 34/0/64/– | 6.5 | 0.191 |
+| cantilever 3D 24×12×12 | P1, OC() | 1.71558 | 0.893944 | – | – | 0.3000 | 0.2784 | 0.500 | 7.264 | 0 | 90 (converged, objective_range) | 91/0/181/– | 18.0 | 0.198 |
+| cantilever 3D 24×12×12 | P1, SiMPL() | 1.31487 | 0.777166 | – | – | 0.3000 | 0.2859 | 0.420 | 5.556 | 0 | 30 (converged, objective_range) | 36/0/66/– | 7.1 | 0.198 |
 
 ### Bridge of Takezawa et al. (2010), 200 × 100
 
-Published J = 23.3 at 100 iterations, compared on J. `validation/bridge_takezawa.jl`; Apple M5 Max, 4 threads, Julia 1.13.0, 2026-11-27 20:04.
+Published J = 23.3 at 100 iterations, compared on J within 3 % (the tolerance decided for the double well). `validation/bridge_takezawa.jl`; Apple M5 Max, 4 threads, Julia 1.13.0 · commit 8780088+dirty · 2026-11-27 22:35.
 
-| case | variant | J | J_bin | ref | vs ref | V | V_bin | grey | perimeter | holes | iterations | solves state/adjoint/filter/step | time (s) | time / state solve (s) |
+| case | variant | J | J_bin | ref | vs ref | V | V_bin | grey | perimeter | holes | iterations | solves state/adjoint/filter/step | time (s) | time ÷ state solves (s) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| bridge Takezawa 200×100 | RD double well, method default, seed takezawa | 23.6684 | 22.0839 | 23.3 | +1.58 % (J) | 0.3000 | 0.3034 | 0.100 | 18.95 | 9 | 100 (maxiter) | 101/0/0/– | 15.2 | 0.15 |
-| bridge Takezawa 200×100 | RD double well, method default, seed hex | 23.8995 | 21.9336 | 23.3 | +2.57 % (J) | 0.3000 | 0.3105 | 0.087 | 16.6 | 6 | 100 (maxiter) | 101/0/0/– | 13.4 | 0.132 |
-| bridge Takezawa 200×100 | RD double well, method takezawa2010, seed takezawa | 23.6144 | 21.6804 | 23.3 | +1.35 % (J) | 0.3001 | 0.3072 | 0.104 | 19.73 | 9 | 100 (maxiter) | 101/0/0/– | 16.5 | 0.163 |
-| bridge Takezawa 200×100 | RD double well, method takezawa2010, seed hex | 23.6614 | 21.5482 | 23.3 | +1.55 % (J) | 0.3001 | 0.3083 | 0.108 | 20.86 | 8 | 100 (maxiter) | 101/0/0/– | 13.5 | 0.134 |
+| bridge Takezawa 200×100 | RD double well, method default, seed takezawa | 23.6684 | 22.0839 | 23.3 | +1.58 % (J) | 0.3000 | 0.3034 | 0.100 | 18.95 | 9 | 100 (maxiter) | 101/0/0/– | 11.5 | 0.114 |
+| bridge Takezawa 200×100 | RD double well, method default, seed hex | 23.8995 | 21.9336 | 23.3 | +2.57 % (J) | 0.3000 | 0.3105 | 0.087 | 16.6 | 6 | 100 (maxiter) | 101/0/0/– | 11.0 | 0.109 |
+| bridge Takezawa 200×100 | RD double well, method takezawa2010, seed takezawa | 23.6144 | 21.6804 | 23.3 | +1.35 % (J) | 0.3001 | 0.3072 | 0.104 | 19.73 | 9 | 100 (maxiter) | 101/0/0/– | 11.3 | 0.112 |
+| bridge Takezawa 200×100 | RD double well, method takezawa2010, seed hex | 23.6614 | 21.5482 | 23.3 | +1.55 % (J) | 0.3001 | 0.3083 | 0.108 | 20.86 | 8 | 100 (maxiter) | 101/0/0/– | 11.1 | 0.11 |
 
 ### Cantilever 2 × 1 with the double well: mesh independence
 
-No reference; J within ±2.7 % of the value on 200 × 100. `validation/mesh_double_well.jl`; Apple M5 Max, 4 threads, Julia 1.13.0, 2026-11-27 20:05.
+No reference; J within ±2.7 % of the value on 200 × 100. `validation/mesh_double_well.jl`; Apple M5 Max, 4 threads, Julia 1.13.0 · commit 8780088+dirty · 2026-11-27 22:37.
 
-| case | variant | J | J_bin | ref | vs ref | V | V_bin | grey | perimeter | holes | iterations | solves state/adjoint/filter/step | time (s) | time / state solve (s) |
+| case | variant | J | J_bin | ref | vs ref | V | V_bin | grey | perimeter | holes | iterations | solves state/adjoint/filter/step | time (s) | time ÷ state solves (s) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| cantilever 2×1 double well 100×50 | RD double well, κ = 1e-5, T = 25, seed :hex | 2.5582 | 2.43937 | – | – | 0.5000 | 0.5052 | 0.114 | 12.16 | 6 | 92 (converged, all) | 93/0/0/– | 3.4 | 0.0363 |
-| cantilever 2×1 double well 200×100 | RD double well, κ = 1e-5, T = 25, seed :hex | 2.49332 | 2.41558 | – | – | 0.5000 | 0.5033 | 0.070 | 13.88 | 8 | 75 (converged, all) | 76/0/0/– | 12.8 | 0.169 |
-| cantilever 2×1 double well 400×200 | RD double well, κ = 1e-5, T = 25, seed :hex | 2.42552 | 2.3795 | – | – | 0.5001 | 0.5004 | 0.049 | 16.92 | 14 | 100 (converged, all) | 101/0/0/– | 58.4 | 0.578 |
+| cantilever 2×1 double well 100×50 | RD double well, κ = 1e-5, T = 25, seed :hex | 2.5582 | 2.43937 | – | – | 0.5000 | 0.5052 | 0.114 | 12.16 | 6 | 92 (converged, all) | 93/0/0/– | 3.0 | 0.0322 |
+| cantilever 2×1 double well 200×100 | RD double well, κ = 1e-5, T = 25, seed :hex | 2.49332 | 2.41558 | – | – | 0.5000 | 0.5033 | 0.070 | 13.88 | 8 | 75 (converged, all) | 76/0/0/– | 8.2 | 0.107 |
+| cantilever 2×1 double well 400×200 | RD double well, κ = 1e-5, T = 25, seed :hex | 2.42552 | 2.3795 | – | – | 0.5001 | 0.5004 | 0.049 | 16.92 | 14 | 100 (converged, all) | 101/0/0/– | 48.9 | 0.484 |
 
 ### Cantilever of levelset88 (Otomori et al. 2015), 80 × 64
 
-levelset88 run in Octave 9.1, another method on the same mesh: rule between methods on `J_bin`. `validation/otomori_levelset88.jl`; Apple M5 Max, 4 threads, Julia 1.13.0, 2026-11-27 20:06.
+levelset88 run in Octave 9.1, another method on the same mesh: rule between methods on `J_bin`; the HyperShape row reads its design as the rest of the bank (cell mean of the physical field of `Ersatz()` at least ½), the Octave row by its own rule (mean nodal φ positive). `validation/otomori_levelset88.jl`; Apple M5 Max, 4 threads, Julia 1.13.0 · commit 8780088+dirty · 2026-11-27 22:38.
 
-| case | variant | J | J_bin | ref | vs ref | V | V_bin | grey | perimeter | holes | iterations | solves state/adjoint/filter/step | time (s) | time / state solve (s) |
+| case | variant | J | J_bin | ref | vs ref | V | V_bin | grey | perimeter | holes | iterations | solves state/adjoint/filter/step | time (s) | time ÷ state solves (s) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| cantilever levelset88 80×64 | levelset88 in Octave 9.1, stop of Otomori (reference) | 534.949 | 534.949 | – | – | 0.4996 | 0.4996 | 0.000 | 722 | 8 | 112 | – | – | – |
-| cantilever levelset88 80×64 | RD V1, Ersatz(), :physical, phi_bc = :zero_boundary | 519.405 | 532.535 | 534.949 | -0.45 % (J_bin) | 0.5001 | 0.4992 | 0.060 | 598 | 5 | 128 (converged, all) | 129/0/0/– | 30.8 | 0.239 |
+| cantilever levelset88 80×64 | levelset88 in Octave 9.1, stop of Otomori (reference; its elements: mean nodal φ > 0) | 534.949 | 534.949 | – | – | 0.4996 | 0.4996 | 0.000 | 722 | 8 | 112 | – | – | – |
+| cantilever levelset88 80×64 | RD V1, Ersatz(), :physical, phi_bc = :zero_boundary | 519.405 | 531.802 | 534.949 | -0.59 % (J_bin) | 0.5001 | 0.4996 | 0.060 | 598 | 5 | 128 (converged, all) | 129/0/0/– | 7.5 | 0.0582 |

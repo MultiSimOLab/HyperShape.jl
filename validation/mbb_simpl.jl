@@ -18,7 +18,7 @@ const RUNS = (("rmin 0.05, P0, SiMPL, authors' sensitivity, S ≤ 1e-5 (table 1)
                         ("rmin 0.05, P0, SiMPL, exact sensitivity, S ≤ 1e-5", (; rmin = 0.05, opt = SiMPL(), stop = S5), 1.2078e-3),
                         ("rmin 0.05, P1, SiMPL, exact sensitivity, S ≤ 1e-5", (; rmin = 0.05, order = 1, opt = SiMPL(), stop = S5), 1.2078e-3),
                         ("rmin 0.02, P0, SiMPL, authors' sensitivity, 29 iterations (table 2)", (; rmin = 0.02, opt = SiMPL(), sensitivity = :authors, maxiter = 29, stop = nothing), 1.0566e-3),
-                        ("rmin 0.05, P0, OC(), default stop (vs OC of table 1)", (; rmin = 0.05, opt = OC()), 1.2234e-3)
+                        ("rmin 0.05, P0, OC(), default stop (vs OC of table 1)", (; rmin = 0.05, opt = OC()), 1.2234e-3))
 for (name, kw, ref) in RUNS                                                   # compile every variant (the times exclude it)
   mbb(; case = :simpl, nx = 48, ny = 16, vf = 0.3, Emin = 1e-6, merge(kw, (; rmin = 0.1, maxiter = 2))...)
 end

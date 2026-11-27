@@ -27,7 +27,22 @@ captions: Fig. 3, the density filter of the code (`ft = 2`, a convolution filter
 
 | Case | J | vs Fig. 4 | `J_bin` | `J_bin` vs top88.m | iterations | time |
 |---|---|---|---|---|---|---|
-TOP88_TABLE
+| 60×20 Andreassen et al. (2011), Fig. 4, PDE filter | 237.60 | — | — | — | — | — |
+| 60×20 top88.m in Octave (density filter, ft = 2; Fig. 3: 233.71) | 233.713 | — | 187.446 | — | 144 | — |
+| 60×20 P0, cell mean, OC as top88 | 237.606 | +0.00 % | 187.333 | −0.06 % | 138 | 1.4 s |
+| 60×20 P0, Gauss points, OC as top88 | 235.032 | — | 188.342 | +0.48 % | 88 | 0.9 s |
+| 60×20 P1, Gauss points, OC as top88 | 237.555 | — | 187.347 | −0.05 % | 137 | 1.3 s |
+| 60×20 P0, cell mean, `OC()` | 238.978 | — | 188.369 | +0.49 % | 72 | 0.7 s |
+| 60×20 P0, Gauss points, `SiMPL()` | 235.069 | — | 188.056 | +0.33 % | 39 | 0.4 s |
+| 60×20 P1, Gauss points, `SiMPL()` | 239.291 | — | 187.242 | −0.11 % | 36 | 0.3 s |
+| 150×50 Andreassen et al. (2011), Fig. 4, PDE filter | 235.36 | — | — | — | — | — |
+| 150×50 top88.m in Octave (density filter, ft = 2; Fig. 3: 235.73) | 235.735 | — | 189.651 | — | 362 | — |
+| 150×50 P0, cell mean, OC as top88 | 235.363 | +0.00 % | 190.528 | +0.46 % | 457 | 18.7 s |
+| 150×50 P0, Gauss points, OC as top88 | 234.75 | — | 190.473 | +0.43 % | 543 | 21.4 s |
+| 150×50 P1, Gauss points, OC as top88 | 235.373 | — | 190.21 | +0.29 % | 365 | 15.0 s |
+| 150×50 P0, cell mean, `OC()` | 237.021 | — | 191.381 | +0.91 % | 58 | 2.4 s |
+| 150×50 P0, Gauss points, `SiMPL()` | 235.542 | — | 190.702 | +0.55 % | 45 | 2.2 s |
+| 150×50 P1, Gauss points, `SiMPL()` | 235.934 | — | 191.007 | +0.72 % | 48 | 2.2 s |
 
 *OC as top88* is `OC(adapt = nothing)` with `StopCriteria(change_tol = 0.01)`; `OC()` and `SiMPL()` use the defaults of
 HyperShape (adaptive move limits, stop when the objective settles). The script also writes a figure per mesh with

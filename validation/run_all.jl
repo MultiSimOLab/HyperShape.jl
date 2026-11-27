@@ -1,7 +1,7 @@
 # Runs the validation cases one after another, each in its own Julia process (the threads of this one), and joins
 # their fixed report tables into results/report.csv and results/report.md (with the figures in the same folder).
 #
-#   julia --project=validation -t 4 validation/run_all.jl [case ...]      # all: about TOTAL_MIN min (Mac M5 Max, 4 threads)
+#   julia --project=validation -t 4 validation/run_all.jl [case ...]      # all: about 17 min (Mac M5 Max, 4 threads)
 #
 # The cases are the scripts of this folder (without .jl); with no argument, all of CASES. The output folder is
 # validation/results, or ENV["HYPERSHAPE_RESULTS"]. Each case writes its output (stdout and stderr, in order) to

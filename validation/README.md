@@ -5,13 +5,13 @@ discussion: the *Validation* page of the documentation.
 
 ```
 julia --project=validation -e 'using Pkg; Pkg.instantiate()'
-julia --project=validation -t 4 validation/mbb_top88.jl      # about XX min
-julia --project=validation -t 4 validation/cantilever3d.jl   # about XX min
-julia --project=validation -t 4 validation/mbb_simpl.jl      # about XX min
-julia --project=validation -t 4 validation/bridge_takezawa.jl # about XX min
-julia --project=validation -t 4 validation/mesh_double_well.jl # about XX min
-julia --project=validation -t 4 validation/otomori_levelset88.jl [outdir] # about XX min, writes otomori_levelset88.svg
-julia --project=validation -t 4 validation/run_all.jl [case ...]   # all of the above, about TOTAL_MIN min
+julia --project=validation -t 4 validation/mbb_top88.jl      # about 2 min
+julia --project=validation -t 4 validation/cantilever3d.jl   # about 2 min
+julia --project=validation -t 4 validation/mbb_simpl.jl      # about 9 min
+julia --project=validation -t 4 validation/bridge_takezawa.jl # about 1.5 min
+julia --project=validation -t 4 validation/mesh_double_well.jl # about 2 min
+julia --project=validation -t 4 validation/otomori_levelset88.jl [outdir] # about 0.9 min, writes otomori_levelset88.svg
+julia --project=validation -t 4 validation/run_all.jl [case ...]   # all of the above, about 17 min
 ```
 
 Every script also writes its rows of the fixed report table (`<case>.csv` and `<case>.md`) in `validation/results`
