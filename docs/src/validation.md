@@ -153,3 +153,32 @@ reaction needs `√(κ Δt) ≲ 0.7 h`, a limit like a CFL condition (80 substep
 instead (the same interface in cells; discarded) the boundary moves a fixed number of cells per iteration and a finer
 mesh does not finish the bridge in 100 iterations. The test suite runs the 100 × 50 case with κ = 4e-5 (5 substeps of
 5, J 2.537).
+
+## Cantilever of levelset88 (reaction–diffusion of a level set)
+
+Otomori, Yamada, Izui and Nishiwaki, *Matlab code for a level set-based topology optimization method using a reaction
+diffusion equation*, SMO 51 (2015): the cantilever of their code, 80 × 64 unit elements, clamped on the left side,
+five unit nodal forces in the middle of the right side, plane stress (E = 1, Emin = 1e-4, ν = 0.3), volume 0.5,
+τ = 2e-4. The reference is their code run in Octave 9.1 (`validation/data/levelset88`; the code is not included).
+`ReactionDiffusion` is run as it is, with the parameters the paper fixes (`Δt = 0.1`, consistent mass,
+`phi_bc = :zero_boundary`, `void_weight = 1e-4`, the volume lowered over 100 iterations, `ExactVolume(max_step =
+0.005)`) and the defaults of the method for the rest (`validation/otomori_levelset88.jl`; 2026-11-27): a level set
+through `Ersatz()`, `sensitivity = :physical` (the exact derivative of the compliance weighted by the material,
+instead of their topological derivative of the spherical hole), the exact multiplier of the volume (instead of their
+exponential rule), `L1Mean()` and the default stop (instead of their criterion). A comparison of the method, not a
+reproduction of the code. The compliance of the design of HyperShape is also evaluated as levelset88 reads a design
+(binary elements, mean of φ over the element positive); the same evaluation of the Octave design gives its J within
+5e-12.
+
+| | stop | J | J as binary elements | volume (elements) | interior holes |
+|---|---|---|---|---|---|
+| levelset88 (Octave) | 112 (their criterion) | — | 534.95 | 0.4996 | 8 |
+| `ReactionDiffusion` | 129 (the default stop; 128 iterations) | 519.40 (`Ersatz()`) | 532.54 (−0.45 %) | 0.4992 | 5 |
+| `ReactionDiffusion` at iteration 112 | — | 521.75 | 535.43 (+0.09 %) | 0.4988 | — |
+
+Iteration `k` of HyperShape is iteration `k + 1` of levelset88 (which records J before the update). The compliance
+of the binary design ends within 0.5 % of levelset88, with a design of the same layout (two arcs and a central
+joint) but fewer holes (5 against 8; 18 % of the elements in a different phase). During the descent of the volume the
+two paths differ (up to 10 % in J around iteration 30, when levelset88 has removed more material than its target),
+and the binary reading of the HyperShape design has a peak at iteration 101 (+9.7 %) that the cut cells of `Ersatz()`
+do not see. levelset88 run on without its stop drifts (J 539 at 129, a jump to 585 near 185).
