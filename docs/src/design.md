@@ -463,6 +463,16 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
   length of a gradient (perimeter) energy, not a minimum thickness: bars of one or two cells are expensive but
   admissible, and they disappear only as the perimeter decreases, slowly. The 5th percentile of the thickness grows
   with `τ`, the minimum does not; a minimum size needs a filter or a constraint, which the method does not have.
+- **Condition of the design field on the boundary** (`phi_bc`): `:neumann` (default, the natural condition of the
+  diffusion), `:zero_boundary` (`φ = 0` on every node of the boundary of the design domain, found from the topology of
+  its cells; Otomori et al. 2015) or `"tag" => value` pairs (`φ` held on the nodes of each tag, the nodes that
+  `dirichlet_tags` would make Dirichlet; Yamada et al. 2010, Cui et al. 2023: `phi_bc = ("load" => 1.0,)`). The values
+  are written into the design when `solve!` starts, before the first evaluation and any `scale = :initial`, and the
+  step holds them in its operator: identity rows and columns, no increment and `φ̌ = 0` there, so the multiplier of the
+  volume does not move them and the root of the volume leaves them out of its bracket (a value held at a bound would
+  give 0/0). They stay values of `z`: not a frozen zone (a zone is a set of cells of material), and where a tag touches
+  the frozen values of a zone the zone wins. One more back-substitution per factorisation (`φ̌`); not with the double
+  well. With `:neumann` nothing of this runs: the runs are those of before bit for bit.
 - **Rejection:** when the forward problem does not converge at the new design, `RejectStep` halves `Δt` (the operator
   is factorised again, the gradient comes from the snapshot of the oracle) and the nominal `Δt` comes back at the next
   step.
@@ -485,7 +495,7 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
 - **Allocations:** the arithmetic of the step and a linear volume allocate nothing (one substitution of UMFPACK
   aside); each evaluation of a nonlinear volume reserves about 70 kB and each derivative of `Ersatz()` about 130 kB
   (Gridap's integration), independent of the mesh.
-- **Not yet:** the presets of Otomori, Yamada and Choi, Dirichlet conditions for φ on lines of nodes, the second loop of
+- **Not yet:** the presets of Otomori, Yamada and Choi, the second loop of
   Kim et al. (2020) (explicit double well with a decreasing diffusion, a refinement stage), the double well with an
   interface map, 3D validation.
 
@@ -675,7 +685,7 @@ A default never removes generality: everything it sets can be replaced from the 
 | `RejectStep(shrink = 0.5, max_attempts = 5)` | `solve!(…; on_failure)` | `on_failure = RejectStep(…)` |
 | `default_stop(optimizer)` | `solve!(…; stop)` | `stop = StopCriteria(…)`, `stop = nothing` or `stop = (info, history, ctx) -> Bool` |
 | `Euclidean()` (only for the stationarity measure) | `DensityMethod(OC())` | `metric = LumpedMass(dΩ)`, a vector of weights or an object with `metric_weights(m, z)` |
-| `ls = LUSolver()`, `mass = :lumped`, `normalize = L1Mean()`, `volume = ExactVolume()`, `Δt = :auto` (0.2 with an interface map, 0.4 without), `void_weight = 1e-3`, `lagrangian = AugmentedLagrangian()` | `ReactionDiffusion` | the keyword of the same name; `solve = (A, b, x, ctx, stale) -> x` for any other solver; `diffusion = (φ, v) -> ∫(…)dΩ` |
+| `ls = LUSolver()`, `mass = :lumped`, `normalize = L1Mean()`, `volume = ExactVolume()`, `Δt = :auto` (0.2 with an interface map, 0.4 without), `void_weight = 1e-3`, `lagrangian = AugmentedLagrangian()`, `phi_bc = :neumann` | `ReactionDiffusion` | the keyword of the same name; `solve = (A, b, x, ctx, stale) -> x` for any other solver; `diffusion = (φ, v) -> ∫(…)dΩ` |
 | `max_step = :auto` (`0.02` of `|D|` with an interface map), `tol = 1e-4` (of `|D|`) | `ExactVolume` | the keyword of the same name |
 | maps `Identity`, `HelmholtzFilter`, `TanhProjection`, `CellMean` | `PhysicalFields`, `single_field_design` | `PointwiseMap(f, df; parameters)` |
 | continued objects `TanhProjection` (β), `OC` (move) | `Continuation` | any `Parameter` read by the user's forms or maps |

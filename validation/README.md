@@ -10,6 +10,7 @@ julia --project=validation -t 4 validation/cantilever3d.jl   # about 1.5 min
 julia --project=validation -t 4 validation/mbb_simpl.jl      # about 4 min
 julia --project=validation -t 4 validation/bridge_takezawa.jl # about 1.5 min
 julia --project=validation -t 4 validation/mesh_double_well.jl # about 3 min
+julia --project=validation -t 4 validation/otomori_levelset88.jl [outdir] # about 1 min, writes otomori_levelset88.svg
 ```
 
 | File | Content |
@@ -21,5 +22,6 @@ julia --project=validation -t 4 validation/mesh_double_well.jl # about 3 min
 | `cantilever3d.jl` | 3D cantilever 24×12×12: Taylor tests, symmetry, OC and SiMPL |
 | `bridge_takezawa.jl` | bridge 200×100 with the double well against Takezawa, Nishiwaki and Kitamura (2010): J = 23.3 |
 | `mesh_double_well.jl` | cantilever with the double well on 100×50, 200×100 and 400×200 with physical κ and T: mesh independence of J |
+| `otomori_levelset88.jl` | cantilever 80×64 of levelset88 (Otomori et al. 2015) with `ReactionDiffusion` (`Ersatz()`, `:physical`, `phi_bc = :zero_boundary`) against the literal code run in Octave (`data/levelset88`): compliance, volume and design, table and SVG figure; a comparison, not a reproduction |
 
 Each script prints a Markdown table with the machine, the threads and the Julia version.

@@ -998,6 +998,7 @@ function solve!(problem::Optimization, method::AbstractMethod; maxiter::Integer,
                                       "choose another name for the monitor"))
   end
   check_problem(method, problem)
+  start_design!(method, problem)               # before any evaluation and any scale :initial
   native = _native_split(problem, opt, augmented_lagrangian(method))
   pr = _Printer(io, verbose, schedule, keys(monitors), length(problem.constraints) > 1)
   cont_names = schedule === nothing ? () : schedule.names
@@ -1139,7 +1140,7 @@ function _segment!(problem, method, opt, resume, isfirst, run, hist, ctx, cont_b
   cnames = keys(problem.constraints)
   k0 = run.k
   native = _native_split(problem, opt, augmented_lagrangian(method))
-  isfirst || check_problem(method, problem)
+  isfirst || (check_problem(method, problem); start_design!(method, problem))
   fo = build_oracle(method, problem)
   ops = _counters(problem)
   run.cstart = map(_count, ops)

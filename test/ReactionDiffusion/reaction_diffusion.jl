@@ -467,7 +467,7 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     @test_throws r"sensitivity must be" ReactionDiffusion(; τ = 1e-4, sensitivity = :exact)
     @test_throws r"unknown preset :otomori2015; the presets are :kim2020" ReactionDiffusion(:otomori2015; τ = 1e-4, sensitivity = :physical)
     @test_throws r"native = \(\)" ReactionDiffusion(; τ = 1e-4, sensitivity = :physical, volume = nothing)
-    @test_throws r"unknown keyword phi_bc" ReactionDiffusion(; τ = 1e-4, sensitivity = :physical, phi_bc = :neumann)
+    @test_throws r"unknown keyword phi_bcs" ReactionDiffusion(; τ = 1e-4, sensitivity = :physical, phi_bcs = :neumann)
     @test_throws r"mass must be" rd(; mass = :diagonal)
     @test_throws r"Δt must be" rd(; Δt = 0.0)
     # P0, infinite bounds, Step() and Ersatz() with :design
