@@ -7,15 +7,20 @@
 # it): the table gives the fraction of cells whose phase differs from the mirror one.
 #
 # julia --project=validation -t 4 validation/bridge_takezawa.jl      # about 1.5 min
-include(joinpath(@__DIR__, "cases.jl"))
+include(joinpath(@__DIR__, "common", "common.jl"))
 
 println("Bridge of Takezawa et al. (2010), 200 × 100, κ = 1e-5, 100 iterations · ", Sys.cpu_info()[1].model, ", ",
         Threads.nthreads(), " threads, Julia ", VERSION, "\n")
 println("| method | seed | J | vs 23.3 | volume | interior holes | phase asymmetry | time |")
 println("|---|---|---|---|---|---|---|---|")
+for method in (:default, :takezawa2010), seed in (:takezawa, :hex)                    # compile (the times exclude it)
+  bridge(; nx = 40, seed, method, maxiter = 2)
+end
 ok = true
+rows = []
 for method in (:default, :takezawa2010), seed in (:takezawa, :hex)
   b = bridge(; nx = 200, seed, method, maxiter = 100)
+  push!(rows, report_row("bridge Takezawa 200×100", "RD double well, method $method, seed $seed", b; ref = 23.3))
   J = b.result.objective
   e = J / 23.3 - 1
   @printf("| %s | %s | %.4f | %+.2f %% | %.5f | %d | %.4f | %.1f s |\n", method, seed, J, 100e, b.volume, b.holes,
@@ -23,3 +28,4 @@ for method in (:default, :takezawa2010), seed in (:takezawa, :hex)
   global ok &= abs(e) <= 0.03 && abs(b.volume - 0.3) <= 1e-4 && 5 <= b.holes <= 10
 end
 println(ok ? "\nall checks passed" : "\nSOME CHECK FAILED")
+write_report("bridge_takezawa", rows; title = "Bridge of Takezawa, Nishiwaki and Kitamura (2010), 200 × 100, 100 iterations")

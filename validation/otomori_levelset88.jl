@@ -21,12 +21,12 @@
 # check of the model (it must give Octave's J).
 #
 # julia --project=validation -t 4 validation/otomori_levelset88.jl [output directory]     # about 1 min
-# writes otomori_levelset88.svg (both designs and both histories of the compliance) in the output directory (default:
-# the current directory)
-using Gridap, HyperFEM, HyperShape, Printf
+# writes otomori_levelset88.svg (both designs and both histories of the compliance) and the fixed report table
+# (otomori_levelset88.csv/.md) in the output directory (default: validation/results, or ENV["HYPERSHAPE_RESULTS"])
+include(joinpath(@__DIR__, "common", "common.jl"))
 
 const DATA = joinpath(@__DIR__, "data", "levelset88")
-const OUTDIR = get(ARGS, 1, pwd())
+const OUTDIR = get(ARGS, 1, results_dir())
 const NX, NY, VMAX, TAU = 80, 64, 0.5, 2e-4
 
 # the Octave reference: J = F'U and the binary volume of the design before the update of each iteration, the stop of
@@ -102,11 +102,7 @@ function run_levelset88(ref)
   Ub = TrialFESpace(Vb, VectorValue(0.0, 0.0))
   V0 = FESpace(model, ReferenceFE(lagrangian, Float64, 0); conformity = :L2)
   dΩb = Measure(Ω, 2)
-  Jbin = str -> begin
-    Ee = FEFunction(V0, [Emin + (s ? 1 - Emin : 0.0) for s in vec(str)])
-    uh = solve(AffineFEOperator((u, v) -> ∫(Ee * (ε(v) ⊙ (σ ∘ ε(u))))dΩb, v -> δp(t ⋅ v), Ub, Vb))
-    sum(δp(t ⋅ uh))
-  end
+  Jbin = binary_evaluator((Ee, u, v) -> ∫(Ee * (ε(v) ⊙ (σ ∘ ε(u))))dΩb, v -> δp(t ⋅ v), Ub, Vb, V0; Emin)
   ids = get_cell_dof_ids(Vφ)
   cells = [ntuple(a -> Int(ids[c][a]), 4) for c in 1:num_cells(Ω)]          # no frozen values: all of them are values of z
   bd = BinaryDesign(z, cells, ref.stop - 1, Vector{Bool}[], Ref(0))
@@ -114,89 +110,27 @@ function run_levelset88(ref)
                                                                                        jbin = BinaryCompliance(bd, Jbin)))
   str = reshape(binary(bd), NX, NY)                         # Gridap's Cartesian cells: x first
   kept = isempty(bd.kept) ? nothing : reshape(bd.kept[1], NX, NY)
-  (; res, str, kept, time = tt, Jbin)
+  χc = collect(Gridap.get_array(∫(θ.χ)dΩ.domain))          # cell means of Ersatz() (unit cells)
+  (; res, str, kept, time = tt, Jbin, χc)
 end
 
-# interior holes (by faces, not touching the boundary) of a binary design
-function holes(str)
-  void, seen, n = .!str, falses(size(str)), 0
-  for j in axes(str, 2), i in axes(str, 1)
-    (void[i, j] && !seen[i, j]) || continue
-    stack, inner = [(i, j)], true
-    seen[i, j] = true
-    while !isempty(stack)
-      (a, b) = pop!(stack)
-      for (p, q) in ((a + 1, b), (a - 1, b), (a, b + 1), (a, b - 1))
-        checkbounds(Bool, str, p, q) || (inner = false; continue)
-        (void[p, q] && !seen[p, q]) || continue
-        seen[p, q] = true
-        push!(stack, (p, q))
-      end
-    end
-    inner && (n += 1)
-  end
-  n
-end
-
-# The figure (plain SVG, no plotting package): the two designs and the two histories of the compliance
+# The figure: the two designs (the reference first) and the histories of the compliance against the iteration of
+# levelset88 (HyperShape's k is Octave's k + 1); common/figure.jl
 function figure(path, ref, hs)
-  cell, W0 = 4, 20
-  pw, ph = NX * cell, NY * cell
-  io = IOBuffer()
-  W, H = 3W0 + 2pw + 560, ph + 90
-  println(io, """<svg xmlns="http://www.w3.org/2000/svg" width="$W" height="$H" font-family="sans-serif" font-size="13" shape-rendering="crispEdges">""")
-  println(io, """<rect width="$W" height="$H" fill="white"/>""")
-  function design(x0, str, title)
-    println(io, """<text x="$x0" y="15">$(title[1])</text><text x="$x0" y="31">$(title[2])</text>""")
-    println(io, """<rect x="$x0" y="40" width="$pw" height="$ph" fill="none" stroke="#999"/>""")
-    for j in 1:NY
-      y = 40 + (NY - j) * cell
-      i = 1
-      while i <= NX                                       # runs of material along a row
-        str[i, j] || (i += 1; continue)
-        i0 = i
-        while i <= NX && str[i, j]
-          i += 1
-        end
-        # a slight overlap with the next row: no gaps between rows
-        println(io, """<rect x="$(x0 + (i0 - 1) * cell)" y="$y" width="$((i - i0) * cell)" height="$(cell + 0.5)" fill="black"/>""")
-      end
-    end
-  end
   r = hs.res
   Jb = r.history.monitors.jbin
-  design(W0, ref.str, ("levelset88 (Octave): stop at it. $(ref.stop)", "J = $(@sprintf("%.2f", ref.J[ref.stop]))"))
-  design(2W0 + pw, hs.str, ("HyperShape: $(r.iterations) it. (Ersatz J = $(@sprintf("%.2f", r.objective)))",
-                            "as binary elements: J = $(@sprintf("%.2f", Jb[end]))"))
-  # the histories, against the iteration of levelset88 (HyperShape's k is Octave's k + 1)
-  x0, y0, gw, gh = 3W0 + 2pw + 100, 40, 420, ph - 30
   Jh = r.history.objective
-  Jmin = min(minimum(ref.J), minimum(Jh), minimum(Jb))
-  Jmax = max(maximum(ref.J), maximum(Jh), maximum(Jb))
-  lo, hi = 50 * floor(Jmin / 50), 50 * ceil(Jmax / 50)
-  X(it) = x0 + gw * (it - 1) / 199
-  Y(J) = y0 + gh * (hi - J) / (hi - lo)
-  println(io, """<text x="$x0" y="22">compliance F'U</text>""")
-  println(io, """<rect x="$x0" y="$y0" width="$gw" height="$gh" fill="none" stroke="#999"/>""")
-  for J in lo:50:hi
-    println(io, """<line x1="$(x0 - 4)" x2="$x0" y1="$(Y(J))" y2="$(Y(J))" stroke="#999"/><text x="$(x0 - 8)" y="$(Y(J) + 4)" text-anchor="end">$(Int(J))</text>""")
-  end
-  for it in (1, 50, 100, 150, 200)
-    println(io, """<line x1="$(X(it))" x2="$(X(it))" y1="$(y0 + gh)" y2="$(y0 + gh + 4)" stroke="#999"/><text x="$(X(it))" y="$(y0 + gh + 18)" text-anchor="middle">$it</text>""")
-  end
-  println(io, """<text x="$(x0 + gw / 2)" y="$(y0 + gh + 36)" text-anchor="middle">iteration of levelset88</text>""")
-  pts(xs, ys) = join((@sprintf("%.1f,%.1f", X(a), Y(b)) for (a, b) in zip(xs, ys)), " ")
-  println(io, """<polyline fill="none" stroke="black" stroke-width="1.5" points="$(pts(1:length(ref.J), ref.J))"/>""")
-  println(io, """<polyline fill="none" stroke="#1f6fd1" stroke-width="1.5" points="$(pts(2:length(Jh)+1, Jh))"/>""")
-  println(io, """<polyline fill="none" stroke="#1f6fd1" stroke-width="1.5" stroke-dasharray="5,3" points="$(pts(2:length(Jb)+1, Jb))"/>""")
-  println(io, """<line x1="$(X(ref.stop))" x2="$(X(ref.stop))" y1="$y0" y2="$(y0 + gh)" stroke="black" stroke-dasharray="3,3"/>""")
-  println(io, """<line x1="$(X(r.iterations + 1))" x2="$(X(r.iterations + 1))" y1="$y0" y2="$(y0 + gh)" stroke="#1f6fd1" stroke-dasharray="3,3"/>""")
-  println(io, """<line x1="$(x0 + 190)" x2="$(x0 + 215)" y1="$(y0 + gh - 60)" y2="$(y0 + gh - 60)" stroke="black" stroke-width="1.5"/><text x="$(x0 + 220)" y="$(y0 + gh - 56)">levelset88 (Octave)</text>""")
-  println(io, """<line x1="$(x0 + 190)" x2="$(x0 + 215)" y1="$(y0 + gh - 40)" y2="$(y0 + gh - 40)" stroke="#1f6fd1" stroke-width="1.5"/><text x="$(x0 + 220)" y="$(y0 + gh - 36)">HyperShape (Ersatz)</text>""")
-  println(io, """<line x1="$(x0 + 190)" x2="$(x0 + 215)" y1="$(y0 + gh - 20)" y2="$(y0 + gh - 20)" stroke="#1f6fd1" stroke-width="1.5" stroke-dasharray="5,3"/><text x="$(x0 + 220)" y="$(y0 + gh - 16)">HyperShape as binary elements</text>""")
-  println(io, """<text x="$x0" y="$(y0 + gh + 52)" font-size="11">vertical dashed lines: the stops (Otomori's criterion; the default stop of ReactionDiffusion)</text>""")
-  println(io, "</svg>")
-  write(path, take!(io))
+  blue = "#1f6fd1"
+  design_figure(path;
+    designs = [(ref.str, ("levelset88 (Octave): stop at it. $(ref.stop)", "J = $(@sprintf("%.2f", ref.J[ref.stop]))")),
+               (hs.str, ("HyperShape: $(r.iterations) it. (Ersatz J = $(@sprintf("%.2f", r.objective)))",
+                         "as binary elements: J = $(@sprintf("%.2f", Jb[end]))"))],
+    curves = [(; x = 1:length(ref.J), y = ref.J, color = "black", dash = nothing, label = "levelset88 (Octave)"),
+              (; x = 2:length(Jh)+1, y = Jh, color = blue, dash = nothing, label = "HyperShape (Ersatz)"),
+              (; x = 2:length(Jb)+1, y = Jb, color = blue, dash = "5,3", label = "HyperShape as binary elements")],
+    vlines = [(ref.stop, "black"), (r.iterations + 1, blue)],
+    ylabel = "compliance F'U", xlabel = "iteration of levelset88",
+    note = "vertical dashed lines: the stops (Otomori's criterion; the default stop of ReactionDiffusion)")
 end
 
 ref = octave_reference()
@@ -218,13 +152,13 @@ for k in ks
 end
 Js = ref.J[ref.stop]
 println()
-@printf("levelset88 (Octave): stop at iteration %d, J = %.4f, volume %.4f, %d interior holes\n", ref.stop, Js, ref.V[ref.stop], holes(ref.str))
+@printf("levelset88 (Octave): stop at iteration %d, J = %.4f, volume %.4f, %d interior holes\n", ref.stop, Js, ref.V[ref.stop], interior_holes(ref.str))
 Jcheck = hs.Jbin(ref.str)
 @printf("check of the binary model: Octave's design at its stop evaluated here, J = %.6f (Octave %.6f, relative difference %.1e)\n",
         Jcheck, Js, abs(Jcheck / Js - 1))
 @printf("HyperShape: %s (%s) after %d iterations (= iteration %d of levelset88), J = %.4f with Ersatz() (%+.2f %% against the stop of Octave), J = %.4f as binary elements (%+.2f %%), volume %.4f (Ersatz) / %.4f (elements), %d interior holes, %.1f s\n",
         r.status, r.reason, r.iterations, r.iterations + 1, r.objective, 100 * (r.objective / Js - 1), Jb[end],
-        100 * (Jb[end] / Js - 1), vers[end], vbin[end], holes(hs.str), hs.time)
+        100 * (Jb[end] / Js - 1), vers[end], vbin[end], interior_holes(hs.str), hs.time)
 @printf("elements of a different phase at the end of each run: %d of %d (%.1f %%)\n", count(hs.str .!= ref.str), NX * NY,
         100 * count(hs.str .!= ref.str) / (NX * NY))
 hs.kept === nothing ||
@@ -234,3 +168,12 @@ mkpath(OUTDIR)
 fig = joinpath(OUTDIR, "otomori_levelset88.svg")
 figure(fig, ref, hs)
 println("figure: ", fig)
+
+# the fixed report table (common/report.jl): the Octave reference and HyperShape, compared on J_bin
+case = "cantilever levelset88 80×64"
+rows = [reference_row(case, "levelset88 in Octave 9.1, stop of Otomori (reference)"; J = Js, cells = vec(Float64.(ref.str)),
+                      n = (NX, NY), hcell = (1.0, 1.0), J_bin = Jcheck, V = ref.V[ref.stop], iterations = ref.stop),
+        report_row(case, "RD V1, Ersatz(), :physical, phi_bc = :zero_boundary",
+                   (; result = r, time = hs.time, cells = vec(Float64.(hs.str)), n = (NX, NY), hcell = (1.0, 1.0),
+                      vf = VMAX, jbin = hs.Jbin); grey_cells = hs.χc, ref = Js, basis = :J_bin)]
+write_report("otomori_levelset88", rows; title = "Cantilever of levelset88 (Otomori et al. 2015), 80 × 64", dir = OUTDIR)

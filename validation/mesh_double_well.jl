@@ -5,7 +5,7 @@
 # measured when the default was decided (study of 2026-11-25), volume 0.5 ± 1e-3.
 #
 # julia --project=validation -t 4 validation/mesh_double_well.jl      # about 3 min
-include(joinpath(@__DIR__, "cases.jl"))
+include(joinpath(@__DIR__, "common", "common.jl"))
 
 println("Cantilever 2 × 1 with the double well, κ = 1e-5, T = 25, seed :hex · ", Sys.cpu_info()[1].model, ", ",
         Threads.nthreads(), " threads, Julia ", VERSION, "\n")
@@ -14,10 +14,13 @@ println("|---|---|---|---|---|---|---|---|---|")
 # measured (2026-11-26, Mac M5 Max, Julia 1.13, 4 threads): 2.5582, 2.4933, 2.4255 (study of 2026-11-25, which stopped
 # at the iteration of the settling: 2.5589, 2.4931, 2.4269)
 const MESH_J = Dict(100 => (2.53, 2.59), 200 => (2.47, 2.52), 400 => (2.40, 2.45))
+cantilever_dw(; nx = 40, κ = 1e-5, maxiter = 2)                                     # compile (the times exclude it)
 ok = true
 Js = Float64[]
+rows = []
 for nx in (100, 200, 400)
   c = cantilever_dw(; nx, κ = 1e-5)
+  push!(rows, report_row("cantilever 2×1 double well $(nx)×$(nx ÷ 2)", "RD double well, κ = 1e-5, T = 25, seed :hex", c))
   r = c.result
   J = r.objective
   push!(Js, J)
@@ -28,3 +31,4 @@ for nx in (100, 200, 400)
 end
 @printf("\nspread of J: %.2f %% of the mean\n", 100 * (maximum(Js) - minimum(Js)) / (sum(Js) / length(Js)))
 println(ok ? "all checks passed" : "SOME CHECK FAILED")
+write_report("mesh_double_well", rows; title = "Cantilever 2 × 1 with the double well: mesh independence")

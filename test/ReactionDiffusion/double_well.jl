@@ -11,7 +11,7 @@ using HyperFEM
 using HyperShape
 using HyperShape.Functionals: get_scale
 
-isdefined(@__MODULE__, :bridge) || include(joinpath(@__DIR__, "..", "..", "validation", "cases.jl"))
+isdefined(@__MODULE__, :bridge) || include(joinpath(@__DIR__, "..", "..", "validation", "common", "common.jl"))
 
 # a density cantilever (bounds (0, 1), SIMP through E) with holes from hole_seed (an interface of 2 cells in the seed)
 function dw_cantilever(; nx = 40, ny = 20, frozen = true, simplex = false, radius = 0.1, spacing = 0.4, init = nothing,
