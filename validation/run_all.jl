@@ -1,46 +1,56 @@
 # Runs the validation cases one after another, each in its own Julia process (the threads of this one), and joins
 # their fixed report tables into results/report.csv and results/report.md (with the figures in the same folder).
 #
-#   julia --project=validation -t 4 validation/run_all.jl [case ...]      # all: about 13 min (Mac M5 Max, 4 threads)
+#   julia --project=validation -t 4 validation/run_all.jl [case ...]      # all: about TOTAL_MIN min (Mac M5 Max, 4 threads)
 #
 # The cases are the scripts of this folder (without .jl); with no argument, all of CASES. The output folder is
-# validation/results, or ENV["HYPERSHAPE_RESULTS"]. A case that fails is reported and the others still run.
-include(joinpath(@__DIR__, "common", "report.jl"))
+# validation/results, or ENV["HYPERSHAPE_RESULTS"]. Each case writes its output (stdout and stderr, in order) to
+# results/<case>.log. A case fails when its process exits with an error: an exception, or a check of the case that
+# does not hold (the scripts exit with code 1). The others still run; run_all exits with code 1 if any failed.
+isdefined(@__MODULE__, :write_report) || include(joinpath(@__DIR__, "common", "report.jl"))
 
 const CASES = ["mbb_top88", "mbb_simpl", "cantilever3d", "bridge_takezawa", "mesh_double_well", "otomori_levelset88"]
 
-function run_all(cases = CASES; dir = results_dir())
+"""
+    run_all(cases = CASES; dir = results_dir(), scripts = @__DIR__, project = @__DIR__, known = CASES, io = stdout)
+
+Runs `scripts/<case>.jl` for each case (`--project = project`, the threads of this process) with its output in
+`dir/<case>.log`, and joins the tables `dir/<case>.csv` and `.md` of the cases that succeeded into `dir/report.csv` and
+`dir/report.md`. Returns the cases that failed.
+"""
+function run_all(cases = CASES; dir = results_dir(), scripts = @__DIR__, project = @__DIR__, known = CASES, io = stdout)
+  unknown = setdiff(cases, known)
+  isempty(unknown) || throw(ArgumentError("run_all: unknown case(s) $(join(unknown, ", ")); the cases are $(join(known, ", "))"))
   mkpath(dir)
   julia = Base.julia_cmd()
   failed = String[]
   for case in cases
-    case in CASES || throw(ArgumentError("run_all: unknown case $case; the cases are $(join(CASES, ", "))"))
-    script = joinpath(@__DIR__, case * ".jl")
+    script = joinpath(scripts, case * ".jl")
     log = joinpath(dir, case * ".log")
-    println("== ", case, " (log: ", log, ")")
-    flush(stdout)
-    cmd = `$julia --project=$(@__DIR__) -t $(Threads.nthreads()) $script`
-    t = @elapsed ok = success(pipeline(addenv(cmd, "HYPERSHAPE_RESULTS" => dir); stdout = log, stderr = log))
-    @printf("   %s in %.0f s\n", ok ? "done" : "FAILED", t)
+    println(io, "== ", case, " (log: ", log, ")")
+    flush(io)
+    cmd = addenv(`$julia --project=$project -t $(Threads.nthreads()) $script`, "HYPERSHAPE_RESULTS" => dir)
+    # one stream for stdout and stderr: both in order in the same file
+    t = @elapsed ok = open(f -> success(pipeline(cmd; stdout = f, stderr = f)), log, "w")
+    @printf(io, "   %s in %.0f s\n", ok ? "done" : "FAILED", t)
     ok || push!(failed, case)
   end
-  # join the tables of the cases that ran
-  csvs = [joinpath(dir, c * ".csv") for c in cases if isfile(joinpath(dir, c * ".csv")) && !(c in failed)]
-  open(joinpath(dir, "report.csv"), "w") do io
-    for (k, f) in enumerate(csvs)
-      lines = readlines(f)
-      foreach(l -> println(io, l), k == 1 ? lines : lines[2:end])
+  # join the tables of the cases that succeeded
+  done = [c for c in cases if !(c in failed) && isfile(joinpath(dir, c * ".csv"))]
+  open(joinpath(dir, "report.csv"), "w") do f
+    for (k, c) in enumerate(done)
+      lines = readlines(joinpath(dir, c * ".csv"))
+      foreach(l -> println(f, l), k == 1 ? lines : lines[2:end])
     end
   end
-  open(joinpath(dir, "report.md"), "w") do io
-    println(io, "# Validation report\n\n", machine(), " · commit ", commit(), "\n")
-    for c in cases
-      f = joinpath(dir, c * ".md")
-      (isfile(f) && !(c in failed)) && println(io, read(f, String))
+  open(joinpath(dir, "report.md"), "w") do f
+    println(f, "# Validation report\n\n", machine(), " · commit ", commit(), "\n")
+    for c in done
+      println(f, read(joinpath(dir, c * ".md"), String))
     end
-    isempty(failed) || println(io, "Failed: ", join(failed, ", "), " (see the logs)")
+    isempty(failed) || println(f, "Failed: ", join(failed, ", "), " (see the logs)")
   end
-  println("report: ", joinpath(dir, "report.md"), isempty(failed) ? "" : "; FAILED: " * join(failed, ", "))
+  println(io, "report: ", joinpath(dir, "report.md"), isempty(failed) ? "" : "; FAILED: " * join(failed, ", "))
   failed
 end
 

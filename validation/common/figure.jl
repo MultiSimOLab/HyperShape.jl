@@ -2,7 +2,7 @@
 # objective. Used by otomori_levelset88.jl; the benchmarks use it for every figure with a reference.
 
 """
-    design_figure(path; designs, curves, vlines = [], ylabel, xlabel, note = "", xmax = 200,
+    design_figure(path; designs, curves, vlines = (), ylabel, xlabel, note = "", xmax = 200,
                   xticks = (1, 50, 100, 150, 200), ystep = 50, cell = 4, stack = false, yfrom = 1, legend_top = false)
 
 Writes an SVG with the 0/1 designs of `designs` (pairs `(str, (title1, title2))`, `str[i, j]` true where cell `(i, j)`
@@ -50,6 +50,7 @@ function design_figure(path; designs, curves, vlines = (), ylabel, xlabel, note 
   Jmin = minimum(minimum(y for (x, y) in zip(c.x, c.y) if x >= yfrom) for c in curves)
   Jmax = maximum(maximum(y for (x, y) in zip(c.x, c.y) if x >= yfrom) for c in curves)
   lo, hi = ystep * floor(Jmin / ystep), ystep * ceil(Jmax / ystep)
+  hi == lo && (hi = lo + ystep)                                  # flat curves on a multiple of ystep
   X(it) = x0 + gw * (it - 1) / (xmax - 1)
   Y(J) = y0 + gh * (hi - J) / (hi - lo)
   println(io, """<text x="$x0" y="22">$ylabel</text>""")

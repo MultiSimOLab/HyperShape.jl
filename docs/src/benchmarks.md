@@ -11,7 +11,7 @@ and the rule for comparing methods, and collects the tables of the cases that ex
 
 ```
 julia --project=validation -e 'using Pkg; Pkg.instantiate()'
-julia --project=validation -t 4 validation/run_all.jl                    # every case, about 13 min
+julia --project=validation -t 4 validation/run_all.jl                    # every case, about TOTAL_MIN min
 julia --project=validation -t 4 validation/run_all.jl mbb_top88 bridge_takezawa   # some of them
 ```
 
@@ -19,9 +19,11 @@ julia --project=validation -t 4 validation/run_all.jl mbb_top88 bridge_takezawa 
 in `results/<case>.log` and joins the tables of the cases into `results/report.csv` and `results/report.md`. Each
 script can also be run alone (`julia --project=validation -t 4 validation/<case>.jl`); it prints its own table and
 then writes its rows of the fixed table to `results/<case>.csv` and `results/<case>.md`. The folder is
-`validation/results` (not versioned) or `ENV["HYPERSHAPE_RESULTS"]`. Times are measured after a run on a small mesh
-that compiles the code, with the machine free (one run at a time); the tables carry the machine, the threads, the
-Julia version and the commit.
+`validation/results` (not versioned) or `ENV["HYPERSHAPE_RESULTS"]`. A case fails when its script stops with an
+error or one of its checks does not hold (the script exits with code 1); `run_all.jl` reports it, still runs the
+others and exits with code 1. Times are measured after runs on small meshes that compile every variant of the case,
+with the machine free (one run at a time, load average checked before); the tables carry the machine, the threads,
+the Julia version and the commit (`+dirty` when the tree had changes).
 
 ## The table
 
@@ -34,7 +36,7 @@ with the measures of its design when its design is available, and "–" for what
 | J | the objective of the method on its final design (`result.objective`; the cases use `scale = 1.0`) |
 | J\_bin | the objective of the final design read as 0/1 per cell: solid where the cell mean of the physical field is at least ½, with the same mesh, loads and supports and the material law `E = Emin + (1 − Emin) χ` (plain Gridap, `binary_evaluator`) |
 | ref, vs ref | the reference value of the case and the deviation from it, with the column it is compared with (J or J\_bin) |
-| V | the volume fraction that the constraint sees (`vf · (1 + g)`, from the history of the constraint) |
+| V | the volume fraction that the constraint sees (`vf · (1 + g)`, from the history of the constraint `volume`, a `Volume(…; max_fraction = vf)` with its default scale) |
 | V\_bin | the fraction of solid cells of the 0/1 design |
 | grey | Sigmund's measure of grey of the cell means, mean of `4χ(1 − χ)` (0 for a 0/1 design; with a level set and `Ersatz()` it only sees the cut cells) |
 | perimeter | of the 0/1 design, in domain units: the interior faces between a solid and a void cell times their length (an area in 3D). A staircase measure: comparable between methods on the same mesh; under refinement it tends to the ℓ¹ length of the boundary, not to the Euclidean one |
@@ -42,7 +44,7 @@ with the measures of its design when its design is available, and "–" for what
 | iterations | accepted iterations, with the status and the reason of the stop |
 | solves | solves of the state, of the adjoint and of the filter (forward and transpose), summed over the history; and of the step of reaction–diffusion: not yet in the public history, so "–" (it will come with the counter of the step solves) |
 | time | seconds of `solve!`, without compilation |
-| time / state solve | the time divided by the state solves: the cost of one iteration of the method in units of one state solve on that mesh and machine, all the work of the method included |
+| time ÷ state solves | the time divided by the number of state solves: the cost of the method per state solve on that mesh and machine, with everything else included (filter, the step of reaction–diffusion, monitors such as the binary compliance of levelset88). It is not the time of one solve, and until the step solves are counted it does not compare reaction–diffusion with density methods |
 
 ## Comparing designs
 
@@ -50,12 +52,19 @@ The objective that a method optimises is not comparable between methods: SIMP wi
 a level set with `Ersatz()` has cut cells, a density of reaction–diffusion has a diffuse interface. The common
 measure is `J_bin`, the same problem evaluated with the design read as 0/1 per cell. The tolerances of the bank are:
 
-- **against a port of another code on the same discretisation** (the same mesh, elements and formulation): J within
-  **1 %** (no case today: top88 is run as published, with its convolution filter, and HyperShape uses a Helmholtz
-  filter, so the MBB against top88 follows the rule between methods);
-- **against a published value** obtained with another discretisation or code: J within **5 %**;
+- **against another code with the same discretisation and formulation** (a published value of it or a port): J
+  within **1 %**. Cases: the MBB with the cell mean and OC as top88 against Fig. 4 of Andreassen et al. (2011), the
+  PDE filter (+0.00 %); SiMPL with the sensitivity of the authors' code against their tables 1 and 2 (+0.00 %);
+- **against a published value** obtained with another discretisation or formulation: J within **5 %** (SiMPL with
+  the exact sensitivity and OC: −0.40 % to −0.99 %). The bridge of Takezawa et al. uses 3 %, the tolerance decided for
+  the double well (the default reproduces 23.3 within 2.6 %);
 - **between methods** of HyperShape on the same mesh, and against another code or method run on the same mesh
-  (top88 with its density filter, with `r = rmin/(2√3)` for the Helmholtz filter; levelset88): `J_bin` within **5 %**.
+  (top88.m with its convolution density filter, `ft = 2`, against the Helmholtz filter with `r = rmin/(2√3)`;
+  levelset88): `J_bin` within **5 %**.
+
+Each script checks its own rule and exits with code 1 when it does not hold (the 3D cantilever and the mesh study of
+the double well have no reference value: their checks are consistency, symmetry, convergence and volume, and J in
+the measured intervals).
 
 ## Cases
 

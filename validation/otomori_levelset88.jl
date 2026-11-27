@@ -70,7 +70,7 @@ struct ErsatzVolume{T,M}
 end
 HyperShape.Methods.monitor_value(e::ErsatzVolume) = sum(∫(e.θ.χ)e.dΩ) / (NX * NY)
 
-function run_levelset88(ref)
+function run_levelset88(ref; maxiter = 200)
   model = CartesianDiscreteModel((0, NX, 0, NY), (NX, NY))
   labels = get_face_labeling(model)
   r = round(Int, NY / 32)
@@ -106,7 +106,7 @@ function run_levelset88(ref)
   ids = get_cell_dof_ids(Vφ)
   cells = [ntuple(a -> Int(ids[c][a]), 4) for c in 1:num_cells(Ω)]          # no frozen values: all of them are values of z
   bd = BinaryDesign(z, cells, ref.stop - 1, Vector{Bool}[], Ref(0))
-  tt = @elapsed res = solve!(problem, method; maxiter = 200, verbose = 0, monitors = (vbin = bd, vers = ErsatzVolume(θ, dΩ.domain),
+  tt = @elapsed res = solve!(problem, method; maxiter, verbose = 0, monitors = (vbin = bd, vers = ErsatzVolume(θ, dΩ.domain),
                                                                                        jbin = BinaryCompliance(bd, Jbin)))
   str = reshape(binary(bd), NX, NY)                         # Gridap's Cartesian cells: x first
   kept = isempty(bd.kept) ? nothing : reshape(bd.kept[1], NX, NY)
@@ -136,6 +136,7 @@ end
 ref = octave_reference()
 println("Cantilever of levelset88, 80 × 64, Vmax = 0.5, τ = 2e-4 · ", Sys.cpu_info()[1].model, ", ", Threads.nthreads(),
         " threads, Julia ", VERSION, "\n")
+run_levelset88(ref; maxiter = 2)                          # compile (the time excludes it)
 hs = run_levelset88(ref)
 r = hs.res
 h = r.history
@@ -171,9 +172,16 @@ println("figure: ", fig)
 
 # the fixed report table (common/report.jl): the Octave reference and HyperShape, compared on J_bin
 case = "cantilever levelset88 80×64"
-rows = [reference_row(case, "levelset88 in Octave 9.1, stop of Otomori (reference)"; J = Js, cells = vec(Float64.(ref.str)),
-                      n = (NX, NY), hcell = (1.0, 1.0), J_bin = Jcheck, V = ref.V[ref.stop], iterations = ref.stop),
+# The HyperShape row reads the design as the rest of the bank (cell mean of the physical field of Ersatz() ≥ ½);
+# levelset88's own reading (mean nodal φ > 0), used above for the comparison with Octave, can differ in a few cells.
+rows = [reference_row(case, "levelset88 in Octave 9.1, stop of Otomori (reference; its elements: mean nodal φ > 0)"; J = Js,
+                      cells = vec(Float64.(ref.str)), n = (NX, NY), hcell = (1.0, 1.0), J_bin = Jcheck, V = ref.V[ref.stop],
+                      iterations = ref.stop),
         report_row(case, "RD V1, Ersatz(), :physical, phi_bc = :zero_boundary",
-                   (; result = r, time = hs.time, cells = vec(Float64.(hs.str)), n = (NX, NY), hcell = (1.0, 1.0),
-                      vf = VMAX, jbin = hs.Jbin); grey_cells = hs.χc, ref = Js, basis = :J_bin)]
+                   (; result = r, time = hs.time, cells = hs.χc, n = (NX, NY), hcell = (1.0, 1.0), vf = VMAX,
+                      jbin = hs.Jbin); ref = Js, basis = :J_bin)]
 write_report("otomori_levelset88", rows; title = "Cantilever of levelset88 (Otomori et al. 2015), 80 × 64", dir = OUTDIR)
+# checks: the binary model reproduces Octave's J on its design; HyperShape within 5 % of Octave on the 0/1 design
+# (another method on the same mesh), with either reading of the design; the volume
+finish(abs(Jcheck / Js - 1) <= 1e-9 && abs(Jb[end] / Js - 1) <= 0.05 && abs(rows[2].vs_ref) <= 0.05 &&
+       abs(rows[2].V - VMAX) <= 1e-3, "model of levelset88 to 1e-9; J_bin within 5 % of Octave; volume ± 1e-3")

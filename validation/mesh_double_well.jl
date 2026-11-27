@@ -4,7 +4,7 @@
 # same within about 3 %, the topology is not (it depends on the seed and on the mesh). Checks: J in the intervals
 # measured when the default was decided (study of 2026-11-25), volume 0.5 ± 1e-3.
 #
-# julia --project=validation -t 4 validation/mesh_double_well.jl      # about 3 min
+# julia --project=validation -t 4 validation/mesh_double_well.jl      # exits with code 1 if a check fails
 include(joinpath(@__DIR__, "common", "common.jl"))
 
 println("Cantilever 2 × 1 with the double well, κ = 1e-5, T = 25, seed :hex · ", Sys.cpu_info()[1].model, ", ",
@@ -30,5 +30,5 @@ for nx in (100, 200, 400)
   global ok &= lo <= J <= hi && abs(c.volume - 0.5) <= 1e-3 && r.status === :converged
 end
 @printf("\nspread of J: %.2f %% of the mean\n", 100 * (maximum(Js) - minimum(Js)) / (sum(Js) / length(Js)))
-println(ok ? "all checks passed" : "SOME CHECK FAILED")
 write_report("mesh_double_well", rows; title = "Cantilever 2 × 1 with the double well: mesh independence")
+finish(ok, "J in the measured intervals, volume 0.5 ± 1e-3, converged")
