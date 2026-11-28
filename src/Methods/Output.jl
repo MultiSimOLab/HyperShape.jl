@@ -43,7 +43,7 @@ function _header(p::_Printer, names)
   cont = join(("  " * _pad(string(n), w) for (n, w) in zip(names, p.widths)))
   @sprintf("  %5s  %13s  %9s  %10s  %9s  %9s  %9s  %9s  %9s", "it", "objective", "Δobj", p.multi ? "max viol" : "constraint",
            "kkt", "S", "change", "step", p.multi ? "max |λ|" : "λ") * cont * join(("  " * _pad(string(n), _mwidth(n)) for n in p.monitors)) *
-    @sprintf("  %11s  %8s", p.step ? "f/a/F/s" : "f/a/F", "t[s]")
+    (p.step ? @sprintf("  %13s  %8s", "f/a/F/s", "t[s]") : @sprintf("  %11s  %8s", "f/a/F", "t[s]"))
 end
 
 _rule(p::_Printer) = _styled(p, "  " * "─"^(textwidth(_header(p, ntuple(_ -> "", length(p.widths)))) - 2) * "\n", :light_black)
@@ -180,8 +180,11 @@ function _print_row(p::_Printer, hist::OptHistory)
     v = hist.monitor_values[j, k]
     print(p.io, "  ", _pad(isfinite(v) ? @sprintf("%.4g", v) : "—", _mwidth(n)))
   end
-  @printf(p.io, "  %11s  %8.3f", "$(hist.forward[k])/$(hist.adjoint[k])/$(hist.filter[k])" *
-                                   (p.step ? "/$(hist.step_solves[k])" : ""), dt)
+  if p.step       # wider: 10/10/10/200 fits
+    @printf(p.io, "  %13s  %8.3f", "$(hist.forward[k])/$(hist.adjoint[k])/$(hist.filter[k])/$(hist.step_solves[k])", dt)
+  else
+    @printf(p.io, "  %11s  %8.3f", "$(hist.forward[k])/$(hist.adjoint[k])/$(hist.filter[k])", dt)
+  end
   hist.attempts[k] > 1 && _styled(p, "  ($(hist.attempts[k]) attempts)", :yellow)
   println(p.io)
   nothing

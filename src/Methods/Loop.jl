@@ -190,7 +190,9 @@ filter), counted from `init`; `nothing` (the default) for a step that has none. 
 each iteration in `history.step_solves` (rejected attempts and `shrink!` included) and, when it is not `nothing`, shows
 it in the table (`f/a/F/s`) and in the summary (`step`). [`ReactionDiffusion`](@ref): the solves with its diffusion
 operator (one per step, one per implicit substep of a [`DoubleWell`](@ref), none with `scheme = :explicit`, and the
-unit response of the exact volume when it is solved). A step of the user defines it on its own types:
+unit response `φ̌` of the exact volume when it is solved at a factorisation inside an iteration). What `init` solves
+(the `φ̌` of the start, of a resume and of each rebuild) is in no row: only the summary counts it. A step of the user
+defines it on its own types:
 `HyperShape.step_solves(::MyStep, s::MyState) = s.nsolves`.
 """
 step_solves(::Optimizer, state) = nothing
@@ -370,7 +372,8 @@ limits), `attempts`, `forward`, `adjoint`, `filter` (solves in the iteration), `
 method's own step in the iteration, see [`step_solves`](@ref HyperShape.Methods.step_solves): for [`ReactionDiffusion`](@ref)
 the solves with its diffusion operator, one per step or one per implicit substep of a [`DoubleWell`](@ref); `0` for a
 method that has none, such as [`DensityMethod`](@ref); like `forward`, it includes the rejected attempts of the
-iteration); `constraints`, `violations`,
+iteration; the solves of `init`, at the start, a resume or a rebuild, are only in the summary of `solve!`);
+`constraints`, `violations`,
 `multipliers` and `penalties` (named tuples of vectors, one per constraint of the [`Optimization`](@ref): scaled value
 and violation at the accepted design, multiplier, and penalty of the augmented Lagrangian; the multiplier of a
 constraint the optimiser treats is the one it reports and its penalty is `NaN`, the multiplier of one in the augmented
@@ -432,12 +435,12 @@ Base.show(io::IO, h::OptHistory) =
 
 # row = (iteration, objective, kkt, stationarity, change, step, attempts, forward, adjoint, filter); cons, mults, mons
 # and cont: one value per constraint, constraint, monitor and continued parameter; viols and pens: one per constraint
-# (empty: NaN); step_solves: the solves of the step in the iteration
-function _record!(h::OptHistory, row, cons, mults, mons, cont, viols = (), pens = (), step_solves::Int = 0)
+# (empty: NaN); nstep: the solves of the step in the iteration (history.step_solves)
+function _record!(h::OptHistory, row, cons, mults, mons, cont, viols = (), pens = (), nstep::Int = 0)
   k = h.n += 1
   h.iteration[k], h.objective[k], h.kkt[k], h.stationarity[k], h.change[k], h.step[k], h.attempts[k], h.forward[k],
     h.adjoint[k], h.filter[k] = row
-  h.step_solves[k] = step_solves
+  h.step_solves[k] = nstep
   for (j, v) in enumerate(cons)
     h.constraint_values[j, k] = v
   end
@@ -572,6 +575,9 @@ function _read_history(file, version = _CHECKPOINT_VERSION)
   viols, pens = pre("violation:"), pre("penalty:")
   nbase = length(base)
   conts = [(j, Symbol(header[j])) for j in nbase+1:length(header) if !occursin(':', header[j])]
+  version == 3 && "step_solves" in header &&
+    throw(ArgumentError("load_checkpoint: the checkpoint has format version 3 and its history has a column step_solves " *
+                        "(written by format version 4): the files do not belong together"))
   length(header) >= nbase && Tuple(Symbol.(header[1:nbase])) == base ||
     throw(ArgumentError("load_checkpoint: the history has columns $(join(header[1:min(nbase, length(header))], ", ")); " *
                         "format version $version has $(join(base, ", "))"))
@@ -608,8 +614,7 @@ exception: a run resumed from such a state starts the optimiser again from `init
 `handled` (for each constraint, `:native` or `:lagrangian`), `lagrangian` (`nothing`, or the multipliers, penalties,
 penalty references and number of updates of the augmented Lagrangian, by name), `linear_offsets` (the offset `V`
 of each linear constraint, kept so that a resumed run uses the same bits), `discretization` (the name of the
-discretisation of the run), `events` (its rebuilds so far) and `format` (the format version of the checkpoint it was
-read from, see [`Checkpoint`](@ref); the current one for a state captured by the loop). A rebuild of the problem during `solve!` goes through
+discretisation of the run) and `events` (its rebuilds so far). A rebuild of the problem during `solve!` goes through
 this state, as a resume does. Nothing in it is tied to the mesh except
 the vectors of the design (`z` and those of `memory`).
 """
@@ -632,7 +637,6 @@ struct OptState
   discretization::String
   events::Int
   windows::NamedTuple     # the windows of the stopping criteria: phase, material (vectors) and streak
-  format::Int             # the format version of the checkpoint read (3: history without step_solves)
 end
 
 const _NO_WINDOWS = (phase = Float64[], material = Float64[], streak = 0)
@@ -641,11 +645,6 @@ OptState(iteration, stage, stage_iterations, z, blocks, frozen_cells, continuati
          memory, handled, lagrangian, linear_offsets, discretization, events) =
   OptState(iteration, stage, stage_iterations, z, blocks, frozen_cells, continuation, scales, history, method, optimizer,
            memory, handled, lagrangian, linear_offsets, discretization, events, _NO_WINDOWS)
-# a state of the current format
-OptState(iteration, stage, stage_iterations, z, blocks, frozen_cells, continuation, scales, history, method, optimizer,
-         memory, handled, lagrangian, linear_offsets, discretization, events, windows) =
-  OptState(iteration, stage, stage_iterations, z, blocks, frozen_cells, continuation, scales, history, method, optimizer,
-           memory, handled, lagrangian, linear_offsets, discretization, events, windows, _CHECKPOINT_VERSION)
 
 Base.show(io::IO, s::OptState) =
   print(io, "OptState(iteration ", s.iteration, ", stage ", s.stage, ", ", length(s.z), " variables, ", s.method, ")")
@@ -757,8 +756,10 @@ end
 Reads a checkpoint written by [`Checkpoint`](@ref) into an [`OptState`](@ref); `solve!(…; resume = filepath)` calls
 it. OC (adaptive move limits, correction shift) and SiMPL (latent variable, Barzilai–Borwein memory, multiplier,
 correction shift) save their memory, so a resumed run continues as the uninterrupted one; a checkpoint written after
-a failure does not save the memory. Reads format versions 4 and 3 (a checkpoint of version 3 has no column
-`step_solves` in its history: its rows are read as 0, and a resumed run says so); other versions are refused.
+a failure does not save the memory. Reads format versions 4 and 3; other versions are refused. A checkpoint of
+version 3 has no column `step_solves` in its history: its rows are read as 0 and the run resumed from it says so once;
+the zeros are not marked, so a later checkpoint or a second resume keeps them as 0 without a notice (the sum of the
+column then undercounts the solves of the step of those iterations).
 """
 function load_checkpoint(filepath::AbstractString)
   file = joinpath(filepath, "checkpoint.toml")
@@ -789,7 +790,7 @@ function load_checkpoint(filepath::AbstractString)
   sc = meta["scales"]
   names = Tuple(Symbol.(meta["scale_names"]))
   scales = NamedTuple{names}(Tuple(Float64(sc[String(k)]) for k in names))
-  OptState(Int(meta["iteration"]), Int(meta["stage"]), Int(meta["stage_iterations"]), z, Symbol.(meta["blocks"]),
+  st = OptState(Int(meta["iteration"]), Int(meta["stage"]), Int(meta["stage_iterations"]), z, Symbol.(meta["blocks"]),
            Dict{Symbol,Int}(Symbol(k) => Int(v) for (k, v) in get(meta, "frozen_cells", Dict())),
            Symbol.(meta["continuation"]), scales, _read_history(joinpath(filepath, meta["history_file"]), v),
            get(meta, "method", ""), get(meta, "optimizer", ""), mem,
@@ -800,8 +801,15 @@ function load_checkpoint(filepath::AbstractString)
            _by_name(get(meta, "linear_offsets", Dict())),
            String(get(get(meta, "discretization", Dict()), "kind", "FixedMesh")),
            Int(get(get(meta, "discretization", Dict()), "events", 0)),
-           _read_windows(get(meta, "stop_windows", nothing)), Int(v))
+           _read_windows(get(meta, "stop_windows", nothing)))
+  v == 3 && (_UNRECORDED[st.history] = nothing)
+  st
 end
+
+# the histories read from a checkpoint of format version 3 (their step solves were not recorded): a resume from one of
+# them says so; nothing is stored in the state (a weak reference: the entry goes with the history)
+const _UNRECORDED = WeakKeyDict{OptHistory,Nothing}()
+_unrecorded(st::OptState) = haskey(_UNRECORDED, st.history)
 
 _by_name(d) = Dict{Symbol,Float64}(Symbol(k) => Float64(v) for (k, v) in d)
 _read_windows(::Nothing) = _NO_WINDOWS
@@ -1245,7 +1253,7 @@ function _segment!(problem, method, opt, resume, isfirst, run, hist, ctx, cont_b
                         "(ReactionDiffusion); $(method_label(method)) does not (use the monitor Grey)"))
   end
   pr.step = step_solves(opt, state) !== nothing
-  isfirst && pr.step && resume !== nothing && resume.format == 3 &&
+  isfirst && pr.step && resume !== nothing && _unrecorded(resume) &&
     _print_event(pr, "· checkpoint of format version 3: the step solves of its iterations were not recorded (0 in the " *
                      "history)", :yellow)
   evs = setup_events(opt, state, isfirst)

@@ -431,7 +431,9 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     b = rd_cantilever(; nx = 30, ny = 15)
     rb = solve!(b.problem, rd(); maxiter = 20, stop = nothing, verbose = 0, resume = dir)
     @test get_values(rb.z) == get_values(r20.z) && rb.history.objective == r20.history.objective
-    @test rb.history.step_solves == r20.history.step_solves == ones(Int, 20)     # the resumed history is the whole one
+    # the resumed history has the rows of the checkpoint and the new ones: here the same as the uninterrupted run
+    # (no rejected step before the resume; see step_solves.jl for a resume right after one)
+    @test rb.history.step_solves == r20.history.step_solves == ones(Int, 20)
     @test r20.history.constraints.volume[20] > 0.1          # still going down
     p1, p2 = rd_factories(), rd_factories()
     m = rd()

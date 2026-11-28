@@ -490,9 +490,13 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
   product `K z` and one substitution of the step, no factorisation; the volume costs a few evaluations (vectors for a
   density; the interface map and one integral for a level set). The solves of the step are in `history.step_solves`
   (one per step, one per implicit substep of the double well, none with the explicit scheme, plus the unit response
-  of the exact volume at each factorisation when values are held), in the column `f/a/F/s` and in the summary
-  (`step N`); the line below it adds the factorisations and the evaluations of the volume (through the constraint and
-  by the material meter).
+  `φ̌` of the exact volume at each factorisation inside an iteration when values are held: after a rejected step and
+  at the return to the nominal Δt), in the column `f/a/F/s` and in the summary (`step N`); the line below it adds the
+  factorisations and the evaluations of the volume (through the constraint and by the material meter). The `φ̌` that
+  `init` solves (at the start, at a resume and at each rebuild) is counted only in the summary, so with held values
+  the summary has one more solve per `init` than the sum of the column. A resume or a rebuild right after a rejected
+  step factorises at the nominal Δt in its `init`: the `φ̌` of the return to Δt goes there, and the next row has one
+  solve less than in the uninterrupted run (the work is counted as done; designs and objectives are the same bits).
 - **Coarse meshes with `Step()`:** the default stop is not met on the 20 × 10, 30 × 15 and 40 × 20 cantilevers in 400
   iterations (the material keeps changing by quadrature points, `M_k` of 1e-2 to 4e-2), while `Ersatz()` stops at 56,
   124 and 99 and the density at 35, 51 and 32; at 60 × 30 `Step()` stops at 123 and at 120 × 60 at 65. A run that
