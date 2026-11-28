@@ -1,4 +1,9 @@
-<p align="center"><img src="https://github.com/MultiSimOLab/HyperShape.jl/raw/main/docs/img/logo.png" width="55%"></p>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/MultiSimOLab/HyperShape.jl/raw/main/docs/img/logo-dark.svg">
+    <img alt="HyperShape" src="https://github.com/MultiSimOLab/HyperShape.jl/raw/main/docs/img/logo.svg" width="55%">
+  </picture>
+</p>
 
 [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://multisimolab.github.io/HyperShape.jl/dev/)
 [![Build Status](https://github.com/MultiSimOLab/HyperShape.jl/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MultiSimOLab/HyperShape.jl/actions/workflows/ci.yml?query=branch%3Amain)
