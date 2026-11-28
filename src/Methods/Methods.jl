@@ -27,7 +27,7 @@ import ..Optimizers: objective, gradient!, bounds, num_constraints, constraint_i
 using ..Operators: OptContext, set_context!, StateOperator, num_solves, Parameter
 using Gridap.Algebra: LinearSolver, symbolic_setup, numerical_setup, numerical_setup!
 using ..Variables: PhysicalFields, OptVariables, DesignFields, DesignMeasures, TanhProjection, TanhStage, is_differentiable,
-                   has_ersatz, update_fields!, set_beta!, get_values, get_bounds, set_values!, get_designfields,
+                   has_ersatz, has_interface_map, interface_labels, update_fields!, set_beta!, get_values, get_bounds, set_values!, get_designfields,
                    get_optvariables, filter_operators, IdentityStage, StepStage, ErsatzStage, MaskStage, _fraction,
                    _cell_values
 using ..Functionals: AbstractFunctional, Functional, Constraint, functional_value, functional_gradient!, get_scale, is_volume,

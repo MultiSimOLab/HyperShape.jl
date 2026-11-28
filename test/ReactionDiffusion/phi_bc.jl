@@ -267,9 +267,7 @@ on_box(x, y, (x0, x1, y0, y1)) = abs(x - x0) < 1e-9 || abs(x - x1) < 1e-9 || abs
     xs, ys = free_coords(c.Vφ)
     held = findall(i -> xs[i] > 2 - 1e-9 && abs(ys[i] - 0.5) <= 0.1 + 1e-9, eachindex(xs))
     tr = ZTrack(c.z, Vector{Float64}[])
-    kim = (Δt = 0.1, normalize = L2Norm(), mass = :consistent, volume = nothing,
-           lagrangian = AugmentedLagrangian(Bertsekas(μ0 = 0.2, growth = 1.025, window = 1, progress = Inf, μmax = 2.0)))
-    r = solve!(c.problem, ReactionDiffusion(; τ = 5e-4, kim..., phi_bc = ("load" => 1.0,));
+    r = solve!(c.problem, ReactionDiffusion(; τ = 5e-4, KIM2020..., phi_bc = ("load" => 1.0,));   # validation/common/presets.jl
                maxiter = 20, stop = nothing, verbose = 0, monitors = (zt = tr,))
     @test all(isfinite, r.history.objective) && all(zk -> all(==(1.0), zk[held]), tr.zs)
   end

@@ -29,7 +29,8 @@ that is `λ ← max(0, λ + μ g)` for `g ≤ 0` and `λ ← λ + μ g` for an e
 to `μmax`) every `window` iterations in which the violation is above the tolerance of the augmented Lagrangian and did
 not fall below `progress` times the one of the last check (`window` iterations before; the first check compares with
 the first iteration); `progress = Inf` grows it at every check while the constraint is violated. `growth = 1`
-(default) keeps it fixed (then `progress`, `window` and `μmax` have no effect: giving them is an error), which is what
+(default) keeps it fixed (then `progress` and `window` have no effect: giving them is an error; `μmax` is not used
+and any `μ0` is accepted), which is what
 first-order optimisers such as SiMPL need: a large penalty makes the subproblem ill-conditioned. The scaled
 functionals are of order one, so `μ0 = 1` is the neutral value. `Bertsekas(μ0 = 0.2, growth = 1.025, window = 1,
 progress = Inf, μmax = 2.0)` is the rule of Kim et al. (2020).
@@ -43,7 +44,8 @@ struct Bertsekas <: MultiplierUpdate
   function Bertsekas(; μ0::Real = 1.0, growth::Real = 1.0, progress::Union{Nothing,Real} = nothing,
                      window::Union{Nothing,Integer} = nothing, μmax::Union{Nothing,Real} = nothing)
     if growth == 1
-      given = [string(k) for (k, v) in ((:progress, progress), (:window, window), (:μmax, μmax)) if v !== nothing]
+      # μmax is accepted (as in earlier versions, Bertsekas(μ0 = 200.0, μmax = 300.0)) but neither checked nor used
+      given = [string(k) for (k, v) in ((:progress, progress), (:window, window)) if v !== nothing]
       isempty(given) || throw(ArgumentError("Bertsekas: $(join(given, ", ")) $(length(given) == 1 ? "has" : "have") no " *
                                             "effect with growth = 1 (a fixed penalty): leave $(length(given) == 1 ? "it" : "them") out, or give growth > 1"))
     end
@@ -52,7 +54,7 @@ struct Bertsekas <: MultiplierUpdate
     growth >= 1 || throw(ArgumentError("Bertsekas: growth must be at least 1, got $growth"))
     progress > 0 || throw(ArgumentError("Bertsekas: progress must be positive, got $progress"))
     window >= 1 || throw(ArgumentError("Bertsekas: window must be at least 1, got $window"))
-    μmax >= μ0 || throw(ArgumentError("Bertsekas: μmax must be at least μ0"))
+    growth == 1 || μmax >= μ0 || throw(ArgumentError("Bertsekas: μmax must be at least μ0"))
     new(Float64(μ0), Float64(growth), Float64(progress), Int(window), Float64(μmax))
   end
 end

@@ -637,7 +637,7 @@ end
 _max_step(opt::RDStep, interface) =
   opt.volume.max_step !== :auto ? opt.volume.max_step : opt.reaction !== nothing ? 0.01 : interface ? 0.02 : nothing
 
-_has_interface_map(θ) = θ isa PhysicalFields && (has_ersatz(θ) || !is_differentiable(θ))
+_has_interface_map(θ) = θ isa PhysicalFields && has_interface_map(θ)
 _has_step(θ) = θ isa PhysicalFields && !is_differentiable(θ)
 
 # The material that the Volume constraint reads, cell by cell, from the nodal values of the design (no solve, no
@@ -1560,7 +1560,8 @@ Optional (each one replaceable, shown in the banner):
 - `volume`: [`ExactVolume`](@ref)`(; max_step, tol, maxiter)`, or `nothing` (every constraint to the augmented
   Lagrangian). The constraint the step treats is the one built with `Volume`, or the one named in
   `lagrangian = AugmentedLagrangian(native = (:name,))`; giving `native` with `volume = nothing`, or `native = ()` with
-  `volume = ExactVolume(…)`, is an error.
+  `volume = ExactVolume(…)` written, is an error; `native = ()` with the default `volume` is the same run as
+  `volume = nothing` (deprecated: write `volume = nothing`).
 - `mass`: `:lumped` (default; the response `φ̌` is positive and `G(λ)` monotone on non-obtuse meshes) or `:consistent`.
 - `void_weight`: `w₀` of the sensitivity through an interface map, default `1e-3`; giving it when the sensitivity is
   the exact derivative (a density, `DoubleWell`) is an error (it would have no effect).
@@ -1572,6 +1573,8 @@ Optional (each one replaceable, shown in the banner):
   `mass = :consistent`: its substeps use the lumped mass).
 - `diffusion = (φ, v) -> ∫(…)dΩ`: the bilinear form of the diffusion (default `∫(∇(φ) ⋅ ∇(v))dΩ` with a quadrature of
   degree `degree`), for an anisotropic diffusion or a Robin term.
+- `degree` (default 2): the degree of the quadrature of the design domain, for the default diffusion and also for the
+  measure `|D|`, the lumped mass and the consistent mass (so it acts with a `diffusion` of the user too).
 - `lagrangian`: the [`AugmentedLagrangian`](@ref HyperShape.Optimizers.AugmentedLagrangian) of the constraints the
   step does not treat (everything but the volume).
 - `reaction`: `nothing` (default: the linear reaction `−C g − λ` above) or [`DoubleWell`](@ref)`(…)`, the double-well
@@ -1602,7 +1605,8 @@ AugmentedLagrangian(Bertsekas(μ0 = 0.2, growth = 1.025, window = 1, progress = 
 Nishiwaki and Kitamura (2010, the double well: `reaction = DoubleWell(W = 0.25, η = 20, scheme = :explicit,
 substeps = 20, settle = false)`, the normalisation `1/‖g‖_L²` without `|D|` and `volume = ExactVolume(max_step = 0.01)`)
 as named tuples, `ReactionDiffusion(; τ, KIM2020...)`. The positional presets of earlier versions,
-`ReactionDiffusion(:kim2020; τ)` and `(:takezawa2010; τ)`, still work with a deprecation warning.
+`ReactionDiffusion(:kim2020; τ)` and `(:takezawa2010; τ)`, still work with a deprecation warning. Julia shows
+deprecation warnings only with `julia --depwarn=yes` (off by default; on in `Pkg.test()`).
 
 Per iteration: one forward solve, one adjoint (none with `SelfAdjoint()`), one assembly of the sensitivity, one
 product `K z` and one solve of the step (no factorisation); the volume costs a few evaluations of the constraint per
@@ -1735,10 +1739,17 @@ function _reaction_diffusion(preset; kwargs...)
     throw(ArgumentError("ReactionDiffusion: volume = nothing gives every constraint to the augmented Lagrangian, and " *
                         "lagrangian = AugmentedLagrangian(…; native = $(repr(lag.native))) asks the step to treat one: " *
                         "leave native out with volume = nothing, or keep the default volume = ExactVolume()"))
-  vol isa ExactVolume && sources[:volume] === :given && lag.native === () &&
-    throw(ArgumentError("ReactionDiffusion: volume = ExactVolume(…) and lagrangian = AugmentedLagrangian(…; native = ()) " *
-                        "contradict each other (the step treats the volume / no constraint is native): for every " *
-                        "constraint in the augmented Lagrangian give volume = nothing (and no native)"))
+  # (a native = () that comes from the deprecated preset :kim2020 is not given: a volume given replaces the preset's
+  # volume = nothing and the run is the one of earlier versions, every constraint in the augmented Lagrangian)
+  if vol isa ExactVolume && lag.native === () && sources[:lagrangian] === :given
+    sources[:volume] === :given &&
+      throw(ArgumentError("ReactionDiffusion: volume = ExactVolume(…) and lagrangian = AugmentedLagrangian(…; native = ()) " *
+                          "contradict each other (the step treats the volume / no constraint is native): for every " *
+                          "constraint in the augmented Lagrangian give volume = nothing (and no native)"))
+    Base.depwarn("ReactionDiffusion: lagrangian = AugmentedLagrangian(…; native = ()) with the default volume is " *
+                 "deprecated: write volume = nothing (every constraint in the augmented Lagrangian; the same run) and " *
+                 "leave native out", :ReactionDiffusion)
+  end
   vol isa ExactVolume && vol.constraint !== nothing && lag.native !== :auto && lag.native != (vol.constraint,) &&
     throw(ArgumentError("ReactionDiffusion: ExactVolume(; constraint = $(repr(vol.constraint))) and lagrangian = " *
                         "AugmentedLagrangian(…; native = $(repr(lag.native))) name different constraints for the step: " *
@@ -1768,9 +1779,13 @@ Base.show(io::IO, m::ReactionDiffusion) = print(io, method_label(m), m.step.κgi
 # density, with filters and projections). Returns the mode and why, for the banner.
 function _deduced_sensitivity(opt::RDStep, Fs)
   opt.reaction === nothing || return (:design, "DoubleWell")
-  any(F -> _has_step(physical_fields(F)), Fs) && return (:physical, "Step() in the chain")
-  any(F -> _has_interface_map(physical_fields(F)), Fs) && return (:physical, "Ersatz() in the chain")
-  (:design, "density field")
+  labels = String[]
+  for F in Fs
+    θ = physical_fields(F)
+    _has_interface_map(θ) && append!(labels, interface_labels(θ))
+  end
+  isempty(labels) && return (:design, "density field")
+  (:physical, join(sort!(unique!(labels); rev = true), ", ") * " in the chain")
 end
 # the functionals the step differentiates: the objective and the constraints that are not native
 _differentiated(problem, native) =
@@ -1821,7 +1836,7 @@ function check_problem(m::ReactionDiffusion, problem)
         throw(ArgumentError("ReactionDiffusion: $who reads a field through Step(), which has no derivative with respect " *
                             "to the design: leave sensitivity out (it is then :physical), or use Ersatz()"))
       # decision of Jesús (2026-11-25): :design with an interface map and without the double well is not a method
-      θ isa PhysicalFields && has_ersatz(θ) &&
+      _has_interface_map(θ) &&
         throw(ArgumentError("ReactionDiffusion: sensitivity = :design with an interface map is not a method of " *
                             "ReactionDiffusion: the exact derivative lives on the cut cells and nothing holds the plateaus. " *
                             "To move only the boundary from a start with holes use a density field (bounds = (0.0, 1.0), " *
@@ -1940,7 +1955,8 @@ function banner_lines(m::ReactionDiffusion, problem)
   else
     native = _native_split(problem, opt, m.lagrangian)
     if isempty(native)
-      push!(lines, ("volume: no constraint g ≤ 0 without a state to treat natively", :normal))
+      push!(lines, ("volume: not treated by the step (native = ()$(src[:lagrangian] === :preset ? " ($(repr(m.preset)))" : "")): " *
+                    "every constraint goes to the augmented Lagrangian", :normal))
     else
       n = keys(problem.constraints)[native[1]]
       F = problem.constraints[native[1]].F

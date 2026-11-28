@@ -356,7 +356,7 @@ function check_problem(::DensityMethod, problem)
   # the step reads the derivative with respect to z, through the maps x → θ
   for (n, F) in pairs((objective = problem.objective, map(c -> c.F, problem.constraints)...))
     θ = physical_fields(F)
-    θ isa PhysicalFields && (!is_differentiable(θ) || has_ersatz(θ)) &&
+    θ isa PhysicalFields && (!is_differentiable(θ) || has_interface_map(θ)) &&
       throw(ArgumentError("DensityMethod: the $(n === :objective ? "objective" : "constraint $n") reads a physical field " *
                           "through an interface map (Step(), Ersatz()); interface maps are for interface methods " *
                           "(reaction–diffusion), a density method interpolates the density itself (SIMP, RAMP)"))

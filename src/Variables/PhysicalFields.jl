@@ -169,7 +169,7 @@ end
 # The derivative of the ersatz material is large in the void (weak material, large strains) and would refill it; the
 # weight keeps the sensitivity of the material where the material is. Every other stage keeps its derivative.
 _physical(s, ctx) = false
-_physical(s::Union{StepStage,ErsatzStage}, ctx::OptContext) = ctx.sensitivity === :physical
+_physical(s, ctx::OptContext) = is_interface_map(s) && ctx.sensitivity === :physical
 function _physical_pullback(s, L, ctx::OptContext)
   χ = output(s)
   w0 = ctx.void_weight
@@ -320,8 +320,13 @@ function is_differentiable_field(θ::PhysicalFields, name::Symbol)
 end
 is_differentiable(θ::PhysicalFields) = all(n -> is_differentiable_field(θ, n), getfield(θ, :names))
 
-# whether a chain of θ has an Ersatz stage (refused by DensityMethod; the messages of check_consistency)
+# whether a chain of θ has an Ersatz stage (the messages of check_consistency)
 has_ersatz(θ::PhysicalFields) = any(c -> any(s -> s isa ErsatzStage, c), getfield(θ, :chains))
+
+# whether a chain of θ has an interface map (see `is_interface_map`), and their labels
+has_interface_map(θ::PhysicalFields) = any(c -> any(is_interface_map, c), getfield(θ, :chains))
+interface_labels(θ::PhysicalFields) =
+  unique!([interface_label(s) for c in getfield(θ, :chains) for s in c if is_interface_map(s)])
 
 """
     DesignMeasures

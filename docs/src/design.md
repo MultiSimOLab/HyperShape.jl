@@ -425,8 +425,9 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
   `LUSolver()` by default, shown in the banner); `solve = (A, b, x, ctx, stale) -> x` replaces it (PETSc, an iterative
   solver). The operator is factorised again only when `Δt` or `τ` change (a `Parameter` of a `Continuation`, a
   rejected step). Frozen zones of the design space stay as they are (Neumann conditions for φ elsewhere).
-- **Volume** (`ExactVolume(; max_step, tol, maxiter, constraint)`, the default): the constraint built with `Volume`,
-  wherever it is in the problem (with none or several, `solve!` asks for `ExactVolume(; constraint = :name)`); the
+- **Volume** (`ExactVolume(; max_step, tol, maxiter)`, the default): the constraint built with `Volume`,
+  wherever it is in the problem (with none or several, `solve!` asks to name it with
+  `lagrangian = AugmentedLagrangian(native = (:name,))`); the
   multiplier `λ` is the root of
   `G(λ) = g(clamp(φ* − λ φ̌)) − g_k` with `φ̌ = A⁻¹ m` (`Δt` everywhere when no value is frozen): Newton on the
   clipped vector for a linear constraint (vectors only), Newton with the derivative of the constraint for `Ersatz()`,
@@ -499,7 +500,9 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
   goes to the augmented Lagrangian (no `native` to write); otherwise the step treats the constraint built with
   `Volume`, or the one named with `lagrangian = AugmentedLagrangian(native = (:name,))`, its only name (giving both
   `volume = nothing` and a `native`, or two different names, is an error). The positional presets
-  `ReactionDiffusion(:kim2020; …)` and `(:takezawa2010; …)` of earlier versions are deprecated.
+  `ReactionDiffusion(:kim2020; …)` and `(:takezawa2010; …)` of earlier versions are deprecated. Deprecated forms
+  (these presets, `sensitivity`, `ExactVolume(constraint)`, `native = ()` with the default volume) still run, with a
+  warning that Julia shows only with `julia --depwarn=yes` (off by default; on in `Pkg.test()`).
 - **Per iteration:** one forward solve, one adjoint (none with `SelfAdjoint()`), one assembly of the sensitivity, one
   product `K z` and one substitution of the step, no factorisation; the volume costs a few evaluations (vectors for a
   density; the interface map and one integral for a level set). The solves of the step are in `history.step_solves`

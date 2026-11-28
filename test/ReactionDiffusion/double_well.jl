@@ -387,6 +387,7 @@ end
     rp = solve!(dw_cantilever(; nx = 20, ny = 10).problem, m; maxiter = 4, stop = nothing, verbose = 0)
     rt = solve!(dw_cantilever(; nx = 20, ny = 10).problem, mt; maxiter = 4, stop = nothing, verbose = 0)
     @test rp.history.objective == rt.history.objective && get_values(rp.z) == get_values(rt.z)
+    @test m.step.sensitivity[] === :design && mt.step.sensitivity[] === :design      # deduced: the exact derivative
     m2 = @test_deprecated ReactionDiffusion(:takezawa2010; τ = 5e-6, reaction = DoubleWell())
     @test m2.step.reaction.scheme === :implicit && m2.sources[:reaction] === :given && m2.sources[:normalize] === :preset
     c = dw_cantilever(; nx = 20, ny = 10)

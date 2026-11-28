@@ -492,7 +492,10 @@ same_history(a, b) = all(isequal(getproperty(a, c), getproperty(b, c)) for c in 
     # keywords without effect (A5): an error at construction
     @test_throws r"move_min has no effect with adapt = nothing" OC(adapt = nothing, move_min = 0.01)
     @test OC(adapt = nothing).move_min == 1e-3 && OC(move_min = 0.01).move_min == 0.01
-    @test_throws r"progress, window, μmax have no effect with growth = 1" Bertsekas(progress = 0.5, window = 3, μmax = 10.0)
+    @test_throws r"progress, window have no effect with growth = 1" Bertsekas(progress = 0.5, window = 3, μmax = 10.0)
+    # a fixed penalty above 100: μmax is not used with growth = 1 (accepted, not checked against μ0, as on main)
+    @test Bertsekas(μ0 = 200.0, μmax = 300.0).μ0 == 200.0 && Bertsekas(μ0 = 200.0).μ0 == 200.0
+    @test_throws r"μmax must be at least μ0" Bertsekas(μ0 = 200.0, growth = 1.5)
     @test_throws r"window has no effect with growth = 1" Bertsekas(window = 3)
     @test Bertsekas(growth = 1.5, window = 3).window == 3 && Bertsekas().window == 50
     @test_throws r"window only acts together with objective_range" StopCriteria(window = 20, change_tol = 1e-2)
