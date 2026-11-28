@@ -37,8 +37,8 @@ post-processing. Read-only for the user; HyperShape updates it. Fields:
   optimiser; with SiMPL the design that is finally accepted is first solved in this phase).
 - `continuation`: named tuple with the current values of the continued parameters, for example `(β = 4.0,)`.
 - `sensitivity`: `:design` (the derivative with respect to the design, through every map) or `:physical` (set by
-  [`ReactionDiffusion`](@ref HyperShape.Methods.ReactionDiffusion)`(…; sensitivity = :physical)` while it computes the
-  sensitivity of its step: the reverse sweep takes an interface map, `Step()` or `Ersatz()`, as the identity weighted
+  [`ReactionDiffusion`](@ref HyperShape.Methods.ReactionDiffusion) while it computes the sensitivity of its step, when
+  the design chain has an interface map: the reverse sweep takes an interface map, `Step()` or `Ersatz()`, as the identity weighted
   by the material, `δ ↦ (w₀ + (1 − w₀) χ) δ`); `:design` everywhere else, also in
   [`check_consistency`](@ref HyperShape.Checks.check_consistency).
 - `void_weight`: the weight `w₀` of the void in the `:physical` sensitivity.

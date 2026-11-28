@@ -94,7 +94,7 @@ function rd_factories(; nx = 30, ny = 15)
   Optimization(model; design_setup, physics_setup)
 end
 
-rd(; kw...) = ReactionDiffusion(; τ = 2e-4, sensitivity = :physical, kw...)
+rd(; kw...) = ReactionDiffusion(; τ = 2e-4, kw...)
 
 # the default tolerance of ExactVolume, 1e-4 |D|, in the scaled units of the volume of the cantilever (|D| = 2, V_max = 1)
 const VT = 2e-4
@@ -313,12 +313,13 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     @test calls[] == 3 && get_values(r.z) == get_values(r2.z)
   end
 
-  @testset "8. sensitivity = :physical: the derivative weighted by the material ($(iface))" for iface in (Ersatz(), Step())
+  @testset "8. the sensitivity with an interface map (:physical): the derivative weighted by the material ($(iface))" for iface in (Ersatz(), Step())
     φ0 = x -> 0.3 - hypot(x[1] - 1.0, x[2] - 0.5) + 0.2       # a hole: an interface in the design
     c = rd_cantilever(; nx = 20, ny = 10, frozen = false, interface = iface, init = x -> clamp(φ0(x), -1.0, 1.0))
     w0 = 0.01
     m = rd(; void_weight = w0)
     fo, z, s = rd_start(c, m)
+    @test m.step.sensitivity[] === :physical                # deduced from the chain (an interface map)
     OPT.objective(fo, z)
     RDM._rd_gradient!(s.g, m.step, s, fo, z)
     @test c.problem.ctx.sensitivity === :design            # back to :design after the step's sweep
@@ -328,7 +329,8 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
             get_scale(c.C)
     @test s.g ≈ ghand rtol = 1e-10
     if iface isa Ersatz
-      md = ReactionDiffusion(; τ = 2e-4, sensitivity = :design)
+      md = ReactionDiffusion(; τ = 2e-4)
+      md.step.sensitivity[] = :design         # the exact derivative (internal: not a method with an interface map)
       # (an oracle of its own: the snapshot of fo holds the gradient of the step, the :physical one)
       g1 = RDM._rd_gradient!(similar(z), md.step, s, RDM.build_oracle(md, c.problem), z)
       # the exact derivative through Ersatz() lives on the nodes of the cut cells; the :physical one everywhere
@@ -344,14 +346,15 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     end
   end
 
-  @testset "8b. without an interface map both sensitivities are the same bit for bit" begin
-    gs = map((:physical, :design)) do sens
-      c = rd_cantilever(; nx = 20, ny = 10, design = :density)
-      m = ReactionDiffusion(; τ = 2e-4, sensitivity = sens)
-      r = solve!(c.problem, m; maxiter = 5, stop = nothing, verbose = 0)
-      copy(get_values(r.z))
-    end
-    @test gs[1] == gs[2]
+  @testset "8b. without an interface map: the deduced (exact) sensitivity and the deprecated keyword of either value, bit for bit" begin
+    runz(m) = (c = rd_cantilever(; nx = 20, ny = 10, design = :density);
+               copy(get_values(solve!(c.problem, m; maxiter = 5, stop = nothing, verbose = 0).z)))
+    m0 = ReactionDiffusion(; τ = 2e-4)
+    g0 = runz(m0)
+    @test m0.step.sensitivity[] === :design                    # deduced: a density field
+    g1 = runz(@test_deprecated ReactionDiffusion(; τ = 2e-4, sensitivity = :physical))
+    g2 = runz(@test_deprecated ReactionDiffusion(; τ = 2e-4, sensitivity = :design))
+    @test g0 == g1 == g2
   end
 
   @testset "9. the cantilever 60×30: holes, bounds, frozen zone, volume, better than uniform" begin
@@ -451,13 +454,22 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     @test isnan(r.history.penalties.volume[end]) && r.history.penalties.left[end] == 1.0
   end
 
-  @testset "14. preset :kim2020" begin
-    m = ReactionDiffusion(:kim2020; τ = 5e-4, sensitivity = :physical)
+  @testset "14. the deprecated preset :kim2020 and its keywords" begin
+    m = @test_deprecated ReactionDiffusion(:kim2020; τ = 5e-4)
     @test m.step.Δt == 0.1 && m.step.normalize isa L2Norm && m.step.mass === :consistent && m.step.volume === nothing
     u = m.lagrangian.update
     @test m.lagrangian.native === () && (u.μ0, u.growth, u.window, u.progress, u.μmax) == (0.2, 1.025, 1, Inf, 2.0)
     @test RDM.method_label(m) == "ReactionDiffusion(:kim2020)"
-    m2 = ReactionDiffusion(:kim2020; τ = 5e-4, sensitivity = :physical, mass = :lumped)
+    # the same run with its keywords written out (no native = (): implied by volume = nothing), bit for bit
+    kim = (Δt = 0.1, normalize = L2Norm(), mass = :consistent, volume = nothing,
+           lagrangian = AugmentedLagrangian(Bertsekas(μ0 = 0.2, growth = 1.025, window = 1, progress = Inf, μmax = 2.0)))
+    mk = ReactionDiffusion(; τ = 5e-4, kim...)
+    @test mk.lagrangian.native === :auto
+    rp = solve!(rd_cantilever(; nx = 20, ny = 10, design = :density).problem, m; maxiter = 6, stop = nothing, verbose = 0)
+    rk = solve!(rd_cantilever(; nx = 20, ny = 10, design = :density).problem, mk; maxiter = 6, stop = nothing, verbose = 0)
+    @test rp.history.objective == rk.history.objective && get_values(rp.z) == get_values(rk.z)
+    @test rp.history.multipliers.volume == rk.history.multipliers.volume
+    m2 = @test_deprecated ReactionDiffusion(:kim2020; τ = 5e-4, mass = :lumped)
     @test m2.step.mass === :lumped && m2.sources[:mass] === :given && m2.sources[:normalize] === :preset
     c = rd_cantilever(; nx = 20, ny = 10, design = :density)
     io = IOBuffer()
@@ -469,12 +481,31 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
   end
 
   @testset "15. errors" begin
-    @test_throws r"τ is mandatory" ReactionDiffusion(; sensitivity = :physical)
-    @test_throws r"sensitivity is mandatory" ReactionDiffusion(; τ = 1e-4)
+    @test_throws r"τ is mandatory" ReactionDiffusion()
+    @test ReactionDiffusion(; τ = 1e-4).sensitivity === nothing          # not mandatory any more: deduced
     @test_throws r"sensitivity must be" ReactionDiffusion(; τ = 1e-4, sensitivity = :exact)
-    @test_throws r"unknown preset :otomori2015; the presets are :kim2020" ReactionDiffusion(:otomori2015; τ = 1e-4, sensitivity = :physical)
-    @test_throws r"native = \(\)" ReactionDiffusion(; τ = 1e-4, sensitivity = :physical, volume = nothing)
-    @test_throws r"unknown keyword phi_bcs" ReactionDiffusion(; τ = 1e-4, sensitivity = :physical, phi_bcs = :neumann)
+    @test_throws r"unknown preset :otomori2015; the presets are :kim2020" ReactionDiffusion(:otomori2015; τ = 1e-4)
+    # volume = nothing implies native = () (it used to have to be repeated); a native with it is an error
+    @test ReactionDiffusion(; τ = 1e-4, volume = nothing).lagrangian.native === :auto
+    @test ReactionDiffusion(; τ = 1e-4, volume = nothing, lagrangian = AugmentedLagrangian(; native = ())) isa ReactionDiffusion
+    @test_throws r"volume = nothing gives every constraint.*native = \(:volume,\)" ReactionDiffusion(; τ = 1e-4, volume = nothing,
+      lagrangian = AugmentedLagrangian(; native = (:volume,)))
+    @test_throws r"contradict each other" ReactionDiffusion(; τ = 1e-4, volume = ExactVolume(max_step = 0.01),
+      lagrangian = AugmentedLagrangian(; native = ()))
+    ev = @test_deprecated ExactVolume(constraint = :a)
+    @test_throws r"name different constraints" ReactionDiffusion(; τ = 1e-4, volume = ev, lagrangian = AugmentedLagrangian(; native = (:b,)))
+    @test ReactionDiffusion(; τ = 1e-4, volume = ev, lagrangian = AugmentedLagrangian(; native = (:a,))) isa ReactionDiffusion
+    @test_throws r"unknown keyword phi_bcs" ReactionDiffusion(; τ = 1e-4, phi_bcs = :neumann)
+    # keywords without effect (A5): ls with solve; ls, solve or mass = :consistent with the explicit well
+    @test_throws r"give ls .* or solve .*, not both" rd(; ls = LUSolver(), solve = (A, b, x, ctx, stale) -> x)
+    for kw in ((; ls = LUSolver()), (; solve = (A, b, x, ctx, stale) -> x), (; mass = :consistent))
+      @test_throws r"has no effect with DoubleWell\(scheme = :explicit\)" ReactionDiffusion(; τ = 1e-4,
+        reaction = DoubleWell(scheme = :explicit), kw...)
+    end
+    @test ReactionDiffusion(; τ = 1e-4, reaction = DoubleWell(), mass = :consistent, ls = LUSolver()) isa ReactionDiffusion
+    @test_throws r"void_weight has no effect with DoubleWell" ReactionDiffusion(; τ = 1e-4, reaction = DoubleWell(), void_weight = 1e-2)
+    cd = rd_cantilever(; nx = 10, ny = 5, design = :density)
+    @test_throws r"void_weight has no effect here.*density field" solve!(cd.problem, rd(; void_weight = 1e-2); maxiter = 1, verbose = 0)
     @test_throws r"mass must be" rd(; mass = :diagonal)
     @test_throws r"Δt must be" rd(; Δt = 0.0)
     # P0, infinite bounds, Step() and Ersatz() with :design
@@ -483,11 +514,18 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     c = rd_cantilever(; nx = 10, ny = 5, design = :density, bounds = (0.0, Inf))
     @test_throws r"bounds of z must be finite" solve!(c.problem, rd(); maxiter = 1, verbose = 0)
     c = rd_cantilever(; nx = 10, ny = 5, interface = Step())
-    @test_throws r"Step\(\), which has no derivative" solve!(c.problem, ReactionDiffusion(; τ = 1e-4, sensitivity = :design); maxiter = 1, verbose = 0)
+    # the deprecated keyword: a value that contradicts the deduced one keeps the errors of before
+    md = @test_deprecated ReactionDiffusion(; τ = 1e-4, sensitivity = :design)
+    @test_throws r"Step\(\), which has no derivative" solve!(c.problem, md; maxiter = 1, verbose = 0)
     c = rd_cantilever(; nx = 10, ny = 5)
     # :design with Ersatz() and no reaction is not a method (decision of Jesús, 2026-11-25; it used to throw only
     # without an interface, "starting design has none")
-    @test_throws r"sensitivity = :design with an interface map is not a method" solve!(c.problem, ReactionDiffusion(; τ = 1e-4, sensitivity = :design); maxiter = 1, verbose = 0)
+    @test_throws r"sensitivity = :design with an interface map is not a method" solve!(c.problem, md; maxiter = 1, verbose = 0)
+    # the same keyword that agrees with the chain runs as without it (bit for bit)
+    mp = @test_deprecated ReactionDiffusion(; τ = 1e-4, sensitivity = :physical)
+    ra = solve!(rd_cantilever(; nx = 10, ny = 5).problem, mp; maxiter = 3, stop = nothing, verbose = 0)
+    rb = solve!(rd_cantilever(; nx = 10, ny = 5).problem, ReactionDiffusion(; τ = 1e-4); maxiter = 3, stop = nothing, verbose = 0)
+    @test ra.history.objective == rb.history.objective && get_values(ra.z) == get_values(rb.z)
     # two blocks
     model = CartesianDiscreteModel((0, 1, 0, 1), (4, 4))
     V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
@@ -587,14 +625,14 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     # τ and Δt continued (Parameter): one factorisation more at the jump
     pτ, pΔt = Parameter(2e-4), Parameter(0.1)
     c = rd_cantilever(; nx = 20, ny = 10)
-    r = solve!(c.problem, ReactionDiffusion(; τ = pτ, Δt = pΔt, sensitivity = :physical); maxiter = 6, stop = nothing, verbose = 0,
+    r = solve!(c.problem, ReactionDiffusion(; τ = pτ, Δt = pΔt); maxiter = 6, stop = nothing, verbose = 0,
                continuation = Continuation(τ = pτ => [2e-4, 1e-3], Δt = pΔt => [0.1, 0.05]; every = 3))
     @test r.state.nfactor == 2 && r.state.τ == 1e-3 && r.history.step == [0.1, 0.1, 0.1, 0.05, 0.05, 0.05]
     # sensitivity = :design with Ersatz() from a design with a hole: not a method any more (decision of Jesús,
     # 2026-11-25; it ran 8 iterations here before the PR double-well): the message points to DoubleWell
     φ0 = x -> clamp(0.3 - hypot(x[1] - 1.0, x[2] - 0.5) + 0.2, -1.0, 1.0)
     c = rd_cantilever(; nx = 20, ny = 10, init = φ0)
-    @test_throws r"reaction = DoubleWell\(…\) and hole_seed" solve!(c.problem, ReactionDiffusion(; τ = 2e-4, sensitivity = :design);
+    @test_throws r"reaction = DoubleWell\(…\) and hole_seed" solve!(c.problem, (@test_deprecated ReactionDiffusion(; τ = 2e-4, sensitivity = :design));
                                                                     maxiter = 8, stop = nothing, verbose = 0)
     # consistent mass with a frozen zone
     c = rd_cantilever(; nx = 20, ny = 10)
@@ -678,14 +716,20 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
                stop = nothing, verbose = 0)
     @test isnan(r.history.penalties.volume[1]) && r.history.penalties.left[1] == 1.0
     c = rd_cantilever(; nx = 20, ny = 10, left_cap = 0.2)
-    r = solve!(c.problem, rd(; volume = ExactVolume(; constraint = :left)); maxiter = 2, stop = nothing, verbose = 0)
+    io = IOBuffer()
+    r = solve!(c.problem, rd(; lagrangian = AugmentedLagrangian(native = (:left,))); maxiter = 2, stop = nothing, verbose = 1, io)
     @test isnan(r.history.penalties.left[1]) && r.history.penalties.volume[1] == 1.0
+    @test occursin("left: native (named)", String(take!(io)))
+    # the deprecated ExactVolume(constraint): the same run
+    c2 = rd_cantilever(; nx = 20, ny = 10, left_cap = 0.2)
+    r2 = solve!(c2.problem, rd(; volume = (@test_deprecated ExactVolume(; constraint = :left))); maxiter = 2, stop = nothing, verbose = 0)
+    @test r2.history.objective == r.history.objective && get_values(r2.z) == get_values(r.z)
     c = rd_cantilever(; nx = 10, ny = 5)
     V2 = Volume(c.θ, c.dΩ; max_fraction = 0.6)
     @test_throws r"2 constraints built with Volume" solve!(Optimization(c.z; objective = c.C, constraints = (volume = c.Vol, v2 = V2)),
                                                           rd(); maxiter = 1, verbose = 0)
     @test_throws r"has none" solve!(Optimization(c.z; objective = c.C), rd(); maxiter = 1, verbose = 0)
-    @test_throws r"is not a constraint of the problem" solve!(c.problem, rd(; volume = ExactVolume(; constraint = :foo)); maxiter = 1,
+    @test_throws r"is not a constraint of the problem" solve!(c.problem, rd(; lagrangian = AugmentedLagrangian(native = (:foo,))); maxiter = 1,
                                                              verbose = 0)
   end
 
@@ -741,10 +785,10 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     # no meter either: a named constraint without any Volume, no constraint at all, a Volume through a projection
     c = rd_cantilever(; nx = 20, ny = 10, left_cap = 0.2)
     r = solve!(Optimization(c.z; objective = c.C, constraints = (left = c.problem.constraints.left,)),
-               rd(; volume = ExactVolume(; constraint = :left)); maxiter = 5, verbose = 0)
+               rd(; lagrangian = AugmentedLagrangian(native = (:left,))); maxiter = 5, verbose = 0)
     @test r.iterations == 5 && r.state.meter === nothing
     c = rd_cantilever(; nx = 20, ny = 10, design = :density)
-    r = solve!(Optimization(c.z; objective = c.C), rd(; volume = nothing, lagrangian = AugmentedLagrangian(; native = ()));
+    r = solve!(Optimization(c.z; objective = c.C), rd(; volume = nothing);
                maxiter = 3, verbose = 0)
     @test r.iterations == 3
     c = rd_cantilever(; nx = 20, ny = 10, design = :density)
@@ -806,7 +850,7 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     io = IOBuffer()
     solve!(c.problem, rd(); maxiter = 2, verbose = 1, io)
     s = String(take!(io))
-    @test occursin("method: sensitivity = :physical (void weight 0.001 (default)) · Δt = 0.2 (default: interface map)", s)
+    @test occursin("method: sensitivity: physical (Step() in the chain, void weight 0.001 (default)) · Δt = 0.2 (default: interface map)", s)
     @test occursin("lumped mass (default)", s) && occursin("LUSolver (default)", s) && occursin("L1Mean(1) (default)", s)
     @test occursin("volume: native (the Volume), exact multiplier (Illinois, tol 1e-04 |D|), target lowered 2 % of |D| per iteration (default)", s)
     @test !occursin("Step() the change criterion", s) && !occursin("recommended", s)
@@ -818,7 +862,12 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     cd = rd_cantilever(; nx = 20, ny = 10, design = :density)
     io = IOBuffer()
     solve!(cd.problem, rd(); maxiter = 1, verbose = 1, io)
-    @test occursin("Δt = 0.4 (default: no interface map)", String(take!(io)))
+    s = String(take!(io))
+    @test occursin("Δt = 0.4 (default: no interface map)", s) && occursin("method: sensitivity: exact (density field) ·", s)
+    ce = rd_cantilever(; nx = 20, ny = 10)
+    io = IOBuffer()
+    solve!(ce.problem, rd(; void_weight = 1e-2); maxiter = 1, verbose = 1, io)
+    @test occursin("method: sensitivity: physical (Ersatz() in the chain, void weight 0.01) ·", String(take!(io)))
   end
 
   @testset "22. a start with holes (hole_seed): :physical converges; :design without interface points to it" begin
@@ -836,7 +885,7 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     rs = solve!(cs.problem, rd(); maxiter = 400, verbose = 0)
     @test r.objective * get_scale(c.C) <= 1.05 * rs.objective * get_scale(cs.C)       # absolute compliances
     c = rd_cantilever(; nx = 10, ny = 5)
-    @test_throws r"is not a method of ReactionDiffusion.*DoubleWell.*hole_seed" solve!(c.problem, ReactionDiffusion(; τ = 1e-4, sensitivity = :design); maxiter = 1, verbose = 0)
+    @test_throws r"is not a method of ReactionDiffusion.*DoubleWell.*hole_seed" solve!(c.problem, (@test_deprecated ReactionDiffusion(; τ = 1e-4, sensitivity = :design)); maxiter = 1, verbose = 0)
   end
 
 end

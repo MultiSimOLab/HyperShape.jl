@@ -167,7 +167,8 @@ on_box(x, y, (x0, x1, y0, y1)) = abs(x - x0) < 1e-9 || abs(x - x1) < 1e-9 || abs
 
   @testset "9. errors" begin
     @test_throws r"phi_bc = \(\"load\" => 1,\) is not offered with DoubleWell" ReactionDiffusion(; κ = 1e-5, reaction = DoubleWell(), phi_bc = ("load" => 1.0,))
-    @test_throws r"phi_bc = :zero_boundary is not offered with DoubleWell" ReactionDiffusion(:takezawa2010; κ = 1e-5, phi_bc = :zero_boundary)
+    @test_throws r"phi_bc = :zero_boundary is not offered with DoubleWell" ReactionDiffusion(; κ = 1e-5,
+      reaction = DoubleWell(scheme = :explicit, substeps = 20), phi_bc = :zero_boundary)
     @test_throws r"phi_bc must be :neumann, :zero_boundary or" rd(; phi_bc = :dirichlet)
     @test_throws r"phi_bc must be :neumann, :zero_boundary or" rd(; phi_bc = ())
     @test_throws r"phi_bc must be :neumann, :zero_boundary or" rd(; phi_bc = ("load" => "one",))
@@ -250,13 +251,13 @@ on_box(x, y, (x0, x1, y0, y1)) = abs(x - x0) < 1e-9 || abs(x - x1) < 1e-9 || abs
     pτ, pΔt = Parameter(2e-4), Parameter(0.1)
     c = rd_cantilever(; nx = 20, ny = 10, frozen = false)
     tr = ZTrack(c.z, Vector{Float64}[])
-    r = solve!(c.problem, ReactionDiffusion(; τ = pτ, Δt = pΔt, sensitivity = :physical, phi_bc = :zero_boundary);
+    r = solve!(c.problem, ReactionDiffusion(; τ = pτ, Δt = pΔt, phi_bc = :zero_boundary);
                maxiter = 6, stop = nothing, verbose = 0, monitors = (zt = tr,),
                continuation = Continuation(τ = pτ => [2e-4, 1e-3], Δt = pΔt => [0.1, 0.05]; every = 3))
     @test r.state.nfactor == 2 && all(zk -> all(iszero, zk[bnd]), tr.zs) && all(isfinite, r.history.objective)
   end
 
-  @testset "14. a solve of the user, and volume = nothing (:kim2020), with held values" begin
+  @testset "14. a solve of the user, and volume = nothing (the keywords of Kim et al. 2020), with held values" begin
     a, b = rd_cantilever(; nx = 30, ny = 15, frozen = false), rd_cantilever(; nx = 30, ny = 15, frozen = false)
     ra = solve!(a.problem, rd(; phi_bc = :zero_boundary); maxiter = 10, stop = nothing, verbose = 0)
     rb = solve!(b.problem, rd(; phi_bc = :zero_boundary, solve = (A, bb, x, ctx, stale) -> (x .= A \ bb)); maxiter = 10,
@@ -266,7 +267,9 @@ on_box(x, y, (x0, x1, y0, y1)) = abs(x - x0) < 1e-9 || abs(x - x1) < 1e-9 || abs
     xs, ys = free_coords(c.Vφ)
     held = findall(i -> xs[i] > 2 - 1e-9 && abs(ys[i] - 0.5) <= 0.1 + 1e-9, eachindex(xs))
     tr = ZTrack(c.z, Vector{Float64}[])
-    r = solve!(c.problem, ReactionDiffusion(:kim2020; τ = 5e-4, sensitivity = :design, phi_bc = ("load" => 1.0,));
+    kim = (Δt = 0.1, normalize = L2Norm(), mass = :consistent, volume = nothing,
+           lagrangian = AugmentedLagrangian(Bertsekas(μ0 = 0.2, growth = 1.025, window = 1, progress = Inf, μmax = 2.0)))
+    r = solve!(c.problem, ReactionDiffusion(; τ = 5e-4, kim..., phi_bc = ("load" => 1.0,));
                maxiter = 20, stop = nothing, verbose = 0, monitors = (zt = tr,))
     @test all(isfinite, r.history.objective) && all(zk -> all(==(1.0), zk[held]), tr.zs)
   end

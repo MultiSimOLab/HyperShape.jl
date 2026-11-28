@@ -95,6 +95,7 @@ end
 @_public Methods default_metric
 @_public Methods monitor_value
 @_public Methods metric_weights
+@_public Optimizers Optimizer
 @_public Optimizers StepInfo
 @_public PostProcess FieldWriter
 @_public PostProcess write_fields

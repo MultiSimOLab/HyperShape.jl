@@ -83,7 +83,7 @@ function run_levelset88(ref; maxiter = 200)
   U = TrialFESpace(V, bc, 1.0)
   Vφ = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
   z = OptVariables(φ = FieldVariable(Vφ; bounds = (-1.0, 1.0), init = 1.0))
-  θ = PhysicalFields(DesignFields(z; φ = Identity()); χ = :φ => Ersatz())
+  θ = PhysicalFields(DesignFields(z); χ = :φ => Ersatz())
   dΩ = design_measures(θ; degree = 4)
   ν, Emin = 0.3, 1e-4
   λ, μ = ν / (1 - ν^2), 1 / (2(1 + ν))
@@ -95,7 +95,7 @@ function run_levelset88(ref; maxiter = 200)
         adjoint = AdjointProblem(sensitivity = (u, q) -> (δ -> ∫((1 - Emin) * (ε(q) ⊙ (σ ∘ ε(u))) * δ)dΩ.domain)))
   C = Functional((u, θ) -> δp(t ⋅ u), S; dJdu = SelfAdjoint(), scale = 1.0)      # J = F'U
   problem = Optimization(z; objective = C, constraints = (volume = Volume(θ, dΩ; max_fraction = VMAX),))
-  method = ReactionDiffusion(; τ = TAU, sensitivity = :physical, Δt = 0.1, mass = :consistent, void_weight = 1e-4,
+  method = ReactionDiffusion(; τ = TAU, Δt = 0.1, mass = :consistent, void_weight = 1e-4,
                              phi_bc = :zero_boundary, volume = ExactVolume(max_step = (1 - VMAX) / 100))
   # the model of levelset88 for a binary design: plain Gridap, the same mesh, supports and load
   Vb = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{2,Float64}, 1); conformity = :H1, dirichlet_tags = "clamp")

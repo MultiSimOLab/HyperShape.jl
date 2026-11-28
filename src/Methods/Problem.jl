@@ -223,8 +223,9 @@ Supertype of the methods (`DensityMethod`, `ReactionDiffusion`; level set later)
 [`solve!`](@ref) (evaluation, acceptance, continuation, augmented Lagrangian, stopping, checkpoint, output); a method
 only gives its step and what the step sees of the problem, through four functions (public, not exported):
 
-- `stepper(m)`: the step, an `Optimizer` (`init`, `step!`, `reset!`, `shrink!`, `memory`, `restore_memory!`,
-  `objective_changed!`; see `HyperShape.Optimizers`); the same object at every call (a continuation compares it);
+- `stepper(m)`: the step, an `Optimizer` (the supertype `HyperShape.Optimizer`; its contract `init`, `step!`,
+  `reset!`, `shrink!`, `memory`, `restore_memory!`, `objective_changed!` is written `HyperShape.Optimizers.init`, …,
+  public); the same object at every call (a continuation compares it);
 - `build_oracle(m, problem)`: the oracle the step sees (objective, gradient, constraints, bounds, metric); for now it
   must be a `HyperShape.Methods.FunctionalOracle` (internal: its interface may change), built for example with
   `FunctionalOracle(problem, metric)`;
@@ -240,16 +241,71 @@ lines of `banner_lines(m, problem)` (default: none; a vector of `(text, colour)`
 """
 abstract type AbstractMethod end
 
+"""
+    stepper(m::AbstractMethod) -> Optimizer
+
+The step of the method `m`, an `Optimizer` of `HyperShape.Optimizers` (`DensityMethod`: its optimiser;
+`ReactionDiffusion`: its implicit step). It must return the same object at every call (a continuation compares it).
+Part of the contract of a method ([`AbstractMethod`](@ref)); no default.
+"""
 function stepper end
+
+"""
+    build_oracle(m::AbstractMethod, problem) -> FunctionalOracle
+
+The oracle the step of `m` sees for `problem` (objective, gradient, constraints, bounds, metric), built once per
+run, for example `HyperShape.Methods.FunctionalOracle(problem, metric)` (for now it must be a `FunctionalOracle`).
+Part of the contract of a method ([`AbstractMethod`](@ref)); no default.
+"""
 function build_oracle end
+
+"""
+    augmented_lagrangian(m::AbstractMethod) -> AugmentedLagrangian
+
+The [`AugmentedLagrangian`](@ref HyperShape.Optimizers.AugmentedLagrangian) of `m`: which constraints the step treats
+itself (`native`) and how the others are handled. Part of the contract of a method ([`AbstractMethod`](@ref)); no
+default.
+"""
 function augmented_lagrangian end
+
+"""
+    check_problem(m::AbstractMethod, problem)
+
+Called by `solve!` before anything is evaluated: throws an `ArgumentError` when `m` cannot treat `problem`, and may
+set what the method deduces from it (`ReactionDiffusion`: its sensitivity). Default: nothing.
+"""
 check_problem(::AbstractMethod, problem) = nothing
 # internal: writes into the design what the method fixes in it (ReactionDiffusion: the values held by phi_bc), right
 # after check_problem and before anything is evaluated (default: nothing)
 start_design!(::AbstractMethod, problem) = nothing
+"""
+    method_label(m::AbstractMethod) -> String
+
+The name of `m` in the title of the banner and in the checkpoint (default: the name of its type).
+"""
 method_label(m::AbstractMethod) = string(nameof(typeof(m)))
+
+"""
+    metric_label(m::AbstractMethod) -> Union{Nothing,String}
+
+The metric of `m` as the banner writes it (`nothing`, the default: no line).
+"""
 metric_label(::AbstractMethod) = nothing
+
+"""
+    banner_lines(m::AbstractMethod, problem) -> Vector{Tuple{String,Symbol}}
+
+Lines of the banner of `solve!` that are particular to `m` (its parameters and their defaults), as `(text, colour)`
+with the colour `:normal`, `:yellow`, … (default: none).
+"""
 banner_lines(::AbstractMethod, problem) = Tuple{String,Symbol}[]
+
+"""
+    feasible_start(m::AbstractMethod) -> Bool
+
+Whether `solve!` scales a starting design that violates the native constraint towards its lower bound before the
+first step (default `true`; `ReactionDiffusion`: `false`, its step lowers the volume).
+"""
 feasible_start(::AbstractMethod) = true
 
 """
@@ -260,8 +316,10 @@ Density method (SIMP, RAMP or any interpolation written by the user in the weak 
 positive weights (one per entry of z: `inner(x, y) = Σ mᵢ xᵢ yᵢ`), an object of the user with a method
 [`metric_weights`](@ref)`(m, z) -> Vector` (called once at the start of `solve!` and again after each rebuild of the problem), or a named tuple with one of them
 per block of z. SiMPL uses
-it in its step and its optimality measure, and needs it (no default). OC uses it only for the stationarity measure
-(see [`StopCriteria`](@ref)); its default is `Euclidean()`, which makes that measure depend on the mesh.
+it in its step and its optimality measure; its default is `LumpedMass()` (independent of the mesh; the banner marks
+it as the default). OC uses it only for the stationarity measure (see [`StopCriteria`](@ref)); its default is
+`Euclidean()`, which makes that measure depend on the mesh. Another optimiser has no default unless it defines
+[`default_metric`](@ref).
 
 `lagrangian`: how the constraints the optimiser does not treat itself are handled, an
 [`AugmentedLagrangian`](@ref HyperShape.Optimizers.AugmentedLagrangian) (default `AugmentedLagrangian()`:
@@ -310,10 +368,12 @@ method_label(m::DensityMethod) = "DensityMethod($(nameof(typeof(m.optimizer))))"
 """
     default_metric(optimizer)
 
-Metric of [`DensityMethod`](@ref) when none is given: `Euclidean()` for OC (which only uses it for the stationarity measure); an error for any other
-optimiser, which must be given one.
+Metric of [`DensityMethod`](@ref) when none is given: `Euclidean()` for OC (which only uses it for the stationarity
+measure), `LumpedMass()` for SiMPL (decision of Jesús, 2026-11-28); an error for any other optimiser, which must be
+given one (or define a method of `default_metric` for its type).
 """
 default_metric(::OC) = Euclidean()
+default_metric(::SiMPL) = LumpedMass()
 default_metric(opt::Optimizer) =
   throw(ArgumentError("DensityMethod: $(nameof(typeof(opt))) needs a metric: DensityMethod(opt; metric = LumpedMass()) or Euclidean()"))
 

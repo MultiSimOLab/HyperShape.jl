@@ -32,6 +32,7 @@ export OC, SiMPL, constraint_tol, computes_kkt, set_move!, memory, restore_memor
 export AugmentedLagrangian, Bertsekas, MultiplierUpdate, AugmentedLagrangianOracle, end_iteration!, objective_changed!,
        multipliers, penalties
 public term, weight, initial_penalty, update!
+public init, step!, reset!, shrink!
 
 include("Oracle.jl")
 include("Interface.jl")

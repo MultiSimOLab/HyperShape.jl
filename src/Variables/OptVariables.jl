@@ -46,7 +46,13 @@ struct FrozenZone{C,F,G}
   ndofs::Int
 end
 
-function FieldVariable(V; bounds, init, frozen = nothing)
+function FieldVariable(V; bounds = nothing, init = nothing, frozen = nothing)
+  bounds === nothing &&
+    throw(ArgumentError("FieldVariable: bounds is mandatory, bounds = (lb, ub): for example (0.0, 1.0) for a density, " *
+                        "(-1.0, 1.0) for a level set"))
+  init === nothing &&
+    throw(ArgumentError("FieldVariable: init is mandatory: a number, a vector of free values or a function of x " *
+                        "(for example init = 0.5)"))
   lb, ub = Float64(bounds[1]), Float64(bounds[2])
   lb < ub || throw(ArgumentError("FieldVariable: bounds must satisfy lb < ub, got $bounds"))
   V isa Gridap.FESpaces.FESpaceWithLinearConstraints &&

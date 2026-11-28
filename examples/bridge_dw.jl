@@ -33,8 +33,8 @@ function run_bridge_dw(; nx = 200, ny = 100, maxiter = 300, out = nothing, verbo
   tags = ("roller", "pin", "load")
   φ0 = hole_seed(Vφ; bounds = (0.0, 1.0), radius = 0.1, spacing = 0.4, exclude = tags, connect = tags, width = 0.02)
   z  = OptVariables(φ = FieldVariable(Vφ; bounds = (0.0, 1.0), init = φ0))
-  x  = DesignFields(z; φ = Identity())
-  θ  = PhysicalFields(x; χ = :φ => Identity())
+  x  = DesignFields(z)
+  θ  = PhysicalFields(x; χ = :φ)
 
   # Physics: k(φ) = max(φ³, 1e-5), plane stress; a unit load spread over the width w around x = 1
   ν = 0.3

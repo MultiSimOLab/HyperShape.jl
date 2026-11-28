@@ -117,6 +117,9 @@ struct HelmholtzFilter{O<:LinearOperator,M} <: FieldMap
 end
 HelmholtzFilter(op::LinearOperator, dΩ; backend::Symbol = :compiled) = HelmholtzFilter(op, dΩ, backend)
 
+HelmholtzFilter(; kwargs...) =
+  throw(ArgumentError("HelmholtzFilter: give the measure of the design domain, HelmholtzFilter(dΩ; rmin, …)"))
+
 function HelmholtzFilter(dΩ::Gridap.CellData.Measure; rmin::Real, order::Integer = 1, backend::Symbol = :compiled,
                          model_backend = nothing, solve = nothing, kwargs...)
   rmin > 0 || throw(ArgumentError("HelmholtzFilter: rmin must be positive"))
@@ -329,6 +332,7 @@ struct CellMean{M} <: FieldMap
   CellMean(dΩ::M, backend::Symbol) where {M<:Gridap.CellData.Measure} = new{M}(dΩ, _check_backend(backend))
 end
 CellMean(dΩ::Gridap.CellData.Measure; backend::Symbol = :compiled) = CellMean(dΩ, backend)
+CellMean(; kwargs...) = throw(ArgumentError("CellMean: give the measure of the design domain, CellMean(dΩ)"))
 
 struct CellMeanStage{I,M,F,W,V,A}
   input::I

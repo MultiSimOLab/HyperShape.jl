@@ -18,4 +18,7 @@ include("Methods/Methods.jl")
 
 
 include("Exports.jl")
+# the submodule of the optimisers is public: the contract of an optimiser (init, step!, reset!, shrink!, the oracle)
+# is written HyperShape.Optimizers.name
+public Optimizers
 end

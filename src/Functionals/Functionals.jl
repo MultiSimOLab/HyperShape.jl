@@ -116,7 +116,12 @@ Base.show(io::IO, F::Functional) =
         ", scale ", F.scale_mode === :initial ? (isnan(F.scale[]) ? ":initial (not set)" : "$(F.scale[]) (:initial)") :
         F.scale[], ")")
 
+struct _Unused end
+
 function _scale(scale)
+  scale isa _Unused && throw(ArgumentError(
+    "Functional: scale is mandatory: the typical size of the functional, a positive number (for example the value " *
+    "at the start), or scale = :initial (its first value)"))
   if scale === :initial || scale === :bound
     return scale, NaN
   elseif scale isa Real && isfinite(scale) && scale > 0
@@ -146,13 +151,12 @@ function _fields(S::StateOperator, fields)
   fields
 end
 
-struct _Unused end
-
-function Functional(J, S::StateOperator; dJdu = _Unused(), dJdθ = nothing, scale, fields = nothing, parameters = (),
+function Functional(J, S::StateOperator; dJdu = _Unused(), dJdθ = nothing, scale = _Unused(), fields = nothing, parameters = (),
                     derivative = _Unused(), adjoint = _Unused())
   (derivative isa _Unused && adjoint isa _Unused) || throw(ArgumentError(
     "Functional: `derivative` and `adjoint` are gone for functionals with a state: declare the adjoint in the state " *
-    "(StateOperator(model, θ; adjoint = AdjointProblem(model_adj or SymmetricState(); sensitivity = p -> pᵀ∂R/∂θ))) and give " *
+    "(StateOperator(model, θ; adjoint = AdjointProblem(model_adj or SymmetricState(); sensitivity = (u, p) -> " *
+    "(δ -> ∫(…)dΩ)), the form pᵀ∂R/∂θ[δ] at the state u and the adjoint p) and give " *
     "here dJdu = u -> (w -> ∫(∂J/∂u ⋅ w)dΩ) (or SelfAdjoint()) and, if J reads θ, dJdθ = (u, θ) -> (δ -> ∫(…)dΩ)"))
   dJdu isa _Unused && throw(ArgumentError(
     "Functional: dJdu is mandatory: dJdu = u -> (w -> ∫(…)dΩ), or SelfAdjoint() for the compliance of a linear and symmetric state"))
@@ -177,7 +181,7 @@ function Functional(J, S::StateOperator; dJdu = _Unused(), dJdθ = nothing, scal
   Functional(J, dJdθ, dJdu, S, θ, mode, Ref(value), [-1.0, -1.0, -1.0, NaN], false, _parameters(parameters))
 end
 
-function Functional(J, θ::PhysicalFields; dJdθ = _Unused(), scale, linear::Bool = false, parameters = (),
+function Functional(J, θ::PhysicalFields; dJdθ = _Unused(), scale = _Unused(), linear::Bool = false, parameters = (),
                     derivative = _Unused())
   derivative isa _Unused || throw(ArgumentError("Functional: `derivative` is now `dJdθ = θ -> (δ -> ∫(…)dΩ)`"))
   dJdθ isa _Unused && throw(ArgumentError("Functional: dJdθ is mandatory for a design-only functional: dJdθ = θ -> (δ -> ∫(…)dΩ)"))
@@ -211,6 +215,8 @@ function Volume(θ::PhysicalFields, dΩ; max_fraction::Real, field = nothing, sc
 end
 
 Volume(θ::PhysicalFields, dΩ::DesignMeasures; kwargs...) = Volume(θ, dΩ.domain; kwargs...)
+Volume(θ::Union{PhysicalFields,DesignFields}; kwargs...) =
+  throw(ArgumentError("Volume: give the measure of the domain, Volume(θ, dΩ; max_fraction)"))
 
 # the value of a Volume, a type of its own so that a method can recognise the constraint (is_volume)
 struct _VolumeValue{M}

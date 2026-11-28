@@ -29,7 +29,7 @@ that is `λ ← max(0, λ + μ g)` for `g ≤ 0` and `λ ← λ + μ g` for an e
 to `μmax`) every `window` iterations in which the violation is above the tolerance of the augmented Lagrangian and did
 not fall below `progress` times the one of the last check (`window` iterations before; the first check compares with
 the first iteration); `progress = Inf` grows it at every check while the constraint is violated. `growth = 1`
-(default) keeps it fixed, which is what
+(default) keeps it fixed (then `progress`, `window` and `μmax` have no effect: giving them is an error), which is what
 first-order optimisers such as SiMPL need: a large penalty makes the subproblem ill-conditioned. The scaled
 functionals are of order one, so `μ0 = 1` is the neutral value. `Bertsekas(μ0 = 0.2, growth = 1.025, window = 1,
 progress = Inf, μmax = 2.0)` is the rule of Kim et al. (2020).
@@ -40,7 +40,14 @@ struct Bertsekas <: MultiplierUpdate
   progress::Float64
   window::Int
   μmax::Float64
-  function Bertsekas(; μ0::Real = 1.0, growth::Real = 1.0, progress::Real = 0.25, window::Integer = 50, μmax::Real = 100.0)
+  function Bertsekas(; μ0::Real = 1.0, growth::Real = 1.0, progress::Union{Nothing,Real} = nothing,
+                     window::Union{Nothing,Integer} = nothing, μmax::Union{Nothing,Real} = nothing)
+    if growth == 1
+      given = [string(k) for (k, v) in ((:progress, progress), (:window, window), (:μmax, μmax)) if v !== nothing]
+      isempty(given) || throw(ArgumentError("Bertsekas: $(join(given, ", ")) $(length(given) == 1 ? "has" : "have") no " *
+                                            "effect with growth = 1 (a fixed penalty): leave $(length(given) == 1 ? "it" : "them") out, or give growth > 1"))
+    end
+    progress, window, μmax = something(progress, 0.25), something(window, 50), something(μmax, 100.0)
     (isfinite(μ0) && μ0 > 0) || throw(ArgumentError("Bertsekas: μ0 must be positive, got $μ0"))
     growth >= 1 || throw(ArgumentError("Bertsekas: growth must be at least 1, got $growth"))
     progress > 0 || throw(ArgumentError("Bertsekas: progress must be positive, got $progress"))
@@ -89,13 +96,16 @@ end
 """
     AugmentedLagrangian(update = Bertsekas(); native = :auto, constraint_tol = 1e-4)
 
-How [`DensityMethod`](@ref HyperShape.Methods.DensityMethod) treats the constraints its optimiser does not treat
-itself (see [`handles`](@ref)): they enter the objective of the optimiser through the rule `update`
+How a method ([`DensityMethod`](@ref HyperShape.Methods.DensityMethod),
+[`ReactionDiffusion`](@ref HyperShape.Methods.ReactionDiffusion)) treats the constraints its step does not treat
+itself (see [`handles`](@ref)): they enter the objective of the step through the rule `update`
 ([`Bertsekas`](@ref)), with multipliers updated after every accepted iteration.
 
 - `native = :auto`: in the order of the problem, the first constraints the optimiser handles (up to
-  [`max_native`](@ref)) stay with it, the rest go to the augmented Lagrangian; or a tuple of names, `(:volume,)`, or
-  `()` (all to the augmented Lagrangian; OC needs one constraint of its own).
+  [`max_native`](@ref)) stay with it, the rest go to the augmented Lagrangian (`ReactionDiffusion`: the constraint
+  built with `Volume`; none with `volume = nothing`); or a tuple of names, `(:volume,)`, or `()` (all to the
+  augmented Lagrangian; OC needs one constraint of its own). It is the one place where the constraints of the step
+  are named.
 - `constraint_tol`: the run converges only when every constraint of the augmented Lagrangian is met to it (scaled
   value).
 

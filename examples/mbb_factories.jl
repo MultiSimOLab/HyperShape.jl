@@ -22,7 +22,7 @@ function run_mbb_factories(; nx = 60, ny = 20, maxiter = 300, out = "results/mbb
   function design_setup(model)
     Vρ = TestFESpace(model, ReferenceFE(lagrangian, Float64, 0); conformity = :L2)    # P0 design field
     z  = OptVariables(ρ = FieldVariable(Vρ; bounds = (0.0, 1.0), init = 0.5))
-    x  = DesignFields(z; ρ = Identity())
+    x  = DesignFields(z)
     (; z, x)
   end
 
@@ -60,7 +60,7 @@ function run_mbb_factories(; nx = 60, ny = 20, maxiter = 300, out = "results/mbb
   verbose > 0 && display(check_consistency(problem))                # Taylor tests of the derivatives
 
   post = OptPostProcessor(every = 10, filepath = joinpath(out, "vtk"))   # no driver: the output of physics_setup
-  solve!(problem, DensityMethod(SiMPL(); metric = LumpedMass()); maxiter, verbose, post, discretization,
+  solve!(problem, DensityMethod(SiMPL()); maxiter, verbose, post, discretization,
          stop         = StopCriteria(stationarity_rtol = 1e-3),
          continuation = Continuation(β = proj => [1, 2, 4, 8, 16]; every = 40),
          checkpoint   = Checkpoint(filepath = joinpath(out, "checkpoint"), every = 20))

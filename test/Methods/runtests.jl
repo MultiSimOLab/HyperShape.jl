@@ -467,14 +467,38 @@ same_history(a, b) = all(isequal(getproperty(a, c), getproperty(b, c)) for c in 
               :invalidate!, :refresh!, :default_stop, :default_metric, :monitor_value)
       @test Base.ispublic(HyperShape, n) && !Base.isexported(HyperShape, n) && isdefined(HyperShape, n)
     end
+    # the contract of a method, of a discretisation and of an optimiser: public, documented, reachable from HyperShape
+    for n in (:stepper, :build_oracle, :augmented_lagrangian, :check_problem, :method_label, :metric_label, :banner_lines,
+              :feasible_start, :needs_setup, :due, :rediscretize, :discretization_label, :Optimizer)
+      @test Base.ispublic(HyperShape, n) && !Base.isexported(HyperShape, n) && Docs.hasdoc(HyperShape, n)
+    end
+    @test Base.ispublic(HyperShape, :Optimizers)
+    for n in (:init, :step!, :reset!, :shrink!)
+      @test Base.ispublic(HyperShape.Optimizers, n) && Docs.hasdoc(HyperShape.Optimizers, n)
+    end
     for obj in (Grey(qm.θ, qm.dΩ), Continuation(β = qm.H => [1.0, 2.0]; every = 2), DensityMethod(OC()), qm.H,
                 TanhProjection(β = 2.0, η = 0.5) ∘ HelmholtzFilter(qm.Sf, qm.dΩ), Checkpoint(filepath = "x", every = 2))
       @test length(sprint(show, obj)) < 120
     end
     @test DensityMethod(OC()).metric isa Euclidean           # default metric of OC (which does not use it)
-    @test_throws ArgumentError DensityMethod(SiMPL())         # SiMPL needs one
+    # SiMPL: LumpedMass() by default (decision of Jesús, 2026-11-28; it used to be mandatory), marked in the banner
+    @test DensityMethod(SiMPL()).metric isa LumpedMass{Nothing} && DensityMethod(SiMPL()).default_metric
+    @test HyperShape.default_metric(SiMPL()) isa LumpedMass{Nothing}
+    @test HyperShape.Optimizer === HyperShape.Optimizers.Optimizer && Base.ispublic(HyperShape, :Optimizer)
+    @test_throws r"PlainOpt needs a metric" DensityMethod(PlainOpt())   # another optimiser: still mandatory
     @test_throws ArgumentError DensityMethod(OC(); metric = :lumped)
-    @test_throws UndefKeywordError solve!(q.problem, DensityMethod(OC()))   # maxiter is mandatory
+    @test_throws r"maxiter is mandatory" solve!(q.problem, DensityMethod(OC()))   # maxiter is mandatory
+    @test_throws r"maxiter must be an integer" solve!(q.problem, DensityMethod(OC()); maxiter = 2.5)
+    # keywords without effect (A5): an error at construction
+    @test_throws r"move_min has no effect with adapt = nothing" OC(adapt = nothing, move_min = 0.01)
+    @test OC(adapt = nothing).move_min == 1e-3 && OC(move_min = 0.01).move_min == 0.01
+    @test_throws r"progress, window, μmax have no effect with growth = 1" Bertsekas(progress = 0.5, window = 3, μmax = 10.0)
+    @test_throws r"window has no effect with growth = 1" Bertsekas(window = 3)
+    @test Bertsekas(growth = 1.5, window = 3).window == 3 && Bertsekas().window == 50
+    @test_throws r"window only acts together with objective_range" StopCriteria(window = 20, change_tol = 1e-2)
+    @test_throws r"phase_window only acts together with phase_tol" StopCriteria(phase_window = 3, change_tol = 1e-2)
+    @test_throws r"material_window only acts together with material_tol" StopCriteria(material_window = 3, change_tol = 1e-2)
+    @test StopCriteria(objective_range = 1e-3, window = 20).window == 20 && StopCriteria(change_tol = 1e-2).window == 10
     @test_throws ArgumentError solve!(q.problem, DensityMethod(OC()); maxiter = 2, on_failure = :reject)
     @test_throws ArgumentError solve!(q.problem, DensityMethod(OC()); maxiter = 2, on_failure = nothing)
     @test_throws ArgumentError RejectStep(shrink = 1.5, max_attempts = 2)
@@ -1144,6 +1168,7 @@ same_history(a, b) = all(isequal(getproperty(a, c), getproperty(b, c)) for c in 
     @test_throws ArgumentError Grey(θ2, q.dΩ)
     @test Grey(θ2, q.dΩ; field = :E).field === :E
     @test_throws MethodError Grey(q.x, q.dΩ)
+    @test_throws r"give the measure of the domain, Grey\(θ, dΩ\)" Grey(θ2)
     @test_throws ArgumentError Continuation(kkt = q.H => [1.0, 2.0]; every = 2)   # a history column
     # grey through a checkpoint, P1 design
     dir = mktempdir()

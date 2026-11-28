@@ -48,8 +48,9 @@ Base.show(io::IO, n::L1Mean) = print(io, "L1Mean(", _g(n.c), ")")
 Base.show(io::IO, ::L2Norm) = print(io, "L2Norm()")
 Base.show(io::IO, ::MaxAbs) = print(io, "MaxAbs()")
 
-# The normalisation of Takezawa et al. (2010), `C = 1 / (Σᵢ gᵢ² / mᵢ)^½` (the L² norm without |D|), for the preset
-# :takezawa2010 (internal: a function (g, m, area) -> C of the user replaces it)
+# The normalisation of Takezawa et al. (2010), `C = 1 / (Σᵢ gᵢ² / mᵢ)^½` (the L² norm without |D|), for the deprecated
+# preset :takezawa2010 (internal: the same function (g, m, area) -> C written in a script replaces it, as in
+# validation/common/presets.jl)
 struct _TakezawaNorm end
 (::_TakezawaNorm)(g, m, area) = 1 / sqrt(sum(Broadcast.instantiate(Broadcast.broadcasted((a, b) -> a^2 / b, g, m))))
 Base.show(io::IO, ::_TakezawaNorm) = print(io, "L² norm without |D| (Takezawa et al. 2010)")
@@ -58,14 +59,16 @@ Base.show(io::IO, ::_TakezawaNorm) = print(io, "L² norm without |D| (Takezawa e
 # Exact volume
 
 """
-    ExactVolume(; max_step = :auto, tol = 1e-4, maxiter = 50, constraint = nothing)
+    ExactVolume(; max_step = :auto, tol = 1e-4, maxiter = 50)
 
 How [`ReactionDiffusion`](@ref) treats the volume (its default): natively, with a scalar multiplier `λ` found at
 every step so that the clipped design `z = clamp(φ* − λ φ̌, lb, ub)` meets the constraint (`φ*` the design after the
 reaction–diffusion step, `φ̌ = A⁻¹ m` the response of the step to a uniform unit source). It takes the constraint
 built with [`Volume`](@ref HyperShape.Functionals.Volume) (`g ≤ 0`), wherever it is in the problem; with none or with
-several, `solve!` throws: name the one to take with `constraint = :name` (any inequality `g ≤ 0` evaluated without a
-state, linear or not). The other constraints go to the augmented Lagrangian of the method.
+several, `solve!` throws: name the one to take in the augmented Lagrangian of the method,
+`lagrangian = AugmentedLagrangian(native = (:name,))` (any inequality `g ≤ 0` evaluated without a state, linear or not;
+the only place where the constraint of the step is named). The other constraints go to the augmented Lagrangian.
+`ExactVolume(; constraint = :name)` still names it, deprecated (a warning): use `native`.
 
 - `max_step`: how much the target may go down per iteration, as a fraction of the measure `|D|` of the design
   domain: the target of iteration `k` is `max(V_obj, V_{k−1} − max_step |D|)`, met with equality while it goes down;
@@ -96,6 +99,10 @@ struct ExactVolume
   maxiter::Int
   constraint::Union{Nothing,Symbol}
   function ExactVolume(; max_step = :auto, tol::Real = 1e-4, maxiter::Integer = 50, constraint::Union{Nothing,Symbol} = nothing)
+    constraint === nothing ||
+      Base.depwarn("ExactVolume(; constraint = $(repr(constraint))) is deprecated: name the constraint the step treats in " *
+                   "the augmented Lagrangian of the method, ReactionDiffusion(…; lagrangian = AugmentedLagrangian(native = " *
+                   "($(repr(constraint)),)))", :ExactVolume)
     (max_step === :auto || max_step === nothing || (max_step isa Real && 0 < max_step <= 1)) ||
       throw(ArgumentError("ExactVolume: max_step must be :auto, nothing or a fraction of |D| in (0, 1], got $(repr(max_step))"))
     (isfinite(tol) && tol > 0) || throw(ArgumentError("ExactVolume: tol must be positive, got $tol"))
@@ -145,7 +152,8 @@ it once at the start, so a `Continuation` of `τ` (or of `Δt`) is refused.
   (their Eqs. 44–45) to `ψ`, with `λ` inside the tilt term, by a root on vectors. `scheme = :explicit`: the explicit
   substeps of Takezawa et al. (`ψ = φ − Δt κ m⁻¹ K φ`, no linear system and no factorisation), the scheme of the preset
   `:takezawa2010`.
-- `substeps = n` (an integer): `n` substeps of the `Δt` of the method per iteration, and `T` is ignored; `Δt = :auto`
+- `substeps = n` (an integer): `n` substeps of the `Δt` of the method per iteration, instead of `T` (giving both is an
+  error: `T` would have no effect); `Δt = :auto`
   of the method is then `cfl Δt_lim` and a number replaces it (with `:explicit`, `Δt ≤ Δt_lim` is checked). With
   `substeps = nothing` (default) a number `Δt` of the method is refused.
 - `settle`: with the substeps frozen on one sensitivity the interface overshoots and comes back, and a few per cent of
@@ -166,8 +174,7 @@ within about 3 % on 100 × 50, 200 × 100 and 400 × 200 (with 2, 5 and 20 subst
 seed and on the mesh (the double well does not nucleate holes, and the seed is resolved differently on each mesh). The
 bridge of Takezawa et al. (a point load) is not comparable across meshes: its compliance grows like `log(1/h)`.
 
-With the well, `sensitivity` is not mandatory (it is the exact derivative, `:design`; `:physical` is refused),
-`normalize` defaults to `L2Norm()` and `ExactVolume(max_step = :auto)` lowers the target `1 %` of `|D|` per iteration
+With the well the sensitivity is the exact derivative (`void_weight` is refused), `normalize` defaults to `L2Norm()` and `ExactVolume(max_step = :auto)` lowers the target `1 %` of `|D|` per iteration
 (spread over the substeps). Not with an interface map (`Ersatz()`, `Step()`). Per iteration: one forward solve, one
 adjoint, `n` back-substitutions (`:implicit`; none with `:explicit`) and `n` roots on vectors, no factorisation.
 """
@@ -181,8 +188,12 @@ struct DoubleWell
   settle::Bool
   settle_window::Int      # the settling: the window of the objective and its relative range
   settle_tol::Float64
-  function DoubleWell(; W::Real = 0.25, η::Real = 10.0, T::Real = 25.0, cfl = :auto, scheme::Symbol = :implicit,
+  function DoubleWell(; W::Real = 0.25, η::Real = 10.0, T::Union{Nothing,Real} = nothing, cfl = :auto, scheme::Symbol = :implicit,
                       settle::Union{Bool,NamedTuple} = true, substeps::Union{Nothing,Integer} = nothing)
+    T === nothing || substeps === nothing ||
+      throw(ArgumentError("DoubleWell: give T (the time per iteration, split into n = ⌈T/(cfl Δt_lim)⌉ substeps) or " *
+                          "substeps = n, not both: with substeps, T has no effect"))
+    T = something(T, 25.0)
     (isfinite(W) && W > 0) || throw(ArgumentError("DoubleWell: W must be positive and finite, got $W"))
     (isfinite(η) && η > 0) || throw(ArgumentError("DoubleWell: η must be positive and finite, got $η"))
     (isfinite(T) && T > 0) || throw(ArgumentError("DoubleWell: T must be positive and finite, got $T"))
@@ -258,7 +269,7 @@ const _NO_PINS = _Pins(UInt(0), Int[], Float64[], 0, Int[])
 struct RDStep{T,D,N,V,LS,S,F,R} <: Optimizer
   τ::T                  # a number or a Parameter
   Δt::D                 # a number, a Parameter or :auto
-  sensitivity::Symbol
+  sensitivity::Base.RefValue{Symbol}   # :physical or :design: deduced from the design chain when the run starts
   normalize::N
   volume::V             # ExactVolume or nothing
   mass::Symbol
@@ -411,6 +422,8 @@ function Optimizers.init(opt::RDStep, z, oracle)
   Kmap, Dmap = _positions(A, K), _diagonal_positions(A)
   Mmap = M === nothing ? Int[] : _positions(A, M)
   _resolve_Δt!(opt, (fo.J, (c.F for c in fo.cons)...))
+  # the sensitivity (check_problem deduced it already in solve!; here for a step started without the loop)
+  opt.sensitivity[] = first(_deduced_sensitivity(opt, _differentiated(oracle, fo)))
   ℓ2 = area^(2 / d)
   Δtlim, nsub = opt.reaction === nothing ? (NaN, 0) : _dw_resolve_Δt!(opt, K, m, ℓ2)
   τ, Δt = _check_τΔt(opt, ℓ2)
@@ -764,7 +777,7 @@ end
 # the sensitivity of the step, with respect to the physical field (:physical) or to the design
 function _rd_gradient!(g, opt::RDStep, s::RDState, oracle, z)
   ctx = s.ctx
-  (opt.sensitivity === :physical && ctx isa OptContext) || return gradient!(g, oracle, z)
+  (opt.sensitivity[] === :physical && ctx isa OptContext) || return gradient!(g, oracle, z)
   # setfield! with constant names: no allocation (set_context! converts to the type of a field found at run time)
   setfield!(ctx, :void_weight, opt.void_weight)
   setfield!(ctx, :sensitivity, :physical)
@@ -1299,10 +1312,11 @@ function _auto_native(opt::RDStep, problem, infos, names)
   length(cand) == 1 && return cand
   isempty(cand) && throw(ArgumentError("ReactionDiffusion: ExactVolume (the default of volume) treats the constraint " *
     "built with Volume(…) (g ≤ 0), and the problem has none. To go on: add a Volume constraint; or name another " *
-    "constraint g ≤ 0 with ExactVolume(; constraint = :name); or, for a problem without a volume (or without " *
-    "constraints), use ReactionDiffusion(…; volume = nothing, lagrangian = AugmentedLagrangian(; native = ()))"))
+    "constraint g ≤ 0 with ReactionDiffusion(…; lagrangian = AugmentedLagrangian(native = (:name,))); or, for a problem " *
+    "without a volume (or without constraints), use ReactionDiffusion(…; volume = nothing)"))
   throw(ArgumentError("ReactionDiffusion: the problem has $(length(cand)) constraints built with Volume(…) " *
-    "($(join(names[cand], ", "))): choose the one the step treats with ExactVolume(; constraint = :name)"))
+    "($(join(names[cand], ", "))): choose the one the step treats with ReactionDiffusion(…; lagrangian = " *
+    "AugmentedLagrangian(native = (:name,)))"))
 end
 Optimizers.computes_kkt(::RDStep) = false
 _checks_linear_native(::RDStep) = true          # the step may leave a linear volume violated on purpose (max_step)
@@ -1489,11 +1503,10 @@ const _RD_PRESETS = Dict{Symbol,NamedTuple}(
                     normalize = _TakezawaNorm(), volume = ExactVolume(max_step = 0.01)))
 
 """
-    ReactionDiffusion(; τ, sensitivity, Δt = :auto, normalize = L1Mean(), volume = ExactVolume(), mass = :lumped,
+    ReactionDiffusion(; τ, Δt = :auto, normalize = L1Mean(), volume = ExactVolume(), mass = :lumped,
                       void_weight = 1e-3, ls = LUSolver(), solve = nothing, diffusion = nothing, degree = 2,
                       lagrangian = AugmentedLagrangian(), reaction = nothing, phi_bc = :neumann)
     ReactionDiffusion(; κ, reaction = DoubleWell(), kwargs...)
-    ReactionDiffusion(preset::Symbol; τ, sensitivity, kwargs...)
 
 Reaction–diffusion method (Yamada et al. 2010, Choi et al. 2011, Otomori et al. 2015, Kim et al. 2020): the design
 field `φ` (one nodal P1 field, `φ ∈ [lb, ub]`) evolves by an implicit step of
@@ -1517,18 +1530,23 @@ Mandatory (modelling decisions):
   `ℓ² = |D|^(2/d)` computed on the mesh (the banner shows both). The operator takes `κ` as given; with `τ` it takes
   `τ ℓ²`, so `τ = κ/ℓ²` with that `ℓ²` gives the run of `κ` bit for bit, while `τ = κ/2` on a domain of measure 2
   can differ in the last bits (the measure is a sum of quadratures, not exactly 2).
-- `sensitivity` (not with `reaction = DoubleWell(…)`, where it is `:design`): `:physical` takes the derivative with
-  respect to the material, the interface map taken as the
-  identity weighted by the material, `(w₀ + (1 − w₀) χ) ∂j/∂χ` (`w₀ = void_weight`): it nucleates holes, and the exact
-  derivative through the map would refill the void (its value there is large: weak material, large strains); `:design`
-  the exact derivative with respect to φ, for a density (without an interface map in the chain both are the same) and
-  with the double well, where it is the default. `:design` with an interface map (`Ersatz()`, `Step()`) is not a
-  method: the exact derivative lives on the cut cells and nothing holds the plateaus (`solve!` throws). The variant
-  that only moves the boundary, from a start with holes ([`hole_seed`](@ref HyperShape.Variables.hole_seed)), is a
-  density with `reaction = DoubleWell(…)` (then `sensitivity` is not mandatory). `hole_seed` also gives perforated
-  starts for `:physical` (studies of the dependence on the start). [`check_consistency`](@ref HyperShape.Checks.check_consistency) always checks the
-  exact derivative; with `Ersatz()` give it steps smaller than the default (`h0 = 1e-3`): larger ones cross the
-  kinks of the cell fractions (a node changing sign) and the observed rates fall below 2 for a correct derivative.
+
+The sensitivity of the step is deduced from the design chain when `solve!` starts (the banner says which and why):
+- a functional that the step differentiates (the objective, the constraints of the augmented Lagrangian) reads a
+  field through an interface map (`Step()`, `Ersatz()`): the derivative with respect to the material, the interface
+  map taken as the identity weighted by the material, `(w₀ + (1 − w₀) χ) ∂j/∂χ` (`w₀ = void_weight`): it nucleates
+  holes, and the exact derivative through the map would refill the void (its value there is large: weak material,
+  large strains); the exact derivative with an interface map is not a method (it lives on the cut cells and nothing
+  holds the plateaus);
+- a density (no interface map; filters and projections allowed) and `reaction = DoubleWell(…)`: the exact derivative
+  with respect to φ.
+The variant that only moves the boundary, from a start with holes ([`hole_seed`](@ref HyperShape.Variables.hole_seed)),
+is a density with `reaction = DoubleWell(…)`. `hole_seed` also gives perforated starts with an interface map (studies
+of the dependence on the start). The keyword `sensitivity = :physical | :design` of earlier versions is still
+accepted with a deprecation warning (a value that contradicts the deduced one is an error).
+[`check_consistency`](@ref HyperShape.Checks.check_consistency) always checks the
+exact derivative; with `Ersatz()` give it steps smaller than the default (`h0 = 1e-3`): larger ones cross the
+kinks of the cell fractions (a node changing sign) and the observed rates fall below 2 for a correct derivative.
 
 Optional (each one replaceable, shown in the banner):
 - `Δt`: pseudo-time step (number or `Parameter`); `:auto` (default) is `0.2` when the problem reads the design through
@@ -1536,22 +1554,29 @@ Optional (each one replaceable, shown in the banner):
   design passes through metastable plateaus and the diffusion keeps merging holes long after it looks converged; halved by `RejectStep` when the forward problem does
   not converge at the new design, back to its value at the next step.
 - `normalize`: [`L1Mean`](@ref)`(c)` (default `c = 1`), [`L2Norm`](@ref)`()`, [`MaxAbs`](@ref)`()`, or a function
-  `(g, m, area) -> C` (`g` the derivative, `m` the lumped mass, `area` = `|D|`).
-- `volume`: [`ExactVolume`](@ref)`(; max_step, tol, maxiter, constraint)`, or `nothing` (every constraint to the augmented
-  Lagrangian; needs `lagrangian = AugmentedLagrangian(…; native = ())`).
+  `(g, m, area) -> C` (`g` the derivative, `m` the lumped mass, `area` = `|D|`), for example the normalisation of
+  Takezawa et al. (2010) without `|D|`, `(g, m, area) -> 1 / sqrt(sum(g .^ 2 ./ m))` (a reduction over a lazy
+  broadcast avoids the allocation: `validation/common/presets.jl`).
+- `volume`: [`ExactVolume`](@ref)`(; max_step, tol, maxiter)`, or `nothing` (every constraint to the augmented
+  Lagrangian). The constraint the step treats is the one built with `Volume`, or the one named in
+  `lagrangian = AugmentedLagrangian(native = (:name,))`; giving `native` with `volume = nothing`, or `native = ()` with
+  `volume = ExactVolume(…)`, is an error.
 - `mass`: `:lumped` (default; the response `φ̌` is positive and `G(λ)` monotone on non-obtuse meshes) or `:consistent`.
-- `void_weight`: `w₀` of `sensitivity = :physical`, default `1e-3`.
+- `void_weight`: `w₀` of the sensitivity through an interface map, default `1e-3`; giving it when the sensitivity is
+  the exact derivative (a density, `DoubleWell`) is an error (it would have no effect).
 - `ls`: the linear solver of the step (a Gridap `LinearSolver`), default `LUSolver()`: the operator is assembled once
   by HyperShape (Gridap's assembler, on the design space), factorised once and again only when `Δt` or `τ` change.
   `solve = (A, b, x, ctx, stale) -> x` replaces it (PETSc, an iterative solver of the user): `A` the operator, `b` the
-  right-hand side, `x` the output, `stale` whether `A` changed since the last call.
+  right-hand side, `x` the output, `stale` whether `A` changed since the last call. Give one of the two (with `solve`,
+  `ls` is not used: an error); neither with `DoubleWell(scheme = :explicit)`, which solves no linear system (nor
+  `mass = :consistent`: its substeps use the lumped mass).
 - `diffusion = (φ, v) -> ∫(…)dΩ`: the bilinear form of the diffusion (default `∫(∇(φ) ⋅ ∇(v))dΩ` with a quadrature of
   degree `degree`), for an anisotropic diffusion or a Robin term.
 - `lagrangian`: the [`AugmentedLagrangian`](@ref HyperShape.Optimizers.AugmentedLagrangian) of the constraints the
   step does not treat (everything but the volume).
 - `reaction`: `nothing` (default: the linear reaction `−C g − λ` above) or [`DoubleWell`](@ref)`(…)`, the double-well
   reaction of Takezawa et al. (2010) for a density that only moves its interface, from a start with holes: then
-  `sensitivity` defaults to `:design`, `normalize` to `L2Norm()`, `Δt = :auto` is `T/n` per substep (the time `T` of
+  the sensitivity is the exact derivative, `normalize` defaults to `L2Norm()`, `Δt = :auto` is `T/n` per substep (the time `T` of
   the well per iteration in `n` substeps) and the
   multiplier of `ExactVolume` acts inside the tilt term of the well (its `max_step = :auto` is `0.01`). See its
   docstring for the scheme, the substeps and the settling.
@@ -1571,17 +1596,13 @@ Optional (each one replaceable, shown in the banner):
   again) and keeps its `scale = :initial` values: those of the design it was started from, with or without
   `phi_bc`.
 
-Presets (`ReactionDiffusion(:kim2020; τ, sensitivity)`): the keywords given replace those of the preset (the banner
-says which). `:kim2020` (Kim et al. 2020, density): `Δt = 0.1, normalize = L2Norm(), mass = :consistent, volume = nothing,
-lagrangian = AugmentedLagrangian(Bertsekas(μ0 = 0.2, growth = 1.025, window = 1, progress = Inf, μmax = 2.0); native = ())`;
-`τ` is still mandatory (`5e-4` for their cantilever, `1e-3` for their half MBB beam). The script sets the rest:
-a density `φ₀ = 0.5` with `bounds = (0.0, 1.0)`, SIMP `p = 3`, `Volume(…; scale = |Ω|)`.
-`:takezawa2010` (Takezawa, Nishiwaki and Kitamura 2010, the double well): `reaction = DoubleWell(W = 0.25, η = 20,
-scheme = :explicit, substeps = 20, settle = false)`, the normalisation `1/‖g‖_L²` (without `|D|`) and
-`volume = ExactVolume(max_step = 0.01)`; the script sets `κ` (their `κ = 1e-5` on the bridge 2 × 1, that is
-`τ = 5e-6`), the start with holes, `k = max(φ³, 1e-5)` and 100 iterations (`stop = nothing`). Differences with the
-paper: the multiplier of the volume is exact (instead of their rule for ζ) and the discretisation is P1 finite
-elements with lumped mass (instead of finite differences).
+The settings of papers are keywords like any other: `validation/common/presets.jl` writes those of Kim et al. (2020,
+a density: `Δt = 0.1, normalize = L2Norm(), mass = :consistent, volume = nothing, lagrangian =
+AugmentedLagrangian(Bertsekas(μ0 = 0.2, growth = 1.025, window = 1, progress = Inf, μmax = 2.0))`) and of Takezawa,
+Nishiwaki and Kitamura (2010, the double well: `reaction = DoubleWell(W = 0.25, η = 20, scheme = :explicit,
+substeps = 20, settle = false)`, the normalisation `1/‖g‖_L²` without `|D|` and `volume = ExactVolume(max_step = 0.01)`)
+as named tuples, `ReactionDiffusion(; τ, KIM2020...)`. The positional presets of earlier versions,
+`ReactionDiffusion(:kim2020; τ)` and `(:takezawa2010; τ)`, still work with a deprecation warning.
 
 Per iteration: one forward solve, one adjoint (none with `SelfAdjoint()`), one assembly of the sensitivity, one
 product `K z` and one solve of the step (no factorisation); the volume costs a few evaluations of the constraint per
@@ -1602,9 +1623,17 @@ runs).
 struct ReactionDiffusion{S<:RDStep,L<:AugmentedLagrangian} <: AbstractMethod
   step::S
   lagrangian::L
-  preset::Union{Nothing,Symbol}
+  preset::Union{Nothing,Symbol}    # the deprecated positional preset, if given
   sources::Dict{Symbol,Symbol}     # :default, :preset or :given, per keyword with a default
+  sensitivity::Union{Nothing,Symbol}   # the deprecated keyword sensitivity, if given (checked against the deduced one)
 end
+
+# the keywords of the deprecated presets, as the warning writes them
+const _RD_PRESET_TEXT = Dict{Symbol,String}(
+  :kim2020 => "Δt = 0.1, normalize = L2Norm(), mass = :consistent, volume = nothing, lagrangian = " *
+              "AugmentedLagrangian(Bertsekas(μ0 = 0.2, growth = 1.025, window = 1, progress = Inf, μmax = 2.0))",
+  :takezawa2010 => "reaction = DoubleWell(W = 0.25, η = 20.0, scheme = :explicit, substeps = 20, settle = false), " *
+                   "normalize = (g, m, area) -> 1 / sqrt(sum(g .^ 2 ./ m)), volume = ExactVolume(max_step = 0.01)")
 
 ReactionDiffusion(; kwargs...) = _reaction_diffusion(nothing; kwargs...)
 ReactionDiffusion(preset::Symbol; kwargs...) = _reaction_diffusion(preset; kwargs...)
@@ -1627,6 +1656,9 @@ function _reaction_diffusion(preset; kwargs...)
     haskey(_RD_PRESETS, preset) ||
       throw(ArgumentError("ReactionDiffusion: unknown preset $(repr(preset)); the presets are " *
                           join(repr.(sort!(collect(keys(_RD_PRESETS)))), ", ")))
+    Base.depwarn("ReactionDiffusion($(repr(preset)); …) is deprecated (the presets of papers are not part of the API): " *
+                 "write its keywords, ReactionDiffusion(; $dname, $(_RD_PRESET_TEXT[preset]), …), or splat a named tuple " *
+                 "of them (validation/common/presets.jl)", :ReactionDiffusion)
     _RD_PRESETS[preset]
   end
   sources = Dict{Symbol,Symbol}(k => (haskey(kwargs, k) ? :given : haskey(p, k) ? :preset : :default) for k in keys(_RD_DEFAULTS))
@@ -1634,22 +1666,25 @@ function _reaction_diffusion(preset; kwargs...)
   rx = val(:reaction)
   rx === nothing || rx isa DoubleWell ||
     throw(ArgumentError("ReactionDiffusion: reaction must be nothing or DoubleWell(…), got $(repr(rx))"))
-  if rx === nothing
-    haskey(kwargs, :sensitivity) ||
-      throw(ArgumentError("ReactionDiffusion: sensitivity is mandatory: :physical (with respect to the material, nucleates " *
-                          "holes) or :design (the exact derivative with respect to φ)"))
-  else
-    get(kwargs, :sensitivity, :design) === :physical &&
+  # sensitivity is deduced from the design chain (decision of Jesús, 2026-11-28); the keyword is deprecated
+  sgiven = haskey(kwargs, :sensitivity) ? kwargs[:sensitivity] : nothing
+  if sgiven !== nothing
+    sgiven in (:physical, :design) ||
+      throw(ArgumentError("ReactionDiffusion: sensitivity must be :physical or :design, got $(repr(sgiven)) (and it can be " *
+                          "left out: it is deduced from the design chain)"))
+    rx !== nothing && sgiven === :physical &&
       throw(ArgumentError("ReactionDiffusion: sensitivity = :physical is not offered with DoubleWell: the double well " *
-                          "already confines the reaction to the interface; leave sensitivity out (the exact derivative, :design)"))
+                          "already confines the reaction to the interface; leave sensitivity out (the exact derivative)"))
+    Base.depwarn("ReactionDiffusion: the keyword sensitivity is deprecated, it is deduced from the design chain " *
+                 "(:physical when a functional reads a field through Step() or Ersatz(), the exact derivative otherwise " *
+                 "and with DoubleWell; the banner says which and why): remove sensitivity = $(repr(sgiven))", :ReactionDiffusion)
   end
-  τ, sens, Δt = kwargs[dname], get(kwargs, :sensitivity, :design), val(:Δt)
+  τ, Δt = kwargs[dname], val(:Δt)
   for (n, x, pos) in ((dname, τ, false), (:Δt, Δt, true))
     (x isa Parameter || (n === :Δt && x === :auto)) && continue
     (x isa Real && isfinite(x) && (pos ? x > 0 : x >= 0)) ||
       throw(ArgumentError("ReactionDiffusion: $n must be a number $(pos ? "> 0" : "≥ 0") or a Parameter, got $(repr(x))"))
   end
-  sens in (:physical, :design) || throw(ArgumentError("ReactionDiffusion: sensitivity must be :physical or :design, got $(repr(sens))"))
   # the substeps and Δt are set once from Δt_lim(τ) at the start: a continued τ or Δt would leave them stale
   rx isa DoubleWell && (τ isa Parameter || Δt isa Parameter) &&
     throw(ArgumentError("ReactionDiffusion: with DoubleWell, $(τ isa Parameter ? dname : :Δt) must be a number, not a " *
@@ -1668,26 +1703,54 @@ function _reaction_diffusion(preset; kwargs...)
   mass in (:lumped, :consistent) || throw(ArgumentError("ReactionDiffusion: mass must be :lumped or :consistent, got $(repr(mass))"))
   w0 = val(:void_weight)
   (w0 isa Real && 0 <= w0 <= 1) || throw(ArgumentError("ReactionDiffusion: void_weight must be in [0, 1], got $(repr(w0))"))
+  rx !== nothing && sources[:void_weight] === :given &&
+    throw(ArgumentError("ReactionDiffusion: void_weight has no effect with DoubleWell: it weights the sensitivity " *
+                        "through an interface map (Step(), Ersatz()), and with the double well the sensitivity is the " *
+                        "exact derivative; leave void_weight out"))
   ls = val(:ls)
   ls isa LinearSolver || throw(ArgumentError("ReactionDiffusion: ls must be a Gridap LinearSolver (LUSolver(), …); for any other solver give solve = (A, b, x, ctx, stale) -> x"))
   solvef, diff = val(:solve), val(:diffusion)
   solvef === nothing || solvef isa Function || throw(ArgumentError("ReactionDiffusion: solve must be a function (A, b, x, ctx, stale) -> x"))
   diff === nothing || diff isa Function || throw(ArgumentError("ReactionDiffusion: diffusion must be a function (φ, v) -> ∫(…)dΩ"))
+  # keywords that would have no effect (every keyword a real decision)
+  sources[:ls] === :given && solvef !== nothing &&
+    throw(ArgumentError("ReactionDiffusion: give ls (a Gridap LinearSolver) or solve (a function of the user), not both: " *
+                        "with solve, ls is not used"))
+  if rx isa DoubleWell && rx.scheme === :explicit
+    for k in (:ls, :solve)
+      sources[k] === :given &&
+        throw(ArgumentError("ReactionDiffusion: $k has no effect with DoubleWell(scheme = :explicit): the explicit " *
+                            "substeps solve no linear system; leave $k out"))
+    end
+    val(:mass) === :consistent &&
+      throw(ArgumentError("ReactionDiffusion: mass = :consistent has no effect with DoubleWell(scheme = :explicit): the " *
+                          "explicit substeps use the lumped mass; leave mass out"))
+  end
   deg = val(:degree)
   (deg isa Integer && deg >= 1) || throw(ArgumentError("ReactionDiffusion: degree must be an integer ≥ 1"))
   lag = val(:lagrangian)
   lag isa AugmentedLagrangian || throw(ArgumentError("ReactionDiffusion: lagrangian must be an AugmentedLagrangian"))
-  vol === nothing && lag.native !== () &&
-    throw(ArgumentError("ReactionDiffusion: volume = nothing gives every constraint to the augmented Lagrangian: " *
-                        "say it with lagrangian = AugmentedLagrangian(…; native = ())"))
+  # the constraint of the step is named in one place: native of the augmented Lagrangian (volume = nothing: none)
+  vol === nothing && !(lag.native === :auto || lag.native === ()) &&
+    throw(ArgumentError("ReactionDiffusion: volume = nothing gives every constraint to the augmented Lagrangian, and " *
+                        "lagrangian = AugmentedLagrangian(…; native = $(repr(lag.native))) asks the step to treat one: " *
+                        "leave native out with volume = nothing, or keep the default volume = ExactVolume()"))
+  vol isa ExactVolume && sources[:volume] === :given && lag.native === () &&
+    throw(ArgumentError("ReactionDiffusion: volume = ExactVolume(…) and lagrangian = AugmentedLagrangian(…; native = ()) " *
+                        "contradict each other (the step treats the volume / no constraint is native): for every " *
+                        "constraint in the augmented Lagrangian give volume = nothing (and no native)"))
+  vol isa ExactVolume && vol.constraint !== nothing && lag.native !== :auto && lag.native != (vol.constraint,) &&
+    throw(ArgumentError("ReactionDiffusion: ExactVolume(; constraint = $(repr(vol.constraint))) and lagrangian = " *
+                        "AugmentedLagrangian(…; native = $(repr(lag.native))) name different constraints for the step: " *
+                        "name it once, with native"))
   pbc = _phi_bc_arg(val(:phi_bc))
   rx isa DoubleWell && pbc !== :neumann &&
     throw(ArgumentError("ReactionDiffusion: phi_bc = $(_phi_bc_text(pbc)) is not offered with DoubleWell (the diffusion " *
                         "of the well is not incremental and its reaction would have to skip the held values): leave " *
                         "phi_bc out (:neumann)"))
-  step = RDStep(τ, Δt, sens, norm, vol, mass, Float64(w0), ls, solvef, diff, Int(deg), Ref(NaN), Ref(NaN), rx, κgiven,
+  step = RDStep(τ, Δt, Ref(:design), norm, vol, mass, Float64(w0), ls, solvef, diff, Int(deg), Ref(NaN), Ref(NaN), rx, κgiven,
                 pbc, Ref(_NO_PINS))
-  ReactionDiffusion(step, lag, preset, sources)
+  ReactionDiffusion(step, lag, preset, sources, sgiven)
 end
 
 stepper(m::ReactionDiffusion) = m.step
@@ -1696,7 +1759,24 @@ augmented_lagrangian(m::ReactionDiffusion) = m.lagrangian
 method_label(m::ReactionDiffusion) = m.preset === nothing ? "ReactionDiffusion" : "ReactionDiffusion($(repr(m.preset)))"
 feasible_start(::ReactionDiffusion) = false
 Base.show(io::IO, m::ReactionDiffusion) = print(io, method_label(m), m.step.κgiven ? "(κ = " : "(τ = ", m.step.τ,
-                                                ", sensitivity = ", repr(m.step.sensitivity), ")")
+                                                m.step.reaction === nothing ? "" : ", reaction = $(m.step.reaction)", ")")
+
+# The sensitivity of the step, deduced from the design chain (decision of Jesús, 2026-11-28): the exact derivative
+# with DoubleWell; `:physical` (the interface map taken as the identity weighted by the material) when a functional
+# that the step differentiates (the objective and the constraints of the augmented Lagrangian; the native one is only
+# evaluated) reads a field through an interface map, `Step()` or `Ersatz()`; the exact derivative otherwise (a
+# density, with filters and projections). Returns the mode and why, for the banner.
+function _deduced_sensitivity(opt::RDStep, Fs)
+  opt.reaction === nothing || return (:design, "DoubleWell")
+  any(F -> _has_step(physical_fields(F)), Fs) && return (:physical, "Step() in the chain")
+  any(F -> _has_interface_map(physical_fields(F)), Fs) && return (:physical, "Ersatz() in the chain")
+  (:design, "density field")
+end
+# the functionals the step differentiates: the objective and the constraints that are not native
+_differentiated(problem, native) =
+  (problem.objective, (c.F for (j, c) in enumerate(problem.constraints) if !(j in native))...)
+_differentiated(oracle, fo::FunctionalOracle) =
+  oracle isa AugmentedLagrangianOracle ? (fo.J, (fo.cons[i].F for i in oracle.absorbed)...) : (fo.J,)
 
 # a nodal P1 scalar field (H¹): one value per vertex of each cell, shared between cells
 function _is_nodal_p1(U)
@@ -1728,23 +1808,31 @@ function check_problem(m::ReactionDiffusion, problem)
   native = _native_split(problem, m.step, m.lagrangian)
   _set_tolerance!(m.step, problem, native)
   _resolve_Δt!(m.step, (problem.objective, (c.F for c in problem.constraints)...))
+  sens, why = _deduced_sensitivity(m.step, _differentiated(problem, native))
+  m.step.sensitivity[] = sens
   m.step.reaction === nothing || return _check_double_well(m, problem)
-  m.step.sensitivity === :design || return nothing
-  for (j, (n, F)) in enumerate(pairs((objective = problem.objective, map(c -> c.F, problem.constraints)...)))
-    j > 1 && (j - 1) in native && continue      # the native constraint is only evaluated (the root), never differentiated
-    θ = physical_fields(F)
-    who = n === :objective ? "the objective" : "the constraint $n"
-    _has_step(θ) &&
-      throw(ArgumentError("ReactionDiffusion: $who reads a field through Step(), which has no derivative with respect " *
-                          "to the design: use sensitivity = :physical, or Ersatz()"))
-    # decision of Jesús (2026-11-25): :design with an interface map and without the double well is not a method
-    θ isa PhysicalFields && has_ersatz(θ) &&
-      throw(ArgumentError("ReactionDiffusion: sensitivity = :design with an interface map is not a method of " *
-                          "ReactionDiffusion: the exact derivative lives on the cut cells and nothing holds the plateaus. " *
-                          "To move only the boundary from a start with holes use a density field (bounds = (0.0, 1.0), " *
-                          "no interface map) with reaction = DoubleWell(…) and hole_seed; to nucleate holes use " *
-                          "sensitivity = :physical"))
+  # the deprecated keyword: a value that contradicts the deduced one keeps the errors of before
+  if m.sensitivity === :design && sens === :physical
+    for (j, (n, F)) in enumerate(pairs((objective = problem.objective, map(c -> c.F, problem.constraints)...)))
+      j > 1 && (j - 1) in native && continue      # the native constraint is only evaluated (the root), never differentiated
+      θ = physical_fields(F)
+      who = n === :objective ? "the objective" : "the constraint $n"
+      _has_step(θ) &&
+        throw(ArgumentError("ReactionDiffusion: $who reads a field through Step(), which has no derivative with respect " *
+                            "to the design: leave sensitivity out (it is then :physical), or use Ersatz()"))
+      # decision of Jesús (2026-11-25): :design with an interface map and without the double well is not a method
+      θ isa PhysicalFields && has_ersatz(θ) &&
+        throw(ArgumentError("ReactionDiffusion: sensitivity = :design with an interface map is not a method of " *
+                            "ReactionDiffusion: the exact derivative lives on the cut cells and nothing holds the plateaus. " *
+                            "To move only the boundary from a start with holes use a density field (bounds = (0.0, 1.0), " *
+                            "no interface map) with reaction = DoubleWell(…) and hole_seed; to nucleate holes leave " *
+                            "sensitivity out (it is then :physical)"))
+    end
   end
+  sens === :design && m.sources[:void_weight] === :given &&
+    throw(ArgumentError("ReactionDiffusion: void_weight has no effect here: it weights the sensitivity through an " *
+                        "interface map (Step(), Ersatz()), and no functional that the step differentiates reads one " *
+                        "(the sensitivity is the exact derivative: $why); leave void_weight out"))
   nothing
 end
 
@@ -1807,7 +1895,8 @@ function banner_lines(m::ReactionDiffusion, problem)
   area = sum(∫(1.0)Measure(Ω, 1))
   ℓ2 = area^(2 / num_cell_dims(Ω))
   lines = Tuple{String,Symbol}[]
-  sens = opt.sensitivity === :physical ? ":physical (void weight $(_g(opt.void_weight))$(mark(:void_weight)))" : ":design"
+  smode, why = _deduced_sensitivity(opt, _differentiated(problem, _native_split(problem, opt, m.lagrangian)))
+  sens = smode === :physical ? "physical ($why, void weight $(_g(opt.void_weight))$(mark(:void_weight)))" : "exact ($why)"
   dw = opt.reaction
   # with the double well n and Δt need K and m: the event after the setup gives them
   Δtl = dw !== nothing && opt.Δt === :auto ? (dw.substeps == 0 ?
@@ -1815,10 +1904,9 @@ function banner_lines(m::ReactionDiffusion, problem)
                                                 ":auto = $(_g(_cfl(dw))) Δt_lim per substep") * mark(:Δt) :
         opt.Δt === :auto ? _g(opt.Δt_auto[]) * " (default: " * (opt.Δt_auto[] == 0.2 ? "interface map)" : "no interface map)") :
         _rd_value(opt.Δt) * mark(:Δt) * (dw === nothing ? "" : " per substep")
-  dw === nothing || (sens = ":design (with DoubleWell)")
   dtext = opt.κgiven ? "κ = $(_rd_value(opt.τ)) (τ = κ/ℓ² = $(_g(_value(opt.τ) / ℓ2)), ℓ² = $(_g(ℓ2)))" :
                        "τ = $(_rd_value(opt.τ)) (κ = τℓ² = $(_g(_value(opt.τ) * ℓ2)), ℓ² = $(_g(ℓ2)))"
-  push!(lines, ("method: sensitivity = $sens · Δt = $Δtl · $dtext · clip [$(_g(b.lb)), $(_g(b.ub))]", :normal))
+  push!(lines, ("method: sensitivity: $sens · Δt = $Δtl · $dtext · clip [$(_g(b.lb)), $(_g(b.ub))]", :normal))
   if dw !== nothing
     push!(lines, ("reaction: $dw$(mark(:reaction)) · " * (dw.scheme === :implicit ? "implicit diffusion" : "explicit diffusion") *
                   " and semi-implicit reaction, multiplier inside the tilt · " *
@@ -1861,7 +1949,7 @@ function banner_lines(m::ReactionDiffusion, problem)
       ms = _max_step(opt, _has_interface_map(θ))
       opt.reaction === nothing || (kind = "inside the tilt of the double well, Illinois on " *
                                           (is_linear(F) ? "vectors" : "the constraint"))
-      push!(lines, ("$n: native" * (opt.volume.constraint === nothing ? " (the Volume)" : " (named)") *
+      push!(lines, ("$n: native" * (opt.volume.constraint === nothing && m.lagrangian.native === :auto ? " (the Volume)" : " (named)") *
                     ", exact multiplier ($kind, tol $(_g_or_e(opt.volume.tol)) |D|), " *
                     (ms === nothing ? "target from the first iteration" : "target lowered $(_g(100 * ms)) % of |D| per iteration") *
                     mark(:volume), :normal))

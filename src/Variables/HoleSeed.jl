@@ -847,7 +847,7 @@ z  = OptVariables(φ = FieldVariable(Vφ; bounds = (-1.0, 1.0), init = φ0, froz
 ```
 
 Two uses:
-1. A starting design for a method that nucleates holes, such as `ReactionDiffusion(…; sensitivity = :physical)`
+1. A starting design for a method that nucleates holes, such as `ReactionDiffusion` with an interface map (`Ersatz()`, `Step()`)
    (optional; Yamada et al. 2010 start from perforated designs too): studies of the dependence of the design on the
    start. A solid start is still the default of the examples.
 2. The start of a method that only moves the boundary and cannot create holes (the double-well reaction–diffusion

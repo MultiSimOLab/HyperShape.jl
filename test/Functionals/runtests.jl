@@ -129,7 +129,7 @@ struct _NoSpaces <: HyperFEM.ComputationalModels.ComputationalModel end   # a mo
     for bad in (0.0, -1.0, NaN, Inf, :first)
       @test_throws ArgumentError p.compliance(scale = bad)
     end
-    @test_throws UndefKeywordError p.compliance()
+    @test_throws r"scale is mandatory" p.compliance()
   end
 
   @testset "States are solved only when something changed; one assembly of the adjoint per design" begin
