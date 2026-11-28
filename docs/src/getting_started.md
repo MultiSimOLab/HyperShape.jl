@@ -69,7 +69,7 @@ function run_mbb(; nx = 60, ny = 20, maxiter = 300, out = "results/mbb", verbose
     write_step(post, Ω, "rho" => θ.ρ, "x" => x.ρ, "u" => get_state(S))
   end
   problem = Optimization(objective = C, constraints = (volume = Vol,))
-  solve!(problem, DensityMethod(SiMPL(); metric = LumpedMass(dΩ)); maxiter, verbose,
+  solve!(problem, DensityMethod(SiMPL()); maxiter, verbose,
          stop         = StopCriteria(stationarity_rtol = 1e-3),
          continuation = Continuation(β = proj => [1, 2, 4, 8, 16]; every = 40),
          checkpoint   = Checkpoint(filepath = joinpath(out, "checkpoint"), every = 20),
@@ -103,8 +103,8 @@ result = run_mbb()
   to the physical fields (`dJdθ`, only if `J` reads them). HyperShape puts the signs. `Volume` is built in.
   `check_consistency` runs Taylor tests of every derivative and checks the declared dependencies: run it once on a
   coarse mesh whenever you write a new derivative.
-- **Solve.** `Optimization(objective = C, constraints = (volume = Vol,))` is the problem; `DensityMethod(SiMPL(); metric)` the method (or
-  `OC()`). `solve!` runs the common loop: `stop` criteria (here the stationarity measure of the SiMPL paper,
+- **Solve.** `Optimization(objective = C, constraints = (volume = Vol,))` is the problem; `DensityMethod(SiMPL())` the
+  method, with the lumped-mass metric of SiMPL by default (`metric = …` replaces it), or `DensityMethod(OC())`. `solve!` runs the common loop: `stop` criteria (here the stationarity measure of the SiMPL paper,
   relative to the first iteration), `continuation` of parameters in stages (β of the projection; any `Parameter` of
   yours, such as the SIMP penalty, read in the weak forms and declared as a dependency of the state:
   `StateOperator(model, (θ, p))`), `checkpoint` (resume with `solve!(…; resume = folder)`), `monitors` (the measure of
@@ -127,17 +127,19 @@ iteration until it reaches the target. By default `solve!` stops when, with the 
 
 ```julia
 z  = OptVariables(φ = FieldVariable(Vφ; bounds = (-1.0, 1.0), init = 1.0, frozen = 1.0))
-x  = DesignFields(z; φ = Identity())
+x  = DesignFields(z)                      # z → x: the identity
 θ  = PhysicalFields(x; χ = :φ => Ersatz())
 dΩ = design_measures(θ; degree = 4)
 # … the state with E(χ) = Emin + χ (1 − Emin) and the exact sensitivity ∂a/∂χ, as in the script above
 problem = Optimization(z; objective = C, constraints = (volume = Volume(θ, dΩ; max_fraction = 0.5),))
-solve!(problem, ReactionDiffusion(; τ = 2e-4, sensitivity = :physical); maxiter = 400)
+solve!(problem, ReactionDiffusion(; τ = 2e-4); maxiter = 400)
 ```
 
-`τ` (the diffusion) and `sensitivity` are the two decisions: `:physical` lets holes appear where the material is
-little used. `Step()` in place of `Ersatz()` and other stopping criteria are options; which to use will be validated
-with more cases. See [Design](@ref) for the step, the exact volume and the other options.
+`τ` (the diffusion) is the decision. With an interface map in the chain the step takes the sensitivity with respect
+to the material (the derivative weighted by the material: holes appear where it is little used), and the banner says
+so (`sensitivity: physical (Ersatz() in the chain, …)`). `Step()` in place of `Ersatz()` and other stopping criteria
+are options; which to use will be validated with more cases. See [Design](@ref) for the step, the exact volume and
+the other options.
 
 The same run can start from a perforated design: `hole_seed` gives the free values of `φ` with a staggered pattern of
 holes (lengths in the units of the mesh), away from the clamp and from the frozen cells under the load:
@@ -147,7 +149,7 @@ holes (lengths in the units of the mesh), away from the clamp and from the froze
 z  = OptVariables(φ = FieldVariable(Vφ; bounds = (-1.0, 1.0), init = φ0, frozen = 1.0))
 ```
 
-With `sensitivity = :physical` the seed is optional (holes still nucleate and merge; useful to study the dependence on
+With an interface map the seed is optional (holes still nucleate and merge; useful to study the dependence on
 the start); methods that only move the boundary need it: the double well, `ReactionDiffusion(; τ, reaction =
 DoubleWell())` on a density (`bounds = (0.0, 1.0)`, `hole_seed(Vφ; bounds = (0.0, 1.0), …)`), whose holes are those of
 the seed (`examples/bridge_dw.jl`, the bridge of Takezawa et al. 2010).

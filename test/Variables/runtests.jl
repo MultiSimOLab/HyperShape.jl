@@ -66,6 +66,8 @@ end
     @test_throws ArgumentError FieldVariable(p.V0; bounds = (1.0, 1.0), init = 1.0)
     @test_throws ArgumentError FieldVariable(p.V0; bounds = (0.0, 1.0), init = 1.5)
     @test_throws DimensionMismatch FieldVariable(p.V0; bounds = (0.0, 1.0), init = [0.5])
+    @test_throws r"bounds is mandatory" FieldVariable(p.V0; init = 0.5)
+    @test_throws r"init is mandatory" FieldVariable(p.V0; bounds = (0.0, 1.0))
     Vd = TestFESpace(p.model, ReferenceFE(lagrangian, Float64, 1); conformity = :H1, dirichlet_tags = "boundary")
     @test_throws ArgumentError FieldVariable(Vd; bounds = (0.0, 1.0), init = 0.5)
   end
@@ -88,6 +90,19 @@ end
     @test_throws ArgumentError DesignFields(z; a = Identity())
     @test_throws ArgumentError DesignFields(z; a = Identity(), b = Identity(), c = Identity())
     @test_throws ArgumentError DesignFields(z; a = Identity(), b = TanhProjection(β = 1.0, η = 0.5))
+    @test_throws r"give a map for every block .*, or none" DesignFields(z; a = Identity())
+    # the identity implied (decision of Jesús, 2026-11-28): DesignFields(z), PhysicalFields(x; E = :a), PhysicalFields(x)
+    xi = DesignFields(z)
+    @test propertynames(xi) == (:a, :b) && get_free_dof_values(xi.a) == get_free_dof_values(x.a)
+    θi, θe = PhysicalFields(xi), PhysicalFields(xi; a = Identity(), b = Identity())
+    @test propertynames(θi) == (:a, :b) && typeof(θi) == typeof(θe)
+    θs = PhysicalFields(xi; E = :a, b = :b)
+    @test propertynames(θs) == (:E, :b) && typeof(θs) == typeof(PhysicalFields(xi; E = :a => Identity(), b = :b => Identity()))
+    @test getfield(θs, :sources) == (1, 2)
+    @test_throws ArgumentError PhysicalFields(xi; E = :c)
+    @test_throws r"give the measure of the domain, Volume" Volume(θi; max_fraction = 0.5)
+    @test_throws r"give the measure of the domain, Volume" Volume(xi; max_fraction = 0.5, field = :a)
+    @test typeof(PhysicalFields(xi; backend = :lazy)) == typeof(PhysicalFields(xi; a = Identity(), b = Identity(), backend = :lazy))
   end
 
   @testset "Helmholtz filter = direct solve ($(name))" for (name, V, ρ) in (("P0", p.V0, ρ0), ("P1", p.V1, ρ1))
@@ -475,6 +490,8 @@ end
 
   @testset "Short constructor of the filter: options" begin
     @test_throws UndefKeywordError HelmholtzFilter(p.dΩ)
+    @test_throws r"give the measure of the design domain" HelmholtzFilter(; rmin = 1.0, ls = LUSolver())   # measure forgotten
+    @test_throws r"give the measure of the design domain" CellMean()
     @test_throws ArgumentError HelmholtzFilter(p.dΩ; rmin = 0.0)
     @test_throws ArgumentError HelmholtzFilter(p.dΩ; rmin = 0.1, order = 0)
     # the solve given by the user is the one used

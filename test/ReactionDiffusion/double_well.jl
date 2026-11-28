@@ -222,7 +222,8 @@ end
     end
     fo, z, s = rd_start(c, dw(; scheme = :explicit))
     @test s.nsub == 32 && s.Δt == 25 / 32 && s.Δt <= s.Δtlim / 3
-    # substeps given: T is ignored and Δt = :auto is cfl Δt_lim (the preset :takezawa2010)
+    # substeps given (T then has no effect: giving both is an error): Δt = :auto is cfl Δt_lim (the settings of Takezawa)
+    @test_throws r"give T .* or substeps = n, not both" DoubleWell(T = 25.0, substeps = 20)
     fo, z, s = rd_start(c, dw(; scheme = :explicit, substeps = 20))
     @test s.Δt ≈ s.Δtlim / 3 rtol = 1e-14
     @test s.substeps == s.nsub == 20
@@ -372,15 +373,22 @@ end
     @test findfirst(k -> steady(k, w -> max(maximum(abs, w), 1e-3 * abs(h[1]))), 10:length(h)) + 9 < r.iterations - 10
   end
 
-  @testset "10. presets: :takezawa2010, keywords that replace it, banner" begin
-    m = ReactionDiffusion(:takezawa2010; τ = 5e-6)
+  @testset "10. the deprecated preset :takezawa2010, keywords that replace it, banner; TAKEZAWA2010 of validation" begin
+    m = @test_deprecated ReactionDiffusion(:takezawa2010; τ = 5e-6)
     dwp = m.step.reaction
     @test dwp.W == 0.25 && dwp.η == 20.0 && dwp.scheme === :explicit && dwp.substeps == 20 && !dwp.settle
-    @test m.step.sensitivity === :design && m.step.volume.max_step == 0.01 && m.step.normalize isa RDM._TakezawaNorm
+    @test m.step.volume.max_step == 0.01 && m.step.normalize isa RDM._TakezawaNorm
     @test RDM.method_label(m) == "ReactionDiffusion(:takezawa2010)"
     g, mm = [1.0, -2.0, 0.5], [0.1, 0.2, 0.3]
     @test m.step.normalize(g, mm, 2.0) ≈ 1 / sqrt(sum(g .^ 2 ./ mm)) rtol = 1e-14
-    m2 = ReactionDiffusion(:takezawa2010; τ = 5e-6, reaction = DoubleWell())
+    # the named tuple of validation/common/presets.jl: the same keywords, the same normalisation bit for bit
+    mt = ReactionDiffusion(; τ = 5e-6, TAKEZAWA2010...)
+    @test mt.step.reaction == dwp && mt.step.volume.max_step == 0.01 && mt.step.normalize(g, mm, 2.0) == m.step.normalize(g, mm, 2.0)
+    rp = solve!(dw_cantilever(; nx = 20, ny = 10).problem, m; maxiter = 4, stop = nothing, verbose = 0)
+    rt = solve!(dw_cantilever(; nx = 20, ny = 10).problem, mt; maxiter = 4, stop = nothing, verbose = 0)
+    @test rp.history.objective == rt.history.objective && get_values(rp.z) == get_values(rt.z)
+    @test m.step.sensitivity[] === :design && mt.step.sensitivity[] === :design      # deduced: the exact derivative
+    m2 = @test_deprecated ReactionDiffusion(:takezawa2010; τ = 5e-6, reaction = DoubleWell())
     @test m2.step.reaction.scheme === :implicit && m2.sources[:reaction] === :given && m2.sources[:normalize] === :preset
     c = dw_cantilever(; nx = 20, ny = 10)
     io = IOBuffer()
@@ -388,11 +396,11 @@ end
     s = String(take!(io))
     @test occursin("reaction: DoubleWell(W = 0.25, η = 10, T = 25, cfl = :auto, scheme = :implicit, settle = true) (given, replaces :takezawa2010)", s)
     @test occursin("normalize: L² norm without |D| (Takezawa et al. 2010) (:takezawa2010)", s)
-    # the defaults with the well: :design, L2Norm(), 1 % of |D| per iteration, the event of Δt
+    # the defaults with the well: the exact sensitivity, L2Norm(), 1 % of |D| per iteration, the event of Δt
     io = IOBuffer()
     solve!(dw_cantilever(; nx = 20, ny = 10).problem, dw(); maxiter = 2, stop = nothing, verbose = 1, io)
     s = String(take!(io))
-    @test occursin("sensitivity = :design (with DoubleWell)", s) && occursin("L2Norm() (default)", s)
+    @test occursin("sensitivity: exact (DoubleWell)", s) && occursin("L2Norm() (default)", s)
     # 20×10: Δt_lim = 0.375 h²/κ = 9.375, T/(4/3 Δt_lim) = 2 up to rounding: 2 substeps of 12.5 (the event after the
     # setup; the banner gives the formula and does not assemble K and m)
     @test occursin("Δt = :auto = T/n = 25/n per substep (n = ⌈T/(cfl Δt_lim)⌉, cfl 1.33)", s)
@@ -418,11 +426,11 @@ end
       @test_throws r"double well with an interface map is not offered" solve!(ci.problem, dw(); maxiter = 1, verbose = 0)
     end
     @test_throws r":physical is not offered with DoubleWell" ReactionDiffusion(; τ = 1e-4, sensitivity = :physical, reaction = DoubleWell())
-    @test ReactionDiffusion(; τ = 1e-4, sensitivity = :design, reaction = DoubleWell()).step.sensitivity === :design
+    @test (@test_deprecated ReactionDiffusion(; τ = 1e-4, sensitivity = :design, reaction = DoubleWell())).sensitivity === :design
     cs = rd_cantilever(; nx = 20, ny = 10, design = :density, init = 0.7)            # no interface
     @test_throws r"starting design has none.*hole_seed\(Vφ; bounds = \(0.0, 1.0\)" solve!(cs.problem, dw(); maxiter = 1, verbose = 0)
     @test_throws r"sensitivity = :design with an interface map is not a method.*DoubleWell" solve!(c.problem,
-      ReactionDiffusion(; τ = 1e-4, sensitivity = :design); maxiter = 1, verbose = 0)
+      (@test_deprecated ReactionDiffusion(; τ = 1e-4, sensitivity = :design)); maxiter = 1, verbose = 0)
     @test_throws r"W must be positive" DoubleWell(W = 0.0)
     @test_throws r"η must be positive" DoubleWell(η = -1.0)
     @test_throws r"substeps must be nothing or at least 1" DoubleWell(substeps = 0)
@@ -430,7 +438,7 @@ end
     @test_throws r"T must be positive" DoubleWell(T = Inf)
     @test_throws r"scheme must be" DoubleWell(scheme = :kim)
     @test_throws r"cfl must be" DoubleWell(cfl = 0.0)
-    @test_throws r"reaction must be nothing or DoubleWell" ReactionDiffusion(; τ = 1e-4, sensitivity = :design, reaction = :well)
+    @test_throws r"reaction must be nothing or DoubleWell" ReactionDiffusion(; τ = 1e-4, reaction = :well)
     cz = dw_cantilever(; nx = 20, ny = 10)
     @test_throws r"needs τ > 0" solve!(cz.problem, ReactionDiffusion(; τ = 0.0, reaction = DoubleWell()); maxiter = 1, verbose = 0)
     # τ = 0 with the substeps and Δt given: no width of the interface in the event (no NaN)
@@ -444,8 +452,8 @@ end
     @test_throws r"κ must be a number, not a Parameter" ReactionDiffusion(; κ = Parameter(2DW_τ), reaction = DoubleWell())
     @test_throws r"Δt must be a number, not a Parameter" ReactionDiffusion(; τ = DW_τ, Δt = Parameter(1.0),
                                                                           reaction = DoubleWell(substeps = 2))
-    @test_throws r"τ must be a number, not a Parameter" ReactionDiffusion(:takezawa2010; τ = Parameter(5e-6))
-    @test ReactionDiffusion(; τ = Parameter(DW_τ), sensitivity = :physical).step.τ isa Parameter   # without the well: as before
+    @test_throws r"τ must be a number, not a Parameter" ReactionDiffusion(; τ = Parameter(5e-6), TAKEZAWA2010...)
+    @test ReactionDiffusion(; τ = Parameter(DW_τ)).step.τ isa Parameter   # without the well: as before
   end
 
   @testset "11b. κ = τℓ² instead of τ" begin
@@ -458,7 +466,7 @@ end
     @test s.τ ≈ DW_τ rtol = 1e-14
     @test s.Δtlim ≈ s2.Δtlim rtol = 1e-12
     @test s.nsub == s2.nsub
-    fo, z, s3 = rd_start(rd_cantilever(; nx = 20, ny = 10), ReactionDiffusion(; κ = 4e-4, sensitivity = :physical))
+    fo, z, s3 = rd_start(rd_cantilever(; nx = 20, ny = 10), ReactionDiffusion(; κ = 4e-4))
     @test s3.τ ≈ 2e-4 rtol = 1e-14                                       # also without the well
     @test startswith(sprint(show, ReactionDiffusion(; κ = 1e-5, reaction = DoubleWell())), "ReactionDiffusion(κ = 1.0e-5")
     io = IOBuffer()
@@ -486,12 +494,12 @@ end
       n > 1 && @test ra.state.settled
     end
     κ = 4e-4                                         # without the well
-    fo, z, s = rd_start(rd_cantilever(; nx = 30, ny = 15), ReactionDiffusion(; κ, sensitivity = :physical))
+    fo, z, s = rd_start(rd_cantilever(; nx = 30, ny = 15), ReactionDiffusion(; κ))
     τ = κ / s.ℓ2
     @test s.c === κ && τ * s.ℓ2 == κ
     run0(m) = solve!(rd_cantilever(; nx = 30, ny = 15).problem, m; maxiter = 20, stop = nothing, verbose = 0)
-    ra = run0(ReactionDiffusion(; κ, sensitivity = :physical))
-    rb = run0(ReactionDiffusion(; τ, sensitivity = :physical))
+    ra = run0(ReactionDiffusion(; κ))
+    rb = run0(ReactionDiffusion(; τ))
     @test get_values(ra.z) == get_values(rb.z) && ra.history.objective == rb.history.objective
   end
 
@@ -639,7 +647,8 @@ end
     end
     # a native constraint that is not linear: the root through the oracle
     c = dw_cantilever(; nx = 20, ny = 10, left_cap = 0.3)
-    r = solve!(c.problem, ReactionDiffusion(; τ = DW_τ, reaction = DoubleWell(), volume = ExactVolume(constraint = :left));
+    r = solve!(c.problem, ReactionDiffusion(; τ = DW_τ, reaction = DoubleWell(),
+                                                lagrangian = AugmentedLagrangian(native = (:left,)));
                maxiter = 40, stop = nothing, verbose = 0)
     @test r.state.kind === :newton && r.history.constraints.left[end] <= 1e-4 * 2 / 0.6
     @test all(isfinite, r.history.objective) && all(v -> 0 <= v <= 1, get_values(r.z))

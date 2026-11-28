@@ -24,7 +24,7 @@ function run_cantilever_rd(; nx = 120, ny = 60, maxiter = 400, interface = Ersat
 
   # Design: level set φ ∈ [−1, 1], solid start, frozen at 1 under the load; χ = material through the interface map
   z  = OptVariables(φ = FieldVariable(Vφ; bounds = (-1.0, 1.0), init = 1.0, frozen = 1.0))
-  x  = DesignFields(z; φ = Identity())
+  x  = DesignFields(z)
   θ  = PhysicalFields(x; χ = :φ => interface)
   dΩ = design_measures(θ; degree = 4)
 
@@ -48,7 +48,7 @@ function run_cantilever_rd(; nx = 120, ny = 60, maxiter = 400, interface = Ersat
     write_step(post, Ω, "chi" => θ.χ, "phi" => x.φ, "u" => get_state(S))
   end
   problem = Optimization(z; objective = C, constraints = (volume = Vol,))
-  method  = ReactionDiffusion(; τ, sensitivity = :physical)
+  method  = ReactionDiffusion(; τ)
   solve!(problem, method; maxiter, verbose, post)       # default stop: volume, material and objective steady, or maxiter
 end
 

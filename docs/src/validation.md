@@ -115,8 +115,9 @@ result of a nonconvex problem depends on the path.
 Takezawa, Nishiwaki and Kitamura, *Shape and topology optimization based on the phase field method and sensitivity
 analysis*, JCP 229 (2010), section 5.2: domain 2 × 1, roller at (0, 0), pin at (2, 0), unit point load at (1, 0), plane
 stress (E = 1, ν = 0.3), volume 0.3, `k(φ) = max(φ³, 1e-5)`, κ = 1e-5 on a 200 × 100 grid, 100 iterations: published
-J = 23.3. `ReactionDiffusion(; κ, reaction = DoubleWell())` (`τ = κ/|D|`) (the default scheme) and the preset
-`:takezawa2010` (their explicit scheme), from their seed (rows of rectangular holes) and from `hole_seed` (`:hex`,
+J = 23.3. `ReactionDiffusion(; κ, reaction = DoubleWell())` (`τ = κ/|D|`) (the default scheme) and the settings of
+the paper, `:takezawa2010` (their explicit scheme: `ReactionDiffusion(; τ, TAKEZAWA2010...)`, with the named tuple of
+`validation/common/presets.jl`), from their seed (rows of rectangular holes) and from `hole_seed` (`:hex`,
 radius 0.1, spacing 0.4), 100 iterations (`validation/bridge_takezawa.jl`; 2026-11-26, `T = 25` per iteration: 5
 substeps of 5 with the default scheme, 20 of 1.25 with the preset):
 
@@ -187,7 +188,7 @@ five unit nodal forces in the middle of the right side, plane stress (E = 1, Emi
 `ReactionDiffusion` is run as it is, with the parameters the paper fixes (`Δt = 0.1`, consistent mass,
 `phi_bc = :zero_boundary`, `void_weight = 1e-4`, the volume lowered over 100 iterations, `ExactVolume(max_step =
 0.005)`) and the defaults of the method for the rest (`validation/otomori_levelset88.jl`; 2026-11-27): a level set
-through `Ersatz()`, `sensitivity = :physical` (the exact derivative of the compliance weighted by the material,
+through `Ersatz()`, so the sensitivity with respect to the material (deduced from the chain: the exact derivative of the compliance weighted by the material,
 instead of their topological derivative of the spherical hole), the exact multiplier of the volume (instead of their
 exponential rule), `L1Mean()` and the default stop (instead of their criterion). A comparison of the method, not a
 reproduction of the code. The compliance of the design of HyperShape is also evaluated as levelset88 reads a design

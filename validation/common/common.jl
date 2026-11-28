@@ -5,9 +5,11 @@
 #   measures.jl   measures of a design: cell means, J_bin, binary volume, grey, perimeter, interior holes
 #   report.jl     the fixed report table (CSV and Markdown)
 #   figure.jl     SVG figures of 0/1 designs beside their reference, with histories
+#   presets.jl    the settings of the reaction–diffusion method in papers (named tuples of keywords)
 using Gridap, Gridap.Geometry, HyperFEM, HyperShape, Printf
 
 include(joinpath(@__DIR__, "measures.jl"))
 include(joinpath(@__DIR__, "report.jl"))
 include(joinpath(@__DIR__, "figure.jl"))
+include(joinpath(@__DIR__, "presets.jl"))
 include(joinpath(@__DIR__, "problems.jl"))

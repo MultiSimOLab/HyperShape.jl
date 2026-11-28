@@ -26,7 +26,7 @@ Implemented (filter by PDE, tanh projection, P0 and P1 design fields):
 F = HelmholtzFilter(dΩ; rmin = 0.05, ls = LUSolver())   # r = rmin/(2√3), P1, Neumann; ls goes to StaticLinearModel
 
 z = OptVariables(ρ = FieldVariable(Vρ; bounds = (0.0, 1.0), init = 0.5))
-x = DesignFields(z; ρ = Identity())
+x = DesignFields(z)                                     # z → x: the identity (the only map for now)
 θ = PhysicalFields(x; ρ = TanhProjection(β = 1.0, η = 0.5) ∘ F)
 
 # the same in one line
@@ -53,7 +53,9 @@ Sf = LinearOperator(StaticLinearModel(af, Uf, Vf, NothingBC(); ls = LUSolver()))
   rounding. On 65 000 cells the compiled backend computes a design gradient 1.5 times faster than the lazy one with
   one thread and 5 to 7 times faster with four (`julia -t N`); on meshes of about a thousand cells both take well
   under a millisecond.
-- Bounds, initial values and maps are mandatory; write `Identity()` when there is no transformation.
+- Bounds and initial values are mandatory. Without a map a field is the identity: `DesignFields(z)` (z → x),
+  `PhysicalFields(x; χ = :φ)` (`χ = :φ => Identity()`) and `PhysicalFields(x)` (every design field under its own
+  name); writing `Identity()` is the same (decision of Jesús, 2026-11-28).
 - Only HyperShape writes `x` and `θ`; the user reads them as Gridap fields.
 - The filtered density is a P1 field and `θ` is evaluated at the quadrature points, so the stiffness varies inside an
   element. Codes such as top88 use one value per element, the cell mean of the filtered field:
@@ -95,7 +97,7 @@ HyperShape gives, so that a later treatment by cut cells changes the quadrature 
 
 ```julia
 z  = OptVariables(φ = FieldVariable(Vφ; bounds = (-1.0, 1.0), init = x -> …))   # Vφ: P1; init may be a function of x
-x  = DesignFields(z; φ = Identity())
+x  = DesignFields(z)
 θ  = PhysicalFields(x; ρ = :φ => Ersatz() ∘ HelmholtzFilter(dΩ; rmin, ls = LUSolver()))   # or ρ = :φ => Step()
 dΩd = design_measures(θ; degree = 2)        # dΩd.domain: a Measure; solid, void, interface reserved for cut cells
 a(u, v) = ∫(… θ.ρ …)dΩd.domain
@@ -282,7 +284,7 @@ accept or reject, continuation, stopping, checkpoint); only the step is specific
 | Method | Design field | Step |
 |---|---|---|
 | `DensityMethod(optimizer; metric)` | density in [0, 1] | any `Optimizer` (`OC`, `SiMPL`) |
-| `ReactionDiffusion(; τ, sensitivity)` | level set in [−1, 1] through `Ersatz()` or `Step()`, or density in [0, 1] | one linear solve (factorised once), clipping, exact multiplier of the volume |
+| `ReactionDiffusion(; τ)` | level set in [−1, 1] through `Ersatz()` or `Step()`, or density in [0, 1] | one linear solve (factorised once), clipping, exact multiplier of the volume |
 | `LevelSet` (phase 2) | signed distance | velocity extension, advection, reinitialisation |
 
 Implemented: `Optimization`, `DensityMethod` and `ReactionDiffusion` with the common loop.
@@ -290,7 +292,7 @@ Implemented: `Optimization`, `DensityMethod` and `ReactionDiffusion` with the co
 ```julia
 Vol = Volume(θ, dΩ; max_fraction = 0.5)   # physical (projected) density: nonlinear in z; Volume(x, dΩ; …) is linear
 problem = Optimization(objective = J, constraints = (volume = Vol,))   # z is the one behind J
-result  = solve!(problem, DensityMethod(SiMPL(); metric = LumpedMass(dΩ));
+result  = solve!(problem, DensityMethod(SiMPL());          # metric: LumpedMass() by default with SiMPL
                  maxiter = 300, stop = StopCriteria(stationarity_rtol = 1e-3),
                  continuation = Continuation(β = proj => [1, 2, 4, 8, 16, 32]; every = 40),
                  checkpoint = Checkpoint(filepath = "results/ckpt", every = 10),
@@ -319,7 +321,7 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
   SiMPL keeps every iterate feasible; at an infeasible design, after a continuation jump, it first takes restoration
   steps that must reduce the violation, which can take several steps or end the stage as stalled). Cost per step: one
   transposed filter for its derivative and one filter per correction (about 1.5–3), no forward solve.
-- **Augmented Lagrangian:** `DensityMethod(SiMPL(); metric, lagrangian = AugmentedLagrangian(Bertsekas(μ0 = 1.0)))`,
+- **Augmented Lagrangian:** `DensityMethod(SiMPL(); lagrangian = AugmentedLagrangian(Bertsekas(μ0 = 1.0)))`,
   the default whenever a constraint is not native (a lower bound, an equality, an interval, one that reads a state, or
   more than the optimiser takes). The optimiser sees `f + Σ term(gᵢ)` over those constraints (Bertsekas' rule:
   `term = μ/2 (y − Π(y))² − λ²/(2μ)` with `y = g + λ/μ` and `Π` the projection onto the bounds), whose gradient is
@@ -353,7 +355,7 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
   table and the closing line. It is fixed mostly by β, so it is a measure of quality, not a stopping criterion.
 - **Context:** `OptContext` (iteration, attempt, trial, phase, continuation values, sensitivity mode) reaches every
   solve function of the user; phases `:setup`, `:check`, `:optimization` and `:linesearch`; `sensitivity` is
-  `:physical` only while `ReactionDiffusion(…; sensitivity = :physical)` computes the sensitivity of its step.
+  `:physical` only while `ReactionDiffusion` computes the sensitivity of its step with an interface map in the chain.
 - **Checkpoint:** `checkpoint.toml`, `z_<k>.bin` and `history_<k>.csv` in a folder; resume with
   `solve!(…; resume = "results/ckpt")` (the folder; or the result of `load_checkpoint`). OC (adaptive move limits, correction shift) and SiMPL (latent variable, Barzilai–Borwein memory, multiplier, shift) save their memory (`memory`/`restore_memory!`, a named tuple of numbers and design vectors), and the offsets of the linear constraints are kept (unless the user changed the bound or the scale), so a run resumed from an accepted iteration gives the designs of the uninterrupted one bit for bit (its first iteration repeats one forward solve). The state of a run is an `OptState` (`problem.state[]` after `solve!`; `resume = problem.state[]` continues without files); after an exception or an interruption the memory of the optimiser is not kept, and the resumed run restarts it. Checkpoints have format version 4 (version 3, without the column `step_solves` of the history, is read with those rows at 0; a resumed run says so). An `OC` continued by `continuation` gets its `move` back at the end of `solve!`.
 - **Factories and discretisation:** `Optimization(model; design_setup, physics_setup)` builds the problem from two
@@ -396,16 +398,24 @@ equation `∂φ/∂t = −C g − λ + τ ℓ² Δφ` (Yamada et al. 2010, Choi 
 
 ```julia
 z  = OptVariables(φ = FieldVariable(Vφ; bounds = (-1.0, 1.0), init = 1.0, frozen = 1.0))   # level set, solid start
-x  = DesignFields(z; φ = Identity())
+x  = DesignFields(z)
 θ  = PhysicalFields(x; χ = :φ => Ersatz())          # material: the fraction of each cell where φ ≥ 0
 dΩ = design_measures(θ; degree = 4)
 # … the state with E(χ) = Emin + χ (1 − Emin), the compliance C and Vol = Volume(θ, dΩ; max_fraction = 0.5)
 result = solve!(Optimization(z; objective = C, constraints = (volume = Vol,)),
-                ReactionDiffusion(; τ = 2e-4, sensitivity = :physical); maxiter = 400)
+                ReactionDiffusion(; τ = 2e-4); maxiter = 400)
 ```
 
 The whole script is `examples/cantilever_rd.jl`. The same method evolves a density (`bounds = (0.0, 1.0)`,
-`χ = :φ => Identity()` and SIMP in the weak forms).
+`χ = :φ` (the identity) and SIMP in the weak forms).
+
+- **Sensitivity** (deduced from the design chain, decision of Jesús, 2026-11-28; the banner says which and why): with
+  an interface map (`Step()`, `Ersatz()`) read by the objective or by a constraint of the augmented Lagrangian, the
+  derivative with respect to the material, the map taken as the identity weighted by the material,
+  `(w₀ + (1 − w₀) χ) ∂j/∂χ` (`w₀ = void_weight`, default `1e-3`): it nucleates holes (the exact derivative through the
+  map is not a method: it lives on the cut cells and would refill the void); with a density and with the double well,
+  the exact derivative. The keyword `sensitivity` of earlier versions is deprecated (accepted with a warning; a value
+  that contradicts the chain is an error), and `void_weight` given where it has no effect is an error.
 
 - **Step:** `(mass/Δt + τ ℓ² K) δ = −τ ℓ² (K z + k_d) − C g`, `φ* = z + δ`, then `z = clamp(φ* − λ φ̌, lb, ub)`. `K` is the
   diffusion matrix (`∇φ⋅∇v`, or the bilinear form `diffusion = (φ, v) -> ∫(…)dΩ` of the user), `k_d` the frozen values
@@ -415,8 +425,9 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
   `LUSolver()` by default, shown in the banner); `solve = (A, b, x, ctx, stale) -> x` replaces it (PETSc, an iterative
   solver). The operator is factorised again only when `Δt` or `τ` change (a `Parameter` of a `Continuation`, a
   rejected step). Frozen zones of the design space stay as they are (Neumann conditions for φ elsewhere).
-- **Volume** (`ExactVolume(; max_step, tol, maxiter, constraint)`, the default): the constraint built with `Volume`,
-  wherever it is in the problem (with none or several, `solve!` asks for `ExactVolume(; constraint = :name)`); the
+- **Volume** (`ExactVolume(; max_step, tol, maxiter)`, the default): the constraint built with `Volume`,
+  wherever it is in the problem (with none or several, `solve!` asks to name it with
+  `lagrangian = AugmentedLagrangian(native = (:name,))`); the
   multiplier `λ` is the root of
   `G(λ) = g(clamp(φ* − λ φ̌)) − g_k` with `φ̌ = A⁻¹ m` (`Δt` everywhere when no value is frozen): Newton on the
   clipped vector for a linear constraint (vectors only), Newton with the derivative of the constraint for `Ersatz()`,
@@ -482,10 +493,16 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
   step.
 - **Checkpoint:** the multiplier is the memory of the step (`memory`) and the windows of the stopping criteria are
   saved too: a resumed run is the uninterrupted one bit for bit and stops at the same iteration.
-- **Presets:** `ReactionDiffusion(:kim2020; τ, sensitivity)` sets the parameters of Kim et al. (2020): `L2Norm()`,
-  consistent mass, the volume in the augmented Lagrangian with their rule (`Bertsekas(μ0 = 0.2, growth = 1.025,
-  window = 1, progress = Inf, μmax = 2.0)`, `native = ()`); the keywords given replace those of the preset, and the
-  banner marks them.
+- **Settings of papers:** keywords like any other, not part of the API. `validation/common/presets.jl` writes those of
+  Kim et al. (2020), `KIM2020 = (Δt = 0.1, normalize = L2Norm(), mass = :consistent, volume = nothing, lagrangian =
+  AugmentedLagrangian(Bertsekas(μ0 = 0.2, growth = 1.025, window = 1, progress = Inf, μmax = 2.0)))`, used as
+  `ReactionDiffusion(; τ, KIM2020...)` (a keyword after them replaces theirs). With `volume = nothing` every constraint
+  goes to the augmented Lagrangian (no `native` to write); otherwise the step treats the constraint built with
+  `Volume`, or the one named with `lagrangian = AugmentedLagrangian(native = (:name,))`, its only name (giving both
+  `volume = nothing` and a `native`, or two different names, is an error). The positional presets
+  `ReactionDiffusion(:kim2020; …)` and `(:takezawa2010; …)` of earlier versions are deprecated. Deprecated forms
+  (these presets, `sensitivity`, `ExactVolume(constraint)`, `native = ()` with the default volume) still run, with a
+  warning that Julia shows only with `julia --depwarn=yes` (off by default; on in `Pkg.test()`).
 - **Per iteration:** one forward solve, one adjoint (none with `SelfAdjoint()`), one assembly of the sensitivity, one
   product `K z` and one substitution of the step, no factorisation; the volume costs a few evaluations (vectors for a
   density; the interface map and one integral for a level set). The solves of the step are in `history.step_solves`
@@ -528,7 +545,7 @@ hole is nucleated (the start needs an interface: `solve!` throws otherwise and p
 ```julia
 φ0 = hole_seed(Vφ; bounds = (0.0, 1.0), radius = 0.1, spacing = 0.4, exclude = ("roller", "pin", "load"))
 z  = OptVariables(φ = FieldVariable(Vφ; bounds = (0.0, 1.0), init = φ0))
-θ  = PhysicalFields(DesignFields(z; φ = Identity()); χ = :φ => Identity())
+θ  = PhysicalFields(DesignFields(z); χ = :φ)                   # a density read as it is (the identity)
 # … the state with k(φ) = max(φ³, 1e-5), the compliance C and Vol = Volume(θ, dΩ; max_fraction = 0.3)
 result = solve!(Optimization(z; objective = C, constraints = (volume = Vol,)),
                 ReactionDiffusion(; κ = 1e-5, reaction = DoubleWell()); maxiter = 300)   # τ = κ/|D| = 5e-6, T = 25
@@ -553,7 +570,8 @@ The whole script is `examples/bridge_dw.jl`; `validation/bridge_takezawa.jl` rep
   step of Takezawa et al.). The pointwise reaction needs `√(τℓ² Δt) ≲ 0.7 h` (a limit like a CFL condition), so the
   number of substeps grows like `(h₀/h)²`: with κ = 1e-5 and `T = 25` on the domain 2 × 1, 2, 5, 20 and 80 substeps on
   100 × 50, 200 × 100, 400 × 200 and 800 × 400. No new factorisation per iteration. `DoubleWell(substeps = n)` fixes
-  `n` instead (`T` is then ignored and `Δt = :auto` of the method is `cfl Δt_lim`; the preset `:takezawa2010`). The
+  `n` instead (without `T`: giving both is an error; `Δt = :auto` of the method is then `cfl Δt_lim`; the settings of
+  Takezawa et al., `TAKEZAWA2010` in `validation/common/presets.jl`). The
   event after the setup gives `T`, `n`, `Δt`, `Δt_lim` and `ξ = √(τℓ²/2W)` in mean cell sizes `(|D|/cells)^(1/d)`
   (`K` and `m` are assembled once, in the setup; the banner gives the formula; once per `solve!`, and again after a
   rebuild of the discretisation only if it changed). More than 10⁶ substeps per iteration
@@ -568,7 +586,7 @@ The whole script is `examples/bridge_dw.jl`; `validation/bridge_takezawa.jl` rep
   falsi, Illinois, from the previous `λ`), the target of the iteration is reached linearly over the substeps and
   `max_step = :auto` is `0.01` of `|D|` per iteration. A target out of reach in one substep (not enough interface)
   takes the end of the bracket; the next substeps catch up.
-- **Defaults with the well:** `sensitivity` is `:design` (`:physical` is refused), `normalize = L2Norm()` (with
+- **Defaults with the well:** the exact sensitivity (`void_weight` is refused), `normalize = L2Norm()` (with
   `η = 10` it is `η = 20` of Takezawa et al. on their domain of measure 2), `W = 1/4`.
 - **Settling** (decision of Jesús, 2026-11-25): with the sensitivity frozen over the substeps the interface overshoots
   and comes back, and 1–2 % of the material changes phase at every iteration. `settle = true` (default) goes to one
@@ -592,8 +610,9 @@ The whole script is `examples/bridge_dw.jl`; `validation/bridge_takezawa.jl` rep
 - **Grey:** `StopCriteria(grey_tol)` stops on the measure of grey `Σᵢ mᵢ 4φ̂ᵢ(1 − φ̂ᵢ)/|D|` (nodal, without
   allocations); with the well it stays at 1–3 % (the interface), so it is a criterion for a refinement stage, not for
   the evolution from the seed.
-- **Preset** `:takezawa2010`: `DoubleWell(W = 0.25, η = 20, scheme = :explicit, substeps = 20, settle = false)`, the
-  normalisation `1/‖g‖_L²` (without `|D|`), `ExactVolume(max_step = 0.01)`; the script sets `τ = κ/ℓ²`, the seed and
+- **Settings of Takezawa et al.** (`TAKEZAWA2010` in `validation/common/presets.jl`, `ReactionDiffusion(; τ,
+  TAKEZAWA2010...)`): `DoubleWell(W = 0.25, η = 20, scheme = :explicit, substeps = 20, settle = false)`, the
+  normalisation `1/‖g‖_L²` (without `|D|`; a function `(g, m, area) -> C` of the script), `ExactVolume(max_step = 0.01)`; the script sets `τ = κ/ℓ²`, the seed and
   `maxiter = 100, stop = nothing`. Differences with the paper: an exact multiplier instead of their rule for ζ, P1
   finite elements with lumped mass instead of finite differences.
 - **Per iteration:** one forward solve, one adjoint (none with `SelfAdjoint()`), `n` substitutions (none with
@@ -603,7 +622,8 @@ The whole script is `examples/bridge_dw.jl`; `validation/bridge_takezawa.jl` rep
   step (the substeps follow from the settling and the setup): a resumed run is the uninterrupted one bit for bit,
   across the settling and with a larger `maxiter`.
 - **Not offered:** the double well with an interface map (`Ersatz()`, `Step()`: φ ∈ [−1, 1] read through the map gave
-  hundreds of specks in the prototype), `sensitivity = :physical` with the well, and the nucleation of holes.
+  hundreds of specks in the prototype), the sensitivity with respect to the material with the well, and the
+  nucleation of holes.
 
 ## Optimisers
 
@@ -696,6 +716,8 @@ A default never removes generality: everything it sets can be replaced from the 
 | `RejectStep(shrink = 0.5, max_attempts = 5)` | `solve!(…; on_failure)` | `on_failure = RejectStep(…)` |
 | `default_stop(optimizer)` | `solve!(…; stop)` | `stop = StopCriteria(…)`, `stop = nothing` or `stop = (info, history, ctx) -> Bool` |
 | `Euclidean()` (only for the stationarity measure) | `DensityMethod(OC())` | `metric = LumpedMass(dΩ)`, a vector of weights or an object with `metric_weights(m, z)` |
+| `LumpedMass()` (the lumped mass of the design space) | `DensityMethod(SiMPL())` | the same |
+| `Identity()` | `DesignFields(z)`, `PhysicalFields(x; χ = :φ)`, `PhysicalFields(x)` | a map: `PhysicalFields(x; χ = :φ => map)` |
 | `ls = LUSolver()`, `mass = :lumped`, `normalize = L1Mean()`, `volume = ExactVolume()`, `Δt = :auto` (0.2 with an interface map, 0.4 without), `void_weight = 1e-3`, `lagrangian = AugmentedLagrangian()`, `phi_bc = :neumann` | `ReactionDiffusion` | the keyword of the same name; `solve = (A, b, x, ctx, stale) -> x` for any other solver; `diffusion = (φ, v) -> ∫(…)dΩ` |
 | `max_step = :auto` (`0.02` of `|D|` with an interface map), `tol = 1e-4` (of `|D|`) | `ExactVolume` | the keyword of the same name |
 | maps `Identity`, `HelmholtzFilter`, `TanhProjection`, `CellMean` | `PhysicalFields`, `single_field_design` | `PointwiseMap(f, df; parameters)` |

@@ -63,7 +63,7 @@ const _V3_EVENT = "checkpoint of format version 3: the step solves of its iterat
   @testset "a jump of τ and Δt by a continuation: φ̌ of the new factorisation in the row of the jump; resume at it" begin
     function contrun(; maxiter, kw...)
       pτ, pΔt = Parameter(2e-4), Parameter(0.1)
-      solve!(rd_cantilever(; nx = 20, ny = 10).problem, ReactionDiffusion(; τ = pτ, Δt = pΔt, sensitivity = :physical);
+      solve!(rd_cantilever(; nx = 20, ny = 10).problem, ReactionDiffusion(; τ = pτ, Δt = pΔt);
              maxiter, stop = nothing, verbose = 0,
              continuation = Continuation(τ = pτ => [2e-4, 1e-3], Δt = pΔt => [0.1, 0.05]; every = 3), kw...)
     end
@@ -195,7 +195,7 @@ const _V3_EVENT = "checkpoint of format version 3: the step solves of its iterat
     # a checkpoint of this version rewritten as version 3 (without the column): the columns after it are read
     pτ = Parameter(2e-4)
     d = mktempdir()
-    mk() = solve!(rd_cantilever(; nx = 20, ny = 10).problem, ReactionDiffusion(; τ = pτ, sensitivity = :physical);
+    mk() = solve!(rd_cantilever(; nx = 20, ny = 10).problem, ReactionDiffusion(; τ = pτ);
                   maxiter = 4, stop = nothing, verbose = 0, monitors = (one = _OneMonitor(),),
                   continuation = Continuation(τ = pτ => [2e-4, 1e-3]; every = 2), checkpoint = Checkpoint(filepath = d, every = 4))
     r = mk()

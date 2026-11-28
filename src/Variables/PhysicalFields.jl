@@ -1,10 +1,14 @@
 """
     PhysicalFields(x::DesignFields; name = map, other = :source => map, ..., backend = :compiled)
+    PhysicalFields(x::DesignFields; other = :source, ...)
+    PhysicalFields(x::DesignFields)
 
 Physical fields θ, the ones the weak forms read. Each one comes from one design field through a map (a
 [`FieldMap`](@ref), possibly composed with `∘`): `ρ = map` uses the design field `ρ`; `E = :ρ => map` uses the
 design field `ρ` under another name, so several physical fields can come from the same design field (their
-sensitivities are added). Every design field must be used. The constructor brings the fields up to date once,
+sensitivities are added). Without a map the field is the design field itself ([`Identity`](@ref)): `E = :ρ` is
+`E = :ρ => Identity()`, and `PhysicalFields(x)` (no fields) is `ρ = Identity()` for every design field, with its
+name. Every design field must be used. The constructor brings the fields up to date once,
 calling the solve functions of the operators with `ctx = OptContext(:setup)`. Read a field as `θ.ρ`: a fixed object (an
 `FEFunction` or a `CellField`) updated in place, so the weak forms can capture it.
 
@@ -34,13 +38,15 @@ end
 function PhysicalFields(x::DesignFields; backend = :compiled, kwargs...)
   backend isa Symbol || throw(ArgumentError("PhysicalFields: `backend` is a reserved name (it selects :compiled or :lazy) and cannot be the name of a physical field"))
   _check_backend(backend)
-  isempty(kwargs) && throw(ArgumentError("PhysicalFields needs at least one field"))
   xnames = getfield(x, :names)
+  # no fields: the identity of every design field, under its name
+  isempty(kwargs) && return PhysicalFields(x; backend, NamedTuple{xnames}(ntuple(_ -> Identity(), length(xnames)))...)
   names = Tuple(keys(kwargs))
   sources = Int[]
   chains = []
   for (k, spec) in pairs(kwargs)
-    src, map = spec isa Pair ? (spec.first, spec.second) : (k, spec)
+    # `name = :source` (a design field without a map) is `name = :source => Identity()`
+    src, map = spec isa Pair ? (spec.first, spec.second) : spec isa Symbol ? (spec, Identity()) : (k, spec)
     src isa Symbol || throw(ArgumentError("PhysicalFields: field $k: the source must be a Symbol, got $(typeof(src))"))
     map isa FieldMap || throw(ArgumentError("PhysicalFields: field $k: expected a map (Identity(), HelmholtzFilter, TanhProjection, CellMean, PointwiseMap, …), got $(typeof(map))"))
     i = findfirst(==(src), xnames)
@@ -163,7 +169,7 @@ end
 # The derivative of the ersatz material is large in the void (weak material, large strains) and would refill it; the
 # weight keeps the sensitivity of the material where the material is. Every other stage keeps its derivative.
 _physical(s, ctx) = false
-_physical(s::Union{StepStage,ErsatzStage}, ctx::OptContext) = ctx.sensitivity === :physical
+_physical(s, ctx::OptContext) = is_interface_map(s) && ctx.sensitivity === :physical
 function _physical_pullback(s, L, ctx::OptContext)
   χ = output(s)
   w0 = ctx.void_weight
@@ -314,8 +320,13 @@ function is_differentiable_field(θ::PhysicalFields, name::Symbol)
 end
 is_differentiable(θ::PhysicalFields) = all(n -> is_differentiable_field(θ, n), getfield(θ, :names))
 
-# whether a chain of θ has an Ersatz stage (refused by DensityMethod; the messages of check_consistency)
+# whether a chain of θ has an Ersatz stage (the messages of check_consistency)
 has_ersatz(θ::PhysicalFields) = any(c -> any(s -> s isa ErsatzStage, c), getfield(θ, :chains))
+
+# whether a chain of θ has an interface map (see `is_interface_map`), and their labels
+has_interface_map(θ::PhysicalFields) = any(c -> any(is_interface_map, c), getfield(θ, :chains))
+interface_labels(θ::PhysicalFields) =
+  unique!([interface_label(s) for c in getfield(θ, :chains) for s in c if is_interface_map(s)])
 
 """
     DesignMeasures

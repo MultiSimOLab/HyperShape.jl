@@ -68,16 +68,42 @@ end
 Base.show(io::IO, d::RebuildCheck) =
   print(io, "RebuildCheck(", d.every > 0 ? "every = $(d.every)" : "at = $(d.at)", ", what = :", d.what, ")")
 
+"""
+    needs_setup(d::Discretization) -> Bool
+
+Whether the problem must have factories (`Optimization(model; design_setup, physics_setup)`) to run with `d`
+(default `true`; `FixedMesh`: `false`). Part of the contract of a [`Discretization`](@ref).
+"""
 needs_setup(::Discretization) = true
 needs_setup(::FixedMesh) = false
 
+"""
+    due(d::Discretization, k, info, history, ctx) -> Bool
+
+After the accepted iteration `k` (not the last one, nor the one a run resumes from), whether `d` builds the problem
+again; `info` is the `StepInfo` of the step, `history` the live [`OptHistory`](@ref). Part of the contract of a
+[`Discretization`](@ref).
+"""
+function due end
 due(::FixedMesh, k, info, history, ctx) = false
 due(d::RebuildCheck, k, info, history, ctx) = d.every > 0 ? k % d.every == 0 : insorted(k, d.at)
 
+"""
+    rediscretize(d::Discretization, problem, state::OptState, ctx) -> Optimization
+
+The problem built again by `d` (called with `ctx.phase == :setup` when [`due`](@ref) says so), for example
+`HyperShape.Methods.rebuild(problem)`; `solve!` checks it and continues from `state`. Part of the contract of a
+[`Discretization`](@ref).
+"""
 function rediscretize end
 rediscretize(d::RebuildCheck, problem, state, ctx) = rebuild(problem; what = d.what)
 rediscretize(d::FixedMesh, problem, state, ctx) = throw(ArgumentError("rediscretize: FixedMesh does not rebuild"))
 
+"""
+    discretization_label(d::Discretization) -> String
+
+The line of the banner for `d` (default: the name of its type).
+"""
 discretization_label(d::Discretization) = string(nameof(typeof(d)))
 discretization_label(::FixedMesh) = "fixed mesh"
 discretization_label(d::RebuildCheck) =

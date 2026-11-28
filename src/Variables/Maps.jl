@@ -117,6 +117,9 @@ struct HelmholtzFilter{O<:LinearOperator,M} <: FieldMap
 end
 HelmholtzFilter(op::LinearOperator, dΩ; backend::Symbol = :compiled) = HelmholtzFilter(op, dΩ, backend)
 
+HelmholtzFilter(; kwargs...) =
+  throw(ArgumentError("HelmholtzFilter: give the measure of the design domain, HelmholtzFilter(dΩ; rmin, …)"))
+
 function HelmholtzFilter(dΩ::Gridap.CellData.Measure; rmin::Real, order::Integer = 1, backend::Symbol = :compiled,
                          model_backend = nothing, solve = nothing, kwargs...)
   rmin > 0 || throw(ArgumentError("HelmholtzFilter: rmin must be positive"))
@@ -329,6 +332,7 @@ struct CellMean{M} <: FieldMap
   CellMean(dΩ::M, backend::Symbol) where {M<:Gridap.CellData.Measure} = new{M}(dΩ, _check_backend(backend))
 end
 CellMean(dΩ::Gridap.CellData.Measure; backend::Symbol = :compiled) = CellMean(dΩ, backend)
+CellMean(; kwargs...) = throw(ArgumentError("CellMean: give the measure of the design domain, CellMean(dΩ)"))
 
 struct CellMeanStage{I,M,F,W,V,A}
   input::I
@@ -401,6 +405,13 @@ _pointwise(::PointwiseMap) = true
 # whether the stage has a derivative with respect to its input (Step() has none)
 is_differentiable(s) = true
 
+# whether the stage is an interface map, from a level-set-like field to the material (Step(), Ersatz()): the one
+# trait that the methods read (ReactionDiffusion deduces from it its sensitivity, Δt = :auto and max_step = :auto;
+# DensityMethod refuses it; the reverse sweep takes it as the identity weighted by the material when
+# ctx.sensitivity === :physical). A new interface map defines it as true, with its label `interface_label`.
+is_interface_map(s) = false
+interface_label(s) = string(nameof(typeof(s)))
+
 # the map that carries the value of a frozen zone through a map of the chain (nothing: the value stays as it is)
 _frozen_map(m) = _pointwise(m) ? m : nothing
 
@@ -435,6 +446,8 @@ pullback(s::StepStage, L, ctx, key) =
   throw(ArgumentError("Step(): the step has no derivative with respect to the design (use Ersatz(), or a method that " *
                       "takes the sensitivity with respect to the physical field)"))
 is_differentiable(::StepStage) = false
+is_interface_map(::StepStage) = true
+interface_label(::StepStage) = "Step()"
 _pointwise(::Step) = true
 Base.show(io::IO, ::Step) = print(io, "Step()")
 
@@ -542,6 +555,8 @@ end
 @inline _fraction(s::ErsatzStage{:hex}, φ, c) = hex_fraction(φ, s.w[c])
 
 output(s::ErsatzStage) = s.out
+is_interface_map(::ErsatzStage) = true
+interface_label(::ErsatzStage) = "Ersatz()"
 
 function update_stage!(s::ErsatzStage, ctx)
   _fractions!(get_free_dof_values(s.out), s, get_free_dof_values(s.input), get_dirichlet_dof_values(s.U))

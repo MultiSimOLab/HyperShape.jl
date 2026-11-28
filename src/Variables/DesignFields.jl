@@ -1,8 +1,10 @@
 """
+    DesignFields(z::OptVariables)
     DesignFields(z::OptVariables; name = Identity(), ...)
 
-Design fields x built from the blocks of `z`, one per block and with the same name. Each map z → x is mandatory;
-only [`Identity`](@ref) is available for now. Read a field as `x.ρ` (a Gridap `FEFunction`, updated in place).
+Design fields x built from the blocks of `z`, one per block and with the same name. The map z → x of each block is
+[`Identity`](@ref), the only one available for now: `DesignFields(z)` takes it for every block, and writing
+`name = Identity()` for each block is the same. Read a field as `x.ρ` (a Gridap `FEFunction`, updated in place).
 """
 struct DesignFields{Z<:OptVariables,N,F<:NamedTuple,S<:Tuple}
   z::Z
@@ -16,7 +18,10 @@ end
 function DesignFields(z::OptVariables; kwargs...)
   names = Tuple(keys(kwargs))
   nomap = setdiff(z.names, names)
-  isempty(nomap) || throw(ArgumentError("DesignFields: no map for the blocks $(join(nomap, ", ")) (write Identity())"))
+  # no map at all: the identity of every block; some maps given: every block needs its own
+  isempty(names) || isempty(nomap) ||
+    throw(ArgumentError("DesignFields: no map for the blocks $(join(nomap, ", ")): give a map for every block " *
+                        "(name = Identity()), or none (DesignFields(z): the identity of every block)"))
   extra = setdiff(names, z.names)
   isempty(extra) || throw(ArgumentError("DesignFields: no block named $(join(extra, ", ")) in the OptVariables"))
   for (k, m) in pairs(kwargs)

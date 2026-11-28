@@ -1,7 +1,7 @@
 # The bridge of Takezawa, Nishiwaki and Kitamura (2010, Section 5.2) with ReactionDiffusion + DoubleWell, 200 × 100,
 # 100 iterations, κ = 1e-5 (τ = 5e-6): published J = 23.3. Checks (the tolerance decided for the double
 # well, tighter than the 5 % of a published value in the bank: the default reproduces it within 3 %): |J − 23.3|/23.3 ≤ 3 %,
-# volume 0.3 ± 1e-4, 5–10 interior holes, the default scheme and the preset :takezawa2010, from their seed and from :hex.
+# volume 0.3 ± 1e-4, 5–10 interior holes, the default scheme and the settings of the paper (:takezawa2010, TAKEZAWA2010 of common/presets.jl), from their seed and from :hex.
 # The load is the unit point load of the paper (validation/common/problems.jl, `bridge`), kept as it is because it reproduces the
 # published value; examples/bridge_dw.jl spreads the load over a fixed width (its J is then independent of the mesh).
 # The designs are symmetric about x = 1 up to a few cells (rounding breaks the symmetry and the evolution amplifies

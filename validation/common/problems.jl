@@ -185,7 +185,8 @@ unit point load downwards at (1, 0), plane stress (E = 1, ν = 0.3), volume frac
 density φ ∈ [0, 1] with the double well. Published: J = 23.3 at 100 iterations with κ = 1e-5 on their 200 × 100 grid.
 - `seed`: `:hex` (`hole_seed(…; radius = 0.1, spacing = 0.4)`, the default pattern) or `:takezawa` (their rectangles,
   `takezawa_bridge_seed`: only for the comparison with the published 23.3 on 200 × 100).
-- `method`: `:default` (`ReactionDiffusion(; τ, reaction = DoubleWell())`, scheme (c)) or `:takezawa2010` (the preset).
+- `method`: `:default` (`ReactionDiffusion(; τ, reaction = DoubleWell())`, scheme (c)) or `:takezawa2010` (the
+  settings of the paper, `ReactionDiffusion(; τ, TAKEZAWA2010...)`, presets.jl).
 - `κ`: the diffusion `τ ℓ²` (`τ = κ/|D|`), a physical parameter (the same on every mesh). With a point load the
   compliance grows like `log(1/h)`: values on different meshes are not comparable.
 `snapshots`: iterations whose cell means are kept (`snaps[k]`); other keywords go to the method (`ReactionDiffusion`),
@@ -216,8 +217,8 @@ function bridge(; nx = 200, ny = nx ÷ 2, seed = :hex, method = :default, κ = 1
        seed === :hex ? hole_seed(Vφ; bounds = (0.0, 1.0), radius = 0.1, spacing = 0.4, exclude = tags, connect = tags,
                                  width = 2h) : throw(ArgumentError("bridge: seed must be :takezawa or :hex"))
   z = OptVariables(φ = FieldVariable(Vφ; bounds = (0.0, 1.0), init = φ0))
-  x = DesignFields(z; φ = Identity())
-  θ = PhysicalFields(x; χ = :φ => Identity())
+  x = DesignFields(z)
+  θ = PhysicalFields(x; χ = :φ)
   ν = 0.3
   λ, μ = ν / (1 - ν^2), 1 / (2(1 + ν))
   σ(e) = λ * tr(e) * one(e) + 2μ * e
@@ -235,7 +236,7 @@ function bridge(; nx = 200, ny = nx ÷ 2, seed = :hex, method = :default, κ = 1
   problem = Optimization(z; objective = C, constraints = (volume = Vol,))
   τ = κ / 2                  # ℓ² = |D| = 2 (τ, not κ = …: the references were measured with this τ, bit for bit)
   m = method === :default ? ReactionDiffusion(; τ, merge((; reaction = DoubleWell()), kwargs)...) :
-      method === :takezawa2010 ? ReactionDiffusion(:takezawa2010; τ, kwargs...) :
+      method === :takezawa2010 ? ReactionDiffusion(; τ, TAKEZAWA2010..., kwargs...) :
       throw(ArgumentError("bridge: method must be :default or :takezawa2010"))
   V0 = FESpace(model, ReferenceFE(lagrangian, Float64, 0); conformity = :L2)
   cells() = (HyperShape.update_fields!(θ, problem.ctx); collect(assemble_vector(v -> ∫(θ.χ * v)dΩ, V0)) ./ (h * h))
@@ -278,7 +279,7 @@ function cantilever_dw(; nx = 200, ny = nx ÷ 2, κ = 1e-5, maxiter = 300, stop 
   tags = ("clamp", "load")
   φ0 = hole_seed(Vφ; bounds = (0.0, 1.0), radius = 0.1, spacing = 0.4, exclude = tags, connect = tags, width = 2h)
   z = OptVariables(φ = FieldVariable(Vφ; bounds = (0.0, 1.0), init = φ0))
-  θ = PhysicalFields(DesignFields(z; φ = Identity()); χ = :φ => Identity())
+  θ = PhysicalFields(DesignFields(z); χ = :φ)
   ν = 0.3
   λ, μ = ν / (1 - ν^2), 1 / (2(1 + ν))
   σ(e) = λ * tr(e) * one(e) + 2μ * e

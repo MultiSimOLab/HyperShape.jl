@@ -1,5 +1,5 @@
 # Half MBB beam: compliance minimisation with a density method (SIMP interpolation, p = 3), a Helmholtz filter, a
-# tanh projection with continuation, a volume constraint on the physical density, SiMPL with the lumped-mass metric,
+# tanh projection with continuation, a volume constraint on the physical density, SiMPL (with its default, the lumped-mass metric),
 # a stopping criterion, checkpoints and VTU output. The setup of top88 (Andreassen et al., 2011): unit square
 # elements, plane stress, unit point load at the top-left node.
 #
@@ -50,7 +50,7 @@ function run_mbb(; nx = 60, ny = 20, maxiter = 300, out = "results/mbb", verbose
     write_step(post, Ω, "rho" => θ.ρ, "x" => x.ρ, "u" => get_state(S))
   end
   problem = Optimization(objective = C, constraints = (volume = Vol,))
-  solve!(problem, DensityMethod(SiMPL(); metric = LumpedMass(dΩ)); maxiter, verbose,
+  solve!(problem, DensityMethod(SiMPL()); maxiter, verbose,
          stop         = StopCriteria(stationarity_rtol = 1e-3),
          continuation = Continuation(β = proj => [1, 2, 4, 8, 16]; every = 40),
          checkpoint   = Checkpoint(filepath = joinpath(out, "checkpoint"), every = 20),

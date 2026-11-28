@@ -79,7 +79,9 @@ it was built with `close_early = true` (then a criterion met in an earlier stage
   `StopCriteria(material_tol = 2e-3, objective_range = 1e-3, combine = :all)`.
 
 The tolerances are not checked at the first iteration of a stage (after a continuation jump the first step restores
-feasibility and its measures say little); `objective_range` needs `window` iterations of the stage.
+feasibility and its measures say little); `objective_range` needs `window` iterations of the stage. A window given
+without its criterion (`window` without `objective_range`, `phase_window` without `phase_tol`, `material_window` without
+`material_tol`) is an error: it would have no effect.
 """
 struct StopCriteria
   objective_range::Union{Nothing,Float64}
@@ -137,11 +139,20 @@ StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stati
   StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol, nothing, nothing, 5,
                nothing, 5, :any)
 
-StopCriteria(; objective_range = nothing, window = 10, kkt_tol = nothing, kkt_rtol = nothing, stationarity_tol = nothing,
-             stationarity_rtol = nothing, change_tol = nothing, rate_tol = nothing, phase_tol = nothing, phase_window = 5,
-             material_tol = nothing, material_window = 5, combine = :any, grey_tol = nothing, objective_atol = nothing) =
-  StopCriteria(objective_range, window, kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol, rate_tol,
-               phase_tol, phase_window, material_tol, material_window, combine, grey_tol, objective_atol)
+function StopCriteria(; objective_range = nothing, window = nothing, kkt_tol = nothing, kkt_rtol = nothing,
+                      stationarity_tol = nothing, stationarity_rtol = nothing, change_tol = nothing, rate_tol = nothing,
+                      phase_tol = nothing, phase_window = nothing, material_tol = nothing, material_window = nothing,
+                      combine = :any, grey_tol = nothing, objective_atol = nothing)
+  # a window without its criterion has no effect
+  for (w, wv, c, cv) in ((:window, window, :objective_range, objective_range), (:phase_window, phase_window, :phase_tol, phase_tol),
+                         (:material_window, material_window, :material_tol, material_tol))
+    wv === nothing || cv !== nothing ||
+      throw(ArgumentError("StopCriteria: $w only acts together with $c (it is the window of that criterion): give $c, or leave $w out"))
+  end
+  StopCriteria(objective_range, something(window, 10), kkt_tol, kkt_rtol, stationarity_tol, stationarity_rtol, change_tol,
+               rate_tol, phase_tol, something(phase_window, 5), material_tol, something(material_window, 5), combine,
+               grey_tol, objective_atol)
+end
 
 """
     material_change(opt::Optimizer, state) -> Float64
@@ -328,6 +339,7 @@ struct Grey{T,M}
 end
 
 Grey(θ::PhysicalFields, dΩ::DesignMeasures; kwargs...) = Grey(θ, dΩ.domain; kwargs...)
+Grey(θ; kwargs...) = throw(ArgumentError("Grey: give the measure of the domain, Grey(θ, dΩ)"))
 
 function Grey(θ::PhysicalFields, dΩ; field = nothing)
   names = propertynames(θ)
@@ -1000,9 +1012,13 @@ run that ends otherwise says which constraints do not). The scaled start acts on
 keeps the objective of the problem. Per iteration, the constraints of the augmented Lagrangian add no forward solve
 and, with their states, one adjoint solve per state in the same reverse sweep as the objective.
 """
-function solve!(problem::Optimization, method::AbstractMethod; maxiter::Integer, on_failure = _DefaultFailure(),
+function solve!(problem::Optimization, method::AbstractMethod; maxiter = nothing, on_failure = _DefaultFailure(),
                 stop = _DefaultStop(), continuation = nothing, checkpoint = nothing, post = nothing, monitors = (;),
                 resume = nothing, discretization = FixedMesh(), verbose = 2, io::IO = stdout)
+  maxiter isa Integer ||
+    throw(ArgumentError(maxiter === nothing ?
+      "solve!: maxiter is mandatory (the total number of iterations, resumed ones included), for example maxiter = 300" :
+      "solve!: maxiter must be an integer, got $(repr(maxiter))"))
   t_call = time()
   schedule = continuation
   z, ctx, opt = problem.z, problem.ctx, stepper(method)
