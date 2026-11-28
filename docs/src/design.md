@@ -355,7 +355,7 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
   solve function of the user; phases `:setup`, `:check`, `:optimization` and `:linesearch`; `sensitivity` is
   `:physical` only while `ReactionDiffusion(…; sensitivity = :physical)` computes the sensitivity of its step.
 - **Checkpoint:** `checkpoint.toml`, `z_<k>.bin` and `history_<k>.csv` in a folder; resume with
-  `solve!(…; resume = "results/ckpt")` (the folder; or the result of `load_checkpoint`). OC (adaptive move limits, correction shift) and SiMPL (latent variable, Barzilai–Borwein memory, multiplier, shift) save their memory (`memory`/`restore_memory!`, a named tuple of numbers and design vectors), and the offsets of the linear constraints are kept (unless the user changed the bound or the scale), so a run resumed from an accepted iteration gives the designs of the uninterrupted one bit for bit (its first iteration repeats one forward solve). The state of a run is an `OptState` (`problem.state[]` after `solve!`; `resume = problem.state[]` continues without files); after an exception or an interruption the memory of the optimiser is not kept, and the resumed run restarts it. Checkpoints have format version 3. An `OC` continued by `continuation` gets its `move` back at the end of `solve!`.
+  `solve!(…; resume = "results/ckpt")` (the folder; or the result of `load_checkpoint`). OC (adaptive move limits, correction shift) and SiMPL (latent variable, Barzilai–Borwein memory, multiplier, shift) save their memory (`memory`/`restore_memory!`, a named tuple of numbers and design vectors), and the offsets of the linear constraints are kept (unless the user changed the bound or the scale), so a run resumed from an accepted iteration gives the designs of the uninterrupted one bit for bit (its first iteration repeats one forward solve). The state of a run is an `OptState` (`problem.state[]` after `solve!`; `resume = problem.state[]` continues without files); after an exception or an interruption the memory of the optimiser is not kept, and the resumed run restarts it. Checkpoints have format version 4 (version 3, without the column `step_solves` of the history, is read with those rows at 0; a resumed run says so). An `OC` continued by `continuation` gets its `move` back at the end of `solve!`.
 - **Factories and discretisation:** `Optimization(model; design_setup, physics_setup)` builds the problem from two
   functions of the user: `design_setup(model) -> (; z, x)` and `physics_setup(model, x) -> (; objective, constraints,
   monitors, output, …)` (every name returned is kept in `problem.design` and `problem.physics`). What is continued or
@@ -378,7 +378,11 @@ target 0.5, the design volume leaves the physical one at 0.64–0.68, the physic
   `constraint_tol`.
 - **Screen output:** `verbose = 2` (default) prints a banner, a row per iteration (objective, its relative change,
   constraint, optimality measure, change, step, multiplier, continued parameters, solves, time), the events and a
-  closing line with the solves of the call; `1` omits the rows; `0` prints nothing. The output goes to `io`.
+  closing line with the solves of the call; `1` omits the rows; `0` prints nothing. The output goes to `io`. For a
+  method whose step solves linear systems of its own (`ReactionDiffusion`), the column of solves is `f/a/F/s` and the
+  summary adds `step N`: the hook `HyperShape.step_solves(opt, state)` (accumulated since `init`, `nothing` by default),
+  which the loop differences per iteration into `history.step_solves` (column 11 of the CSV), as it does with the
+  forward, adjoint and filter solves. A density method has none: its table and summary do not change.
 - **Failures:** `OptimizationFailure` carries the message, the history up to the last accepted iteration and its
   number; the history also records the multiplier of the linear constraint.
 - **Solves per iteration:** OC one filter, one forward, one adjoint (none if self-adjoint) and one transposed filter;
@@ -484,8 +488,15 @@ The whole script is `examples/cantilever_rd.jl`. The same method evolves a densi
   banner marks them.
 - **Per iteration:** one forward solve, one adjoint (none with `SelfAdjoint()`), one assembly of the sensitivity, one
   product `K z` and one substitution of the step, no factorisation; the volume costs a few evaluations (vectors for a
-  density; the interface map and one integral for a level set). The closing summary adds the solves of the step,
-  the factorisations and the evaluations of the volume (through the constraint and by the material meter).
+  density; the interface map and one integral for a level set). The solves of the step are in `history.step_solves`
+  (one per step, one per implicit substep of the double well, none with the explicit scheme, plus the unit response
+  `φ̌` of the exact volume at each factorisation inside an iteration when values are held: after a rejected step and
+  at the return to the nominal Δt), in the column `f/a/F/s` and in the summary (`step N`); the line below it adds the
+  factorisations and the evaluations of the volume (through the constraint and by the material meter). The `φ̌` that
+  `init` solves (at the start, at a resume and at each rebuild) is counted only in the summary, so with held values
+  the summary has one more solve per `init` than the sum of the column. A resume or a rebuild right after a rejected
+  step factorises at the nominal Δt in its `init`: the `φ̌` of the return to Δt goes there, and the next row has one
+  solve less than in the uninterrupted run (the work is counted as done; designs and objectives are the same bits).
 - **Coarse meshes with `Step()`:** the default stop is not met on the 20 × 10, 30 × 15 and 40 × 20 cantilevers in 400
   iterations (the material keeps changing by quadrature points, `M_k` of 1e-2 to 4e-2), while `Ersatz()` stops at 56,
   124 and 99 and the density at 35, 51 and 32; at 60 × 30 `Step()` stops at 123 and at 120 × 60 at 65. A run that

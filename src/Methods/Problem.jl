@@ -235,7 +235,8 @@ only gives its step and what the step sees of the problem, through four function
 `method_label(m)` (default: the name of the type) and `metric_label(m)` (default: none) go to the banner, with the
 lines of `banner_lines(m, problem)` (default: none; a vector of `(text, colour)`). `feasible_start(m)` (default
 `true`): whether a starting design that violates the native constraint is scaled to meet it before the first step
-(`ReactionDiffusion`: `false`, its step lowers the volume).
+(`ReactionDiffusion`: `false`, its step lowers the volume). A step with linear solves of its own reports them with
+`HyperShape.step_solves(opt, state)` (default `nothing`: none), which the loop records in `history.step_solves`.
 """
 abstract type AbstractMethod end
 

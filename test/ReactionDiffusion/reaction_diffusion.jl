@@ -409,6 +409,9 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     h = r.history
     @test h.attempts[3] == 2 && h.step[3] == 0.1 && h.step[4] == 0.2 && h.step[2] == 0.2
     @test r.state.nfactor == 3                            # init, the reduction and the return to Δt
+    # the solves of the step (frozen zone: φ̌ at each factorisation): iteration 3 has the failed attempt, φ̌ after the
+    # shrink and the retry; iteration 4 the φ̌ of the return to Δt and its step; φ̌ of init is not in the rows
+    @test h.step_solves == [1, 1, 3, 2, 1] && sum(h.step_solves) + 1 == r.state.nsolves
     # the target of the volume goes down in proportion to Δt in the shrunk step (0.04 → 0.02), and back after it
     g = [1.0; h.constraints.volume]
     @test abs((g[3] - g[4]) - 0.02) <= VT && abs((g[4] - g[5]) - 0.04) <= VT && abs((g[2] - g[3]) - 0.04) <= VT
@@ -428,12 +431,16 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     b = rd_cantilever(; nx = 30, ny = 15)
     rb = solve!(b.problem, rd(); maxiter = 20, stop = nothing, verbose = 0, resume = dir)
     @test get_values(rb.z) == get_values(r20.z) && rb.history.objective == r20.history.objective
+    # the resumed history has the rows of the checkpoint and the new ones: here the same as the uninterrupted run
+    # (no rejected step before the resume; see step_solves.jl for a resume right after one)
+    @test rb.history.step_solves == r20.history.step_solves == ones(Int, 20)
     @test r20.history.constraints.volume[20] > 0.1          # still going down
     p1, p2 = rd_factories(), rd_factories()
     m = rd()
     f1 = solve!(p1, m; maxiter = 15, stop = nothing, verbose = 0)
     f2 = solve!(p2, m; maxiter = 15, stop = nothing, verbose = 0, discretization = RDM.RebuildCheck(every = 6))
     @test get_values(f1.z) == get_values(f2.z) && f1.history.objective == f2.history.objective
+    @test f1.history.step_solves == f2.history.step_solves
   end
 
   @testset "13. a second constraint in the augmented Lagrangian, with the native volume" begin
@@ -804,7 +811,8 @@ HyperShape.Methods.monitor_value(t::SignTrack) = (push!(t.signs, get_values(t.z)
     @test occursin("volume: native (the Volume), exact multiplier (Illinois, tol 1e-04 |D|), target lowered 2 % of |D| per iteration (default)", s)
     @test !occursin("Step() the change criterion", s) && !occursin("recommended", s)
     @test occursin("the starting design violates the constraint volume by 1 (scaled); it is not made feasible", s)
-    @test occursin("reaction–diffusion: 3 solves of the step, 1 factorisation,", s)
+    @test occursin(", step 3 · time", s) && occursin("reaction–diffusion: 1 factorisation,", s)
+    @test !occursin("solves of the step", s)
     @test occursin("material change < 0.002 over 5 iterations, with the constraints met in the windows (default)", s)
     @test occursin("relative objective range ≤ 0.001 over 10 iterations and", s)
     cd = rd_cantilever(; nx = 20, ny = 10, design = :density)

@@ -1,0 +1,39 @@
+stage = 0
+stage_iterations = 6
+z_file = "z_6.bin"
+hypershape_checkpoint = 3
+history_file = "history_6.csv"
+optimizer = "RDStep"
+method = "ReactionDiffusion"
+iteration = 6
+continuation = []
+length = 221
+blocks = ["φ"]
+scale_names = ["objective", "volume"]
+
+[handled]
+volume = "native"
+
+[linear_offsets]
+
+[stop_windows]
+material = []
+phase = [0.0275, 0.014999999999999998, 0.0325, 0.014999999999999998, 0.014999999999999998, 0.019999999999999997]
+streak = 0
+
+[discretization]
+kind = "FixedMesh"
+events = 0
+
+[frozen_cells]
+"φ" = 4
+
+[scales]
+objective = 1.518562842206785
+volume = 0.9999999999999999
+
+[memory]
+scalars = ["λ"]
+file = "memory_6.bin"
+vectors = []
+names = ["λ"]
