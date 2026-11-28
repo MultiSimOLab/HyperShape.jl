@@ -119,7 +119,7 @@ isdefined(@__MODULE__, :run_all) || include(joinpath(@__DIR__, "..", "..", "vali
     r = report_row("MBB 12×4", "P0, OC()", c; ref = 1.1 * c.result.objective)
     @test r.vs_ref ≈ 1 / 1.1 - 1 && r.basis === :J
     @test r.V ≈ 0.5 atol = 1e-3                             # the bisection of OC after 5 iterations
-    @test r.forward >= 5 && r.adjoint == 0 && r.filter >= 5 && r.step === missing
+    @test r.forward >= 5 && r.adjoint == 0 && r.filter >= 5 && r.step == 0
     @test r.J_bin > 0 && 0 <= r.grey <= 1 && r.iterations == 5 && r.time_per_forward ≈ r.time / r.forward
     q = reference_row("MBB 12×4", "reference"; J = 1.0)
     @test q.J_bin === missing && q.holes === missing

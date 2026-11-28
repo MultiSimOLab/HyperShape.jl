@@ -183,6 +183,22 @@ default) when the step has no phases (a density).
 phase_change(::Optimizer, state) = NaN
 
 """
+    step_solves(opt::Optimizer, state) -> Union{Nothing,Int}
+
+Linear solves done so far by the step itself, with its own operator (not those of the state, the adjoint or the
+filter), counted from `init`; `nothing` (the default) for a step that has none. The loop records the difference over
+each iteration in `history.step_solves` (rejected attempts and `shrink!` included) and, when it is not `nothing`, shows
+it in the table (`f/a/F/s`) and in the summary (`step`). [`ReactionDiffusion`](@ref): the solves with its diffusion
+operator (one per step, one per implicit substep of a [`DoubleWell`](@ref), none with `scheme = :explicit`, and the
+unit response of the exact volume when it is solved). A step of the user defines it on its own types:
+`HyperShape.step_solves(::MyStep, s::MyState) = s.nsolves`.
+"""
+step_solves(::Optimizer, state) = nothing
+
+# the count of the step as an Int (0 for a step that has none)
+_step_count(opt, state) = (n = step_solves(opt, state); n === nothing ? 0 : Int(n))
+
+"""
     default_stop(optimizer) -> Union{StopCriteria,Nothing}
 
 Stopping criteria of [`solve!`](@ref) when `stop` is not given: `StopCriteria(objective_range = 1e-3)` (range of
@@ -198,7 +214,9 @@ struct _DefaultStop end
 struct _DefaultFailure end
 
 const HISTORY_COLUMNS = (:iteration, :objective, :kkt, :stationarity, :change, :step, :attempts, :forward, :adjoint,
-                         :filter)
+                         :filter, :step_solves)
+# the base columns of a history written with checkpoint format version 3 (before step_solves)
+const _HISTORY_COLUMNS_V3 = HISTORY_COLUMNS[1:10]
 
 """
     Continuation(; every, close_early = false, name = object => values, …)
@@ -269,7 +287,8 @@ end
     Checkpoint(; filepath, every)
 
 Writes the state of the optimisation to the folder `filepath` every `every` accepted iterations, and also when the
-optimisation stops or fails: `checkpoint.toml` (format version 3: iteration, continuation stage, scales of the
+optimisation stops or fails: `checkpoint.toml` (format version 4, with the column `step_solves` in the history;
+[`load_checkpoint`](@ref) also reads version 3: iteration, continuation stage, scales of the
 functionals by name, who treats each constraint and the multipliers and penalties of the augmented Lagrangian by
 name, the offsets of the linear constraints, the method and the optimiser, sizes and the names of the other files;
 the discretisation and its number of rebuilds), `z_<iteration>.bin` (the design, raw `Float64`), `history_<iteration>.csv`
@@ -347,7 +366,11 @@ History of an optimisation, one entry per accepted iteration (vectors): `iterati
 the accepted design), `kkt` (optimality measure, `NaN` if the optimiser does not compute it), `stationarity`
 (stationarity measure of the design before the step, see [`StopCriteria`](@ref); `NaN` if the optimiser does not
 compute it), `change` (`maximum(abs, Δz)`), `step` (step size or move limit, the mean over the entries with adaptive
-limits), `attempts`, `forward`, `adjoint`, `filter` (solves in the iteration); `constraints`, `violations`,
+limits), `attempts`, `forward`, `adjoint`, `filter` (solves in the iteration), `step_solves` (linear solves of the
+method's own step in the iteration, see [`step_solves`](@ref HyperShape.Methods.step_solves): for [`ReactionDiffusion`](@ref)
+the solves with its diffusion operator, one per step or one per implicit substep of a [`DoubleWell`](@ref); `0` for a
+method that has none, such as [`DensityMethod`](@ref); like `forward`, it includes the rejected attempts of the
+iteration); `constraints`, `violations`,
 `multipliers` and `penalties` (named tuples of vectors, one per constraint of the [`Optimization`](@ref): scaled value
 and violation at the accepted design, multiplier, and penalty of the augmented Lagrangian; the multiplier of a
 constraint the optimiser treats is the one it reports and its penalty is `NaN`, the multiplier of one in the augmented
@@ -366,6 +389,7 @@ mutable struct OptHistory
   forward::Vector{Int}
   adjoint::Vector{Int}
   filter::Vector{Int}
+  step_solves::Vector{Int}
   constraint_names::Vector{Symbol}
   constraint_values::Matrix{Float64}    # one row per constraint
   multiplier_values::Matrix{Float64}
@@ -381,7 +405,7 @@ function OptHistory(cap::Integer, names = (); constraints = (), monitors = ())
   f() = fill(NaN, cap)
   i() = zeros(Int, cap)
   m(k) = fill(NaN, length(k), cap)
-  OptHistory(0, i(), f(), f(), f(), f(), f(), i(), i(), i(), i(), collect(Symbol, constraints), m(constraints),
+  OptHistory(0, i(), f(), f(), f(), f(), f(), i(), i(), i(), i(), i(), collect(Symbol, constraints), m(constraints),
              m(constraints), m(constraints), m(constraints), collect(Symbol, monitors), m(monitors), collect(Symbol, names),
              m(names))
 end
@@ -408,11 +432,12 @@ Base.show(io::IO, h::OptHistory) =
 
 # row = (iteration, objective, kkt, stationarity, change, step, attempts, forward, adjoint, filter); cons, mults, mons
 # and cont: one value per constraint, constraint, monitor and continued parameter; viols and pens: one per constraint
-# (empty: NaN)
-function _record!(h::OptHistory, row, cons, mults, mons, cont, viols = (), pens = ())
+# (empty: NaN); step_solves: the solves of the step in the iteration
+function _record!(h::OptHistory, row, cons, mults, mons, cont, viols = (), pens = (), step_solves::Int = 0)
   k = h.n += 1
   h.iteration[k], h.objective[k], h.kkt[k], h.stationarity[k], h.change[k], h.step[k], h.attempts[k], h.forward[k],
     h.adjoint[k], h.filter[k] = row
+  h.step_solves[k] = step_solves
   for (j, v) in enumerate(cons)
     h.constraint_values[j, k] = v
   end
@@ -534,7 +559,9 @@ function _write_history(io, hist::OptHistory)
   end
 end
 
-function _read_history(file)
+# version: the format of the checkpoint (3: without the column step_solves, whose rows are then 0)
+function _read_history(file, version = _CHECKPOINT_VERSION)
+  base = version == 3 ? _HISTORY_COLUMNS_V3 : HISTORY_COLUMNS
   lines = readlines(file)
   header = split(first(lines), ",")
   rows = [parse.(Float64, split(l, ",")) for l in lines[2:end]]
@@ -543,16 +570,17 @@ function _read_history(file)
   pre(p) = [(j, Symbol(h[length(p)+1:end])) for (j, h) in enumerate(header) if startswith(h, p)]
   cons, mults, mons = pre("constraint:"), pre("multiplier:"), pre("monitor:")
   viols, pens = pre("violation:"), pre("penalty:")
-  nbase = length(HISTORY_COLUMNS)
+  nbase = length(base)
   conts = [(j, Symbol(header[j])) for j in nbase+1:length(header) if !occursin(':', header[j])]
-  Tuple(Symbol.(header[1:nbase])) == HISTORY_COLUMNS ||
-    throw(ArgumentError("load_checkpoint: the history has columns $(join(header[1:nbase], ", "))"))
+  length(header) >= nbase && Tuple(Symbol.(header[1:nbase])) == base ||
+    throw(ArgumentError("load_checkpoint: the history has columns $(join(header[1:min(nbase, length(header))], ", ")); " *
+                        "format version $version has $(join(base, ", "))"))
   h = OptHistory(n, last.(conts); constraints = last.(cons), monitors = last.(mons))
   for k in 1:n
     r = rows[k]
     _record!(h, (Int(r[1]), r[2], r[3], r[4], r[5], r[6], Int(r[7]), Int(r[8]), Int(r[9]), Int(r[10])),
              (r[j] for (j, _) in cons), (r[j] for (j, _) in mults), (r[j] for (j, _) in mons), (r[j] for (j, _) in conts),
-             (r[j] for (j, _) in viols), (r[j] for (j, _) in pens))
+             (r[j] for (j, _) in viols), (r[j] for (j, _) in pens), version == 3 ? 0 : Int(r[11]))
   end
   h
 end
@@ -580,7 +608,8 @@ exception: a run resumed from such a state starts the optimiser again from `init
 `handled` (for each constraint, `:native` or `:lagrangian`), `lagrangian` (`nothing`, or the multipliers, penalties,
 penalty references and number of updates of the augmented Lagrangian, by name), `linear_offsets` (the offset `V`
 of each linear constraint, kept so that a resumed run uses the same bits), `discretization` (the name of the
-discretisation of the run) and `events` (its rebuilds so far). A rebuild of the problem during `solve!` goes through
+discretisation of the run), `events` (its rebuilds so far) and `format` (the format version of the checkpoint it was
+read from, see [`Checkpoint`](@ref); the current one for a state captured by the loop). A rebuild of the problem during `solve!` goes through
 this state, as a resume does. Nothing in it is tied to the mesh except
 the vectors of the design (`z` and those of `memory`).
 """
@@ -603,6 +632,7 @@ struct OptState
   discretization::String
   events::Int
   windows::NamedTuple     # the windows of the stopping criteria: phase, material (vectors) and streak
+  format::Int             # the format version of the checkpoint read (3: history without step_solves)
 end
 
 const _NO_WINDOWS = (phase = Float64[], material = Float64[], streak = 0)
@@ -611,6 +641,11 @@ OptState(iteration, stage, stage_iterations, z, blocks, frozen_cells, continuati
          memory, handled, lagrangian, linear_offsets, discretization, events) =
   OptState(iteration, stage, stage_iterations, z, blocks, frozen_cells, continuation, scales, history, method, optimizer,
            memory, handled, lagrangian, linear_offsets, discretization, events, _NO_WINDOWS)
+# a state of the current format
+OptState(iteration, stage, stage_iterations, z, blocks, frozen_cells, continuation, scales, history, method, optimizer,
+         memory, handled, lagrangian, linear_offsets, discretization, events, windows) =
+  OptState(iteration, stage, stage_iterations, z, blocks, frozen_cells, continuation, scales, history, method, optimizer,
+           memory, handled, lagrangian, linear_offsets, discretization, events, windows, _CHECKPOINT_VERSION)
 
 Base.show(io::IO, s::OptState) =
   print(io, "OptState(iteration ", s.iteration, ", stage ", s.stage, ", ", length(s.z), " variables, ", s.method, ")")
@@ -704,7 +739,8 @@ function _write_checkpoint(c::Checkpoint, st::OptState)
   end
 end
 
-const _CHECKPOINT_VERSION = 3
+const _CHECKPOINT_VERSION = 4
+const _CHECKPOINT_READS = (3, 4)   # version 3: the history has no column step_solves (read as 0)
 const _OFFSET_RTOL = 1e-9    # saved and recomputed offsets of a linear constraint closer than this are the same
 
 # the state of the run into problem.state[] and, with a checkpoint, to its files
@@ -721,16 +757,17 @@ end
 Reads a checkpoint written by [`Checkpoint`](@ref) into an [`OptState`](@ref); `solve!(…; resume = filepath)` calls
 it. OC (adaptive move limits, correction shift) and SiMPL (latent variable, Barzilai–Borwein memory, multiplier,
 correction shift) save their memory, so a resumed run continues as the uninterrupted one; a checkpoint written after
-a failure does not save the memory. Checkpoints of other format versions are refused.
+a failure does not save the memory. Reads format versions 4 and 3 (a checkpoint of version 3 has no column
+`step_solves` in its history: its rows are read as 0, and a resumed run says so); other versions are refused.
 """
 function load_checkpoint(filepath::AbstractString)
   file = joinpath(filepath, "checkpoint.toml")
   isfile(file) || throw(ArgumentError("load_checkpoint: no checkpoint.toml in $filepath"))
   meta = TOML.parsefile(file)
   v = get(meta, "hypershape_checkpoint", nothing)
-  v == _CHECKPOINT_VERSION ||
+  v in _CHECKPOINT_READS ||
     throw(ArgumentError("load_checkpoint: $filepath has the format $(v === nothing ? "of no version" : "version $v"); " *
-                        "this version of HyperShape reads version $_CHECKPOINT_VERSION"))
+                        "this version of HyperShape reads versions $(join(_CHECKPOINT_READS, " and "))"))
   n = meta["length"]
   z = Vector{Float64}(undef, n)
   open(io -> read!(io, z), joinpath(filepath, meta["z_file"]))
@@ -754,7 +791,7 @@ function load_checkpoint(filepath::AbstractString)
   scales = NamedTuple{names}(Tuple(Float64(sc[String(k)]) for k in names))
   OptState(Int(meta["iteration"]), Int(meta["stage"]), Int(meta["stage_iterations"]), z, Symbol.(meta["blocks"]),
            Dict{Symbol,Int}(Symbol(k) => Int(v) for (k, v) in get(meta, "frozen_cells", Dict())),
-           Symbol.(meta["continuation"]), scales, _read_history(joinpath(filepath, meta["history_file"])),
+           Symbol.(meta["continuation"]), scales, _read_history(joinpath(filepath, meta["history_file"]), v),
            get(meta, "method", ""), get(meta, "optimizer", ""), mem,
            Dict{Symbol,Symbol}(Symbol(k) => Symbol(v) for (k, v) in get(meta, "handled", Dict())),
            haskey(meta, "multipliers") ?
@@ -763,7 +800,7 @@ function load_checkpoint(filepath::AbstractString)
            _by_name(get(meta, "linear_offsets", Dict())),
            String(get(get(meta, "discretization", Dict()), "kind", "FixedMesh")),
            Int(get(get(meta, "discretization", Dict()), "events", 0)),
-           _read_windows(get(meta, "stop_windows", nothing)))
+           _read_windows(get(meta, "stop_windows", nothing)), Int(v))
 end
 
 _by_name(d) = Dict{Symbol,Float64}(Symbol(k) => Float64(v) for (k, v) in d)
@@ -779,7 +816,7 @@ function _prefill!(hist::OptHistory, old::OptHistory)
            old.attempts[k], old.forward[k], old.adjoint[k], old.filter[k])
     _record!(hist, row, view(old.constraint_values, :, k), view(old.multiplier_values, :, k),
              (j === nothing ? NaN : old.monitor_values[j, k] for j in mon), view(old.continuation_values, :, k),
-             view(old.violation_values, :, k), view(old.penalty_values, :, k))
+             view(old.violation_values, :, k), view(old.penalty_values, :, k), old.step_solves[k])
   end
   hist
 end
@@ -802,6 +839,8 @@ function _counters(problem)
 end
 
 _count(ops) = sum(num_solves, ops; init = 0)
+# (forward, adjoint, filter, step) solved so far (`state === nothing`: before init, no solve of the step)
+_totals(ops, opt, state) = (map(_count, ops)..., state === nothing ? 0 : _step_count(opt, state))
 
 # ---------------------------------------------------------------------------------------------------------------
 # The loop
@@ -920,8 +959,10 @@ continuation, stopping criteria and failure handling, each marked when it is a d
 jumps, rejected steps, stalls, a scaled start), a closing
 ✓/⚠/✗ line and a summary of solves and time; `2` also a row per iteration: objective, its relative change,
 constraint (red above 1e-3), optimality measure `kkt`, stationarity measure `S`, change of z, step, multiplier,
-continued parameters, monitors, forward, adjoint and filter solves, and time. `true` is `2`, `false` is `0`. The summary counts every solve of the call
-(those of rejected or stalled trials, the setup and the final synchronisation included).
+continued parameters, monitors, forward, adjoint and filter solves (and the solves of the step, `f/a/F/s`, for a
+method that counts them, see [`step_solves`](@ref HyperShape.Methods.step_solves): [`ReactionDiffusion`](@ref)), and
+time. `true` is `2`, `false` is `0`. The summary counts every solve of the call (those of rejected or stalled trials,
+the setup and the final synchronisation included; `step` for a method that counts them).
 
 With a `checkpoint`, an exception that is not an [`OptimizationFailure`](@ref) (an error in a solve, post or monitor
 function of the user, an interruption) writes a checkpoint at the last accepted design (history included) and is then
@@ -1014,7 +1055,7 @@ function solve!(problem::Optimization, method::AbstractMethod; maxiter::Integer,
     isempty(dropped) || _print_event(pr, "· monitors of the checkpoint not given now (their columns are dropped): " *
                                          join(dropped, ", "), :yellow)
   end
-  run = _LoopState(k0, stage, stage_iters, hist.n - stage_iters, (0, 0, 0), k0, Float64[], (0, 0, 0),
+  run = _LoopState(k0, stage, stage_iters, hist.n - stage_iters, (0, 0, 0, 0), k0, Float64[], (0, 0, 0, 0),
                    resume === nothing ? 0 : resume.events, string(nameof(typeof(discretization))), false, 0.0, nothing,
                    resume === nothing ? Float64[] : copy(resume.windows.phase),
                    resume === nothing ? Float64[] : copy(resume.windows.material), resume === nothing ? 0 : resume.windows.streak,
@@ -1143,7 +1184,7 @@ function _segment!(problem, method, opt, resume, isfirst, run, hist, ctx, cont_b
   isfirst || (check_problem(method, problem); start_design!(method, problem))
   fo = build_oracle(method, problem)
   ops = _counters(problem)
-  run.cstart = map(_count, ops)
+  run.cstart = _totals(ops, opt, nothing)
   for i in 1:num_constraints(fo)
     _is_linear(fo, i) && _setup_constraint!(fo, i, ctx)
   end
@@ -1203,6 +1244,10 @@ function _segment!(problem, method, opt, resume, isfirst, run, hist, ctx, cont_b
     throw(ArgumentError("StopCriteria: grey_tol needs a method that computes the measure of grey of the design " *
                         "(ReactionDiffusion); $(method_label(method)) does not (use the monitor Grey)"))
   end
+  pr.step = step_solves(opt, state) !== nothing
+  isfirst && pr.step && resume !== nothing && resume.format == 3 &&
+    _print_event(pr, "· checkpoint of format version 3: the step solves of its iterations were not recorded (0 in the " *
+                     "history)", :yellow)
   evs = setup_events(opt, state, isfirst)
   if evs !== nothing
     foreach(e -> (isfirst || !(e[1] in run.setup)) && _print_event(pr, e[1], e[2]), evs)
@@ -1259,7 +1304,7 @@ function _segment!(problem, method, opt, resume, isfirst, run, hist, ctx, cont_b
     rethrow()
   end
   if status === :rediscretize                  # the state at the event, memory of the optimiser included
-    run.acc = run.acc .+ (map(_count, ops) .- run.cstart)
+    run.acc = run.acc .+ (_totals(ops, opt, state) .- run.cstart)
     return _save_state!(nothing, problem, method, opt, state, zk, hist, run, cont_names, oracle)
   end
 
@@ -1280,7 +1325,7 @@ function _segment!(problem, method, opt, resume, isfirst, run, hist, ctx, cont_b
                      (stop.objective_atol === nothing ? "; for an objective that tends to zero give objective_atol)" :
                       ", objective_atol $(_g_or_e(stop.objective_atol)))"), :yellow)
   end
-  _print_summary(pr, map(_count, ops) .- run.cstart .+ run.acc, run.k - run.k0, run.events, summary_note(opt, state))
+  _print_summary(pr, _totals(ops, opt, state) .- run.cstart .+ run.acc, run.k - run.k0, run.events, summary_note(opt, state))
   final = _save_state!(checkpoint, problem, method, opt, state, zk, hist, run, cont_names, oracle)
   if post !== nothing && post.last != run.k && isfinite(f_final)
     set_context!(ctx, :iteration, run.k)       # after a stall, the iteration tried was run.k + 1
@@ -1574,10 +1619,10 @@ mutable struct _LoopState
   stage::Int
   stage_iters::Int
   stage_start::Int    # history length when the current stage started
-  cstart::NTuple{3,Int}   # solve counters at the start of the current problem (a rebuild starts again)
+  cstart::NTuple{4,Int}   # solve counters (forward, adjoint, filter, step) at the start of the current problem (a rebuild starts again)
   k0::Int                 # iterations done before the call (resume)
   zacc::Vector{Float64}   # the last accepted design (for a checkpoint after an unexpected exception)
-  acc::NTuple{3,Int}      # solves of the problems replaced by rebuilds
+  acc::NTuple{4,Int}      # solves of the problems replaced by rebuilds
   events::Int             # rebuilds of the run (those of a resumed checkpoint included)
   kind::String            # the discretisation, for the checkpoint
   physics_only::Bool      # the last rebuild kept the design
@@ -1590,7 +1635,7 @@ mutable struct _LoopState
   setup::Vector{String}   # the setup events of the optimiser at the last segment (a rebuild prints only new ones)
 end
 
-function _fail(msg, problem, method, opt, oracle, zk, hist, run, cont_names, checkpoint, pr, ops, post)
+function _fail(msg, problem, method, opt, state, oracle, zk, hist, run, cont_names, checkpoint, pr, ops, post)
   synced = try
     isfinite(_sync!(oracle))                   # fields and forward state at the last accepted design
   catch e
@@ -1599,7 +1644,7 @@ function _fail(msg, problem, method, opt, oracle, zk, hist, run, cont_names, che
   end
   synced || (msg *= " (the forward state could not be solved again at the last accepted design)")
   _print_failure(pr, msg, run.k)
-  _print_summary(pr, map(_count, ops) .- run.cstart .+ run.acc, run.k - run.k0, run.events)
+  _print_summary(pr, _totals(ops, opt, state) .- run.cstart .+ run.acc, run.k - run.k0, run.events)
   _save_state!(checkpoint, problem, method, opt, nothing, zk, hist, run, cont_names, oracle)
   if synced && post !== nothing && post.last != run.k
     set_context!(problem.ctx, :iteration, run.k)
@@ -1615,7 +1660,7 @@ end
 
 function _iterate!(problem, method, opt, oracle, state, zk, zprev, hist, run, ctx, cont_buf, cont_names, maxiter, on_failure,
                    stop, schedule, checkpoint, post, monitors, fwd, adj, filters, pr, discretization)
-  fail(msg) = _fail(msg, problem, method, opt, oracle, zk, hist, run, cont_names, checkpoint, pr, (fwd, adj, filters), post)
+  fail(msg) = _fail(msg, problem, method, opt, state, oracle, zk, hist, run, cont_names, checkpoint, pr, (fwd, adj, filters), post)
   while run.k < maxiter
     k = run.k + 1
     set_context!(ctx, :iteration, k)
@@ -1631,6 +1676,7 @@ function _iterate!(problem, method, opt, oracle, state, zk, zprev, hist, run, ct
     end
     copyto!(zprev, zk)
     c0 = (_count(fwd), _count(adj), _count(filters))
+    s0 = _step_count(opt, state)
     info = nothing
     f_acc = NaN
     stalled = false
@@ -1707,6 +1753,7 @@ function _iterate!(problem, method, opt, oracle, state, zk, zprev, hist, run, ct
     copyto!(run.zacc, zk)                      # with run.k: a checkpoint after an exception matches them
     run.stage_iters += 1
     c1 = (_count(fwd), _count(adj), _count(filters))
+    ns = _step_count(opt, state) - s0
     row = (k, f_acc, info.kkt, info.stationarity, info.change, info.step, ctx.attempt, c1[1] - c0[1], c1[2] - c0[2],
            c1[3] - c0[3])
     cvals = _constraint_values(oracle, zk)
@@ -1719,10 +1766,10 @@ function _iterate!(problem, method, opt, oracle, state, zk, zprev, hist, run, ct
       map(_monitor, keys(monitors), values(monitors))
     catch e
       e isa InterruptException && rethrow()
-      _record!(hist, row, cvals, mults, map(_ -> NaN, values(monitors)), cont_buf, viols, pens)
+      _record!(hist, row, cvals, mults, map(_ -> NaN, values(monitors)), cont_buf, viols, pens, ns)
       fail("a monitor threw at iteration $k: " * first(sprint(showerror, e), 300))
     end
-    _record!(hist, row, cvals, mults, mvals, cont_buf, viols, pens)
+    _record!(hist, row, cvals, mults, mvals, cont_buf, viols, pens, ns)
     _print_row(pr, hist)
     met = _constraints_met(oracle, info, opt, viols)
     run.streak = met ? run.streak + 1 : 0

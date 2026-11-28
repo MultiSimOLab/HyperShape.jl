@@ -543,6 +543,9 @@ end
     c0 = dw_cantilever(; nx = 40, ny = 20)
     r0 = solve!(c0.problem, dw(); maxiter = 200, verbose = 0)
     @test r0.state.settled
+    # the solves of the step: the substeps before the settling, 1 after it (no φ̌ with the well)
+    @test r0.history.step_solves == [i <= r0.state.settle_iter ? r0.state.nsub : 1 for i in 1:r0.iterations]
+    @test sum(r0.history.step_solves) == r0.state.nsolves
     for k in (r0.state.settle_iter - 3, r0.state.settle_iter)   # the window partly filled; settled at k (stop held)
       dir = mktempdir()
       c1 = dw_cantilever(; nx = 40, ny = 20)
@@ -554,6 +557,7 @@ end
       @test r2.iterations == r0.iterations && r2.status === r0.status && r2.state.settle_iter == r0.state.settle_iter
       @test get_values(r2.z) == get_values(r0.z) && r2.history.objective == r0.history.objective
       @test r2.state.nsolves == count_substeps(r0, k)            # the substeps of the iterations after k
+      @test r2.history.step_solves == r0.history.step_solves     # the history accumulates across the resume
       st = load_checkpoint(dir)
       @test keys(st.memory) == RDM._dw_memory_keys(10)
     end
@@ -601,6 +605,7 @@ end
                   continuation = cont(), resume = dir)
       @test get_values(r2.z) == get_values(r0.z) && r2.history.objective == r0.history.objective
       @test r2.state.settled && r2.state.settle_iter == k2 && r2.iterations == r0.iterations
+      @test r2.history.step_solves == r0.history.step_solves
     end
   end
 
@@ -614,6 +619,8 @@ end
     @test r1.state.settled && 15 < k < 75                    # rebuilds before and after the settling
     @test get_values(r1.z) == get_values(r2.z) && r1.history.objective == r2.history.objective
     @test r2.state.settled && r2.state.settle_iter == k && r2.state.substeps == 1
+    @test r1.history.step_solves == r2.history.step_solves
+    @test occursin(", step $(sum(r1.history.step_solves)) · time", o1) && occursin(", step $(sum(r2.history.step_solves)) · time", o2)
     @test count(r"iteration \d+: design and physics rebuilt", o2) == 5
     @test count("· double well: T =", o1) == count("· double well: T =", o2) == 1    # not repeated at a rebuild
     @test count("double well settled at iteration", o2) == 1 && !occursin("(resumed)", o2)
@@ -648,6 +655,7 @@ end
     r2 = solve!(dw_cantilever(; nx = 20, ny = 10).problem, dw(); maxiter = 10, stop = nothing, verbose = 0)
     @test r1.history.objective ≈ r2.history.objective rtol = 1e-10
     @test calls[] == r1.state.nsolves == r2.state.nsolves
+    @test sum(r1.history.step_solves) == calls[]                 # calls of the solve of the user (no φ̌ with the well)
   end
 
   @testset "14. P1 triangles and a small 3D case: they run, the volume is exact" begin

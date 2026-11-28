@@ -116,6 +116,7 @@ end
 @_public Methods feasible_start
 @_public Methods phase_change
 @_public Methods material_change
+@_public Methods step_solves
 @_public Methods Discretization
 @_public Methods RebuildCheck
 @_public Methods needs_setup

@@ -12,8 +12,7 @@
 #   perimeter, holes       of the 0/1 design: interior solid–void faces (domain units), interior holes
 #   iterations, status, reason
 #   forward, adjoint, filter   solves of the state, the adjoint and the filter (sums over the history)
-#   step                   solves of the step of reaction–diffusion: not in the public history yet (TODO: PR
-#                          step-solves); "–"
+#   step                   solves of the method's own step (sum of history.step_solves; 0 for a density method)
 #   time, time_per_forward seconds of `solve!` (no compilation) and that time divided by the state solves: the cost of
 #                          an iteration in units of state solves, everything included (filter, the step of
 #                          reaction–diffusion, monitors); not the time of one solve
@@ -61,7 +60,7 @@ function report_row(case, variant, c; ref = missing, basis = :J, J_bin = missing
          V = c.vf * (1 + getproperty(h.constraints, volume)[end]), V_bin = binary_volume(c.cells), grey = grey(c.cells),
          perimeter = perimeter(c.cells, c.n, c.hcell), holes = interior_holes(reshape(c.cells, c.n)),
          iterations = r.iterations, status = r.status, reason = r.reason, forward = fw,
-         adjoint = sum(view(h.adjoint, 1:k)), filter = sum(view(h.filter, 1:k)), step = missing, time = c.time,
+         adjoint = sum(view(h.adjoint, 1:k)), filter = sum(view(h.filter, 1:k)), step = sum(view(h.step_solves, 1:k)), time = c.time,
          time_per_forward = c.time / fw)
   row = merge(row, kw)
   haskey(kw, :vs_ref) ? row : merge(row, (; vs_ref = _vs(row)))

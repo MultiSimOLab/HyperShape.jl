@@ -54,6 +54,23 @@ HyperShape.Methods.build_oracle(::_GradMethod, problem) = FunctionalOracle(probl
 HyperShape.Methods.augmented_lagrangian(::_GradMethod) = AugmentedLagrangian()
 HyperShape.Methods.check_problem(m::_GradMethod, problem) = m.bad ? throw(ArgumentError("bad problem")) : nothing
 
+# a step of the user that counts linear solves of its own (step_solves): OC with 2 per step and 1 per shrink
+struct _CountStep <: HyperShape.Optimizers.Optimizer end
+const _COC = OC()
+_NS.handles(::_CountStep, c::_NS.ConstraintInfo) = _NS.handles(_COC, c)
+_NS.max_native(::_CountStep) = _NS.max_native(_COC)
+_NS.constraint_tol(::_CountStep) = _NS.constraint_tol(_COC)
+_NS.init(::_CountStep, z, oracle) = (inner = _NS.init(_COC, z, oracle), n = Ref(0))
+_NS.reset!(::_CountStep, s) = (_NS.reset!(_COC, s.inner); s)
+_NS.objective_changed!(::_CountStep, s) = s
+_NS.shrink!(::_CountStep, s, f) = (s.n[] += 1; _NS.shrink!(_COC, s.inner, f); s)
+_NS.step!(::_CountStep, s, z, oracle, ctx) = (s.n[] += 2; _NS.step!(_COC, s.inner, z, oracle, ctx))
+HyperShape.step_solves(::_CountStep, s) = s.n[]
+struct _CountMethod <: HyperShape.Methods.AbstractMethod end
+HyperShape.Methods.stepper(::_CountMethod) = _CountStep()
+HyperShape.Methods.build_oracle(::_CountMethod, problem) = FunctionalOracle(problem, Euclidean())
+HyperShape.Methods.augmented_lagrangian(::_CountMethod) = AugmentedLagrangian()
+
 # an optimiser of the user that does not declare handles/max_native
 struct PlainOpt <: HyperShape.Optimizers.Optimizer end
 _NS.init(::PlainOpt, z, oracle) = _NS.init(SiMPL(), z, oracle)
@@ -315,7 +332,7 @@ same_history(a, b) = all(isequal(getproperty(a, c), getproperty(b, c)) for c in 
                                       lagrangian = AugmentedLagrangian(native = ())); maxiter = 12, verbose = 0, resume = dir)
     # a checkpoint of another version says which
     tfile = joinpath(dir, "checkpoint.toml")
-    write(tfile, replace(read(tfile, String), "hypershape_checkpoint = 3" => "hypershape_checkpoint = 1"))
+    write(tfile, replace(read(tfile, String), "hypershape_checkpoint = 4" => "hypershape_checkpoint = 1"))
     err = try load_checkpoint(dir); nothing catch e; e end
     @test err isa ArgumentError && occursin("version 1", err.msg)
   end
@@ -922,7 +939,7 @@ same_history(a, b) = all(isequal(getproperty(a, c), getproperty(b, c)) for c in 
                 resume = dir, stop = nothing)
     @test r1.iterations == 4 && r1.history.multipliers.volume[1:2] == rb.history.multipliers.volume
     tfile = joinpath(dir, "checkpoint.toml")
-    write(tfile, replace(read(tfile, String), "hypershape_checkpoint = 3" => "format = 5"))
+    write(tfile, replace(read(tfile, String), "hypershape_checkpoint = 4" => "format = 5"))
     @test_throws ArgumentError load_checkpoint(dir)
     @test_throws ArgumentError load_checkpoint(mktempdir())
     # the scaled start leaves the entries the constraint does not act on
@@ -1619,5 +1636,53 @@ same_history(a, b) = all(isequal(getproperty(a, c), getproperty(b, c)) for c in 
     buf = IOBuffer()
     run(; maxiter = 4, discretization = RC(at = 9), verbose = 1, io = buf)
     @test occursin("no rebuild before maxiter", String(take!(buf)))
+  end
+
+  @testset "Solves of the step (step_solves): none for density methods, the hook of a step of the user" begin
+    @test HyperShape.step_solves === HyperShape.Methods.step_solves
+    @test Base.ispublic(HyperShape, :step_solves) && !Base.isexported(HyperShape, :step_solves)
+    @test :step_solves in propertynames(OptHistory(1)) && OptHistory(3).step_solves == zeros(Int, 3)
+    # OC and SiMPL: 0 in every row; the table and the summary are those of before (no f/a/F/s, no step)
+    for opt in (OC(), SiMPL())
+      io = IOBuffer()
+      q = compliance_problem()
+      r = solve!(q.problem, DensityMethod(opt; metric = LumpedMass(q.dΩ)); maxiter = 4, stop = nothing, io)
+      out = String(take!(io))
+      @test r.history.step_solves == zeros(Int, 4)
+      @test occursin("f/a/F ", out) && !occursin("f/a/F/s", out) && !occursin(", step ", out)
+      @test occursin(r"solves: forward \d+, adjoint \d+, filter \d+ · time", out)
+      @test HyperShape.step_solves(HyperShape.Methods.stepper(DensityMethod(opt; metric = Euclidean())), nothing) === nothing
+    end
+    # a step of the user without the hook: zeros, no column
+    io = IOBuffer()
+    r = solve!(compliance_problem().problem, _GradMethod(); maxiter = 3, stop = nothing, io)
+    @test r.history.step_solves == zeros(Int, 3) && !occursin("f/a/F/s", String(take!(io)))
+    # with the hook: the loop differences it per iteration, rejected attempts and shrink! in the row of the iteration
+    cnt = Ref(0)
+    q = compliance_problem(; solve_flag = () -> (cnt[] += 1; cnt[] != 4))
+    io = IOBuffer()
+    r = solve!(q.problem, _CountMethod(); maxiter = 6, stop = nothing, io, on_failure = RejectStep(shrink = 0.5, max_attempts = 3))
+    out = String(take!(io))
+    h = r.history
+    @test count(>(1), h.attempts) == 1
+    @test h.step_solves == [2a + (a - 1) for a in h.attempts]     # 2 per attempt, 1 per shrink!
+    @test sum(h.step_solves) == r.state.n[]
+    @test occursin("f/a/F/s", out) && occursin(", step $(r.state.n[]) · time", out)
+    kr = findfirst(>(1), h.attempts)
+    @test occursin(Regex("\\s\\d+/\\d+/\\d+/$(h.step_solves[kr])\\s"), out)      # the row with the rejected attempts
+    # a checkpoint keeps the column; a resumed run gives the same history
+    dir = mktempdir()
+    r1 = solve!(compliance_problem().problem, _CountMethod(); maxiter = 3, stop = nothing, verbose = 0,
+                checkpoint = Checkpoint(filepath = dir, every = 3))
+    r2 = solve!(compliance_problem().problem, _CountMethod(); maxiter = 5, stop = nothing, verbose = 0, resume = dir)
+    @test load_checkpoint(dir).history.step_solves == r1.history.step_solves == fill(2, 3)
+    @test r2.history.step_solves == fill(2, 5)
+    # a failure prints the step solves in its summary
+    io = IOBuffer()
+    cnt[] = 0
+    q = compliance_problem(; solve_flag = () -> (cnt[] += 1; cnt[] < 4))
+    @test_throws OptimizationFailure solve!(q.problem, _CountMethod(); maxiter = 6, stop = nothing, io,
+                                            on_failure = RejectStep(shrink = 0.5, max_attempts = 2))
+    @test occursin(r"solves: forward \d+, adjoint \d+, filter \d+, step \d+ · time", String(take!(io)))
   end
 end

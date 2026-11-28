@@ -14,6 +14,7 @@ mutable struct _Printer{IO_}
   monitors::Vector{Symbol}   # one column per monitor
   multi::Bool           # several constraints: the largest violation and multiplier
   tols::Vector{Float64} # a constraint violated beyond its tolerance is shown in red
+  step::Bool            # the step counts its own solves (step_solves): column f/a/F/s and `step` in the summary
 end
 
 _verbose_level(v::Bool) = v ? 2 : 0
@@ -24,7 +25,7 @@ function _Printer(io, verbose, schedule, monitors = (), multi = false)
   widths = schedule === nothing ? Int[] :
            [max(6, textwidth(string(n)), maximum(x -> textwidth(_g(x)), v)) for (n, v) in zip(schedule.names, schedule.values)]
   _Printer(io, _verbose_level(verbose), time(), time(), false, widths, _RED_CONSTRAINT, collect(Symbol, monitors), multi,
-           Float64[])
+           Float64[], false)
 end
 
 _mwidth(n) = max(7, textwidth(string(n)))
@@ -42,7 +43,7 @@ function _header(p::_Printer, names)
   cont = join(("  " * _pad(string(n), w) for (n, w) in zip(names, p.widths)))
   @sprintf("  %5s  %13s  %9s  %10s  %9s  %9s  %9s  %9s  %9s", "it", "objective", "Δobj", p.multi ? "max viol" : "constraint",
            "kkt", "S", "change", "step", p.multi ? "max |λ|" : "λ") * cont * join(("  " * _pad(string(n), _mwidth(n)) for n in p.monitors)) *
-    @sprintf("  %11s  %8s", "f/a/F", "t[s]")
+    @sprintf("  %11s  %8s", p.step ? "f/a/F/s" : "f/a/F", "t[s]")
 end
 
 _rule(p::_Printer) = _styled(p, "  " * "─"^(textwidth(_header(p, ntuple(_ -> "", length(p.widths)))) - 2) * "\n", :light_black)
@@ -179,7 +180,8 @@ function _print_row(p::_Printer, hist::OptHistory)
     v = hist.monitor_values[j, k]
     print(p.io, "  ", _pad(isfinite(v) ? @sprintf("%.4g", v) : "—", _mwidth(n)))
   end
-  @printf(p.io, "  %11s  %8.3f", "$(hist.forward[k])/$(hist.adjoint[k])/$(hist.filter[k])", dt)
+  @printf(p.io, "  %11s  %8.3f", "$(hist.forward[k])/$(hist.adjoint[k])/$(hist.filter[k])" *
+                                   (p.step ? "/$(hist.step_solves[k])" : ""), dt)
   hist.attempts[k] > 1 && _styled(p, "  ($(hist.attempts[k]) attempts)", :yellow)
   println(p.io)
   nothing
@@ -236,13 +238,13 @@ function _print_failure(p::_Printer, msg, k)
   println(p.io, "failed after $k accepted iterations: ", msg)
 end
 
-# solves: (forward, adjoint, filter) solved in this call, the setup and the final synchronisation included; `note`: a
-# line of the step (ReactionDiffusion: its solves and factorisations)
+# solves: (forward, adjoint, filter, step) solved in this call, the setup and the final synchronisation included (the
+# step only when it counts its solves); `note`: a line of the step (ReactionDiffusion: its factorisations)
 function _print_summary(p::_Printer, solves, iterations, events = 0, note = "")
   p.level >= 1 || return
   t = time() - p.t0
-  println(p.io, @sprintf("  solves: forward %d, adjoint %d, filter %d · time %.2f s (%.3f s per iteration)",
-                         solves..., t, t / max(iterations, 1)),
+  println(p.io, @sprintf("  solves: forward %d, adjoint %d, filter %d", solves[1], solves[2], solves[3]),
+          p.step ? @sprintf(", step %d", solves[4]) : "", @sprintf(" · time %.2f s (%.3f s per iteration)", t, t / max(iterations, 1)),
           events == 0 ? "" : " · $events rebuild event" * (events == 1 ? "" : "s"))
   isempty(note) || println(p.io, note)
 end

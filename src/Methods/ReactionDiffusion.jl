@@ -1278,6 +1278,9 @@ Optimizers.constraint_tol(opt::RDStep) = opt.volume === nothing ? Inf : isnan(op
 phase_change(::RDStep, s::RDState) = s.phase
 material_change(::RDStep, s::RDState) = _material_change!(s.meter, s.zref)
 material_available(::RDStep, s::RDState) = s.meter !== nothing
+# the solves with the operator of the step (history.step_solves): the step, the implicit substeps of the double well
+# and the unit response of the exact volume when it is solved (at each factorisation, with held values)
+step_solves(::RDStep, s::RDState) = s.nsolves
 
 # the native constraint of ExactVolume: the one named, or the one built with Volume (exactly one)
 function _auto_native(opt::RDStep, problem, infos, names)
@@ -1341,7 +1344,7 @@ default_stop(::_DWStep) = StopCriteria(material_tol = 1e-2, material_window = 5,
 
 summary_note(::Optimizer, state) = ""
 summary_note(::RDStep, s::RDState) =
-  "  reaction–diffusion: $(s.nsolves) solves of the step, $(s.nfactor) factorisation" * (s.nfactor == 1 ? "" : "s") *
+  "  reaction–diffusion: $(s.nfactor) factorisation" * (s.nfactor == 1 ? "" : "s") *
   ", $(s.nvol) evaluations of the constraint" * (s.nmeter == 0 ? "" : ", $(s.nmeter) of the volume by the material meter") *
   _dw_note(s)
 _dw_note(s::RDState) = isempty(s.gn) ? "" :
@@ -1582,7 +1585,8 @@ elements with lumped mass (instead of finite differences).
 Per iteration: one forward solve, one adjoint (none with `SelfAdjoint()`), one assembly of the sensitivity, one
 product `K z` and one solve of the step (no factorisation); the volume costs a few evaluations of the constraint per
 step (vectors only for a density; the map and an integral each with an interface map, plus one derivative per Newton
-iteration with `Ersatz()`; the summary of `solve!` counts them). The default stop
+iteration with `Ersatz()`; the summary of `solve!` counts them). The solves of the step are in `history.step_solves`
+(with the unit response `φ̌` of the exact volume, solved once per factorisation when values are held). The default stop
 ([`default_stop`](@ref)) needs the constraints met, the change of the material `∫|χ_k − χ_{k−1}| / ∫χ_k` below `2e-3`
 (`1e-2` with [`DoubleWell`](@ref)) in each of the last 5 iterations and the relative range of the objective below `1e-3` over the last 10, the windows
 counted with the constraints met; `StopCriteria(rate_tol)`, `change_tol` and `phase_tol` are options. `√(τ|D|)` is the
