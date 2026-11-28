@@ -1,40 +1,64 @@
 # Validation
 
 Linear validation of phase 0: compliance minimisation with SIMP (p = 3), a Helmholtz filter and a volume constraint on
-the physical density, against published values. The scripts are in the folder `validation/` of the repository; the
-fast cases run in the test suite. Measured on an Apple M5 Max, Julia 1.13.0, 4 threads, `LUSolver`.
+the physical density, against published values and codes. The scripts are in the folder `validation/` of the repository; the
+fast cases run in the test suite. Measured on an Apple M5 Max, Julia 1.13.0, 4 threads, `LUSolver`. Each script
+also writes the fixed report table of its runs (`J_bin`, volumes, grey, perimeter, holes, solves, time); those tables,
+the meaning of their columns and the rule for comparing methods are on the [Benchmarks](benchmarks.md) page.
 
-## MBB beam against top88 with the PDE filter
+## MBB beam against top88
 
-Andreassen et al., *Efficient topology optimization in MATLAB using 88 lines of code*, SMO 43 (2011), section 4.2:
-volume 0.5, E₀ = 1, Emin = 1e-9, ν = 0.3, plane stress, unit square elements, rmin = 0.04 nelx, unit point load at the
-top-left node, OC with move 0.2, stop at max|Δx| ≤ 0.01. Reference compliances 237.60 (60×20) and 235.36 (150×50).
-A plain-Julia port of the code (`validation/top88.jl`) gives 237.5996 in 140 iterations and 235.3632 in 461 (the last
-compliance the code prints; the tables below give the compliance of the final design).
+Andreassen et al., *Efficient topology optimization in MATLAB using 88 lines of code*, SMO 43 (2011): volume 0.5,
+E₀ = 1, Emin = 1e-9, ν = 0.3, plane stress, unit square elements, rmin = 0.04 nelx, unit point load at the top-left
+node, OC with move 0.2, stop at max|Δx| ≤ 0.01. The paper publishes the compliances of the final designs in its figure
+captions: Fig. 3, the density filter of the code (`ft = 2`, a convolution filter): 233.71 (60×20) and 235.73
+(150×50); Fig. 4, the PDE (Helmholtz) density filter of section 4.2: 237.60 and 235.36. Two comparisons
+(`validation/mbb_top88.jl`):
 
-| Case | C | vs reference | iterations | time |
-|---|---|---|---|---|
-| 60×20 P0, cell mean, OC as top88 | 237.606 | +0.00 % | 138 | 7.7 s |
-| 60×20 P0, Gauss points, OC as top88 | 235.032 | −1.08 % | 88 | 1.3 s |
-| 60×20 P1, Gauss points, OC as top88 | 237.555 | −0.02 % | 137 | 4.3 s |
-| 60×20 P0, cell mean, `OC()` | 238.978 | +0.58 % | 72 | 1.6 s |
-| 60×20 P0, Gauss points, `SiMPL()` | 235.069 | −1.07 % | 39 | 2.7 s |
-| 60×20 P1, Gauss points, `SiMPL()` | 239.291 | +0.71 % | 36 | 2.4 s |
-| 150×50 P0, cell mean, OC as top88 | 235.363 | +0.00 % | 457 | 16.1 s |
-| 150×50 P0, Gauss points, OC as top88 | 234.750 | −0.26 % | 543 | 17.8 s |
-| 150×50 P1, Gauss points, OC as top88 | 235.373 | +0.01 % | 365 | 12.2 s |
-| 150×50 P0, cell mean, `OC()` | 237.021 | +0.71 % | 58 | 2.2 s |
-| 150×50 P0, Gauss points, `SiMPL()` | 235.542 | +0.08 % | 45 | 1.9 s |
-| 150×50 P1, Gauss points, `SiMPL()` | 235.934 | +0.24 % | 48 | 2.0 s |
+- **Against Fig. 4 (1 % on J).** HyperShape's P0 design with the cell mean of the filtered field and OC as top88 is
+  the formulation of section 4.2 on the same discretisation (its filter uses `r = rmin/(2√3)`, as HyperShape's
+  `HelmholtzFilter(dΩ; rmin)`): it gives 237.606 and 235.363, +0.00 % on both meshes.
+- **Against top88.m with its density filter (5 % on `J_bin`).** The code `top88.m` was run in Octave 9.1 with
+  `ft = 2` (`validation/data/top88`, CSV only: the code is not included); its last printed compliances, 233.7146 and
+  235.7337 (144 and 362 iterations), are those of Fig. 3. Another filter on the same mesh, elements, load and supports:
+  the rule between methods, on `J_bin` (the design read as 0/1 per cell, evaluated with the same finite elements for
+  both; J of top88 below is its final design evaluated with the finite elements of HyperShape's problem, which are
+  those of top88).
+
+| Case | J | vs Fig. 4 | `J_bin` | `J_bin` vs top88.m | iterations | time |
+|---|---|---|---|---|---|---|
+| 60×20 Andreassen et al. (2011), Fig. 4, PDE filter | 237.60 | — | — | — | — | — |
+| 60×20 top88.m in Octave (density filter, ft = 2; Fig. 3: 233.71) | 233.713 | — | 187.446 | — | 144 | — |
+| 60×20 P0, cell mean, OC as top88 | 237.606 | +0.00 % | 187.333 | −0.06 % | 138 | 1.4 s |
+| 60×20 P0, Gauss points, OC as top88 | 235.032 | — | 188.342 | +0.48 % | 88 | 0.9 s |
+| 60×20 P1, Gauss points, OC as top88 | 237.555 | — | 187.347 | −0.05 % | 137 | 1.3 s |
+| 60×20 P0, cell mean, `OC()` | 238.978 | — | 188.369 | +0.49 % | 72 | 0.7 s |
+| 60×20 P0, Gauss points, `SiMPL()` | 235.069 | — | 188.056 | +0.33 % | 39 | 0.4 s |
+| 60×20 P1, Gauss points, `SiMPL()` | 239.291 | — | 187.242 | −0.11 % | 36 | 0.3 s |
+| 150×50 Andreassen et al. (2011), Fig. 4, PDE filter | 235.36 | — | — | — | — | — |
+| 150×50 top88.m in Octave (density filter, ft = 2; Fig. 3: 235.73) | 235.735 | — | 189.651 | — | 362 | — |
+| 150×50 P0, cell mean, OC as top88 | 235.363 | +0.00 % | 190.528 | +0.46 % | 457 | 18.7 s |
+| 150×50 P0, Gauss points, OC as top88 | 234.75 | — | 190.473 | +0.43 % | 543 | 21.4 s |
+| 150×50 P1, Gauss points, OC as top88 | 235.373 | — | 190.21 | +0.29 % | 365 | 15.0 s |
+| 150×50 P0, cell mean, `OC()` | 237.021 | — | 191.381 | +0.91 % | 58 | 2.4 s |
+| 150×50 P0, Gauss points, `SiMPL()` | 235.542 | — | 190.702 | +0.55 % | 45 | 2.2 s |
+| 150×50 P1, Gauss points, `SiMPL()` | 235.934 | — | 191.007 | +0.72 % | 48 | 2.2 s |
 
 *OC as top88* is `OC(adapt = nothing)` with `StopCriteria(change_tol = 0.01)`; `OC()` and `SiMPL()` use the defaults of
-HyperShape (adaptive move limits, stop when the objective settles).
+HyperShape (adaptive move limits, stop when the objective settles). The script also writes a figure per mesh with
+the design of top88 beside that of HyperShape (P0, cell mean, OC as top88).
 
+- **The two filters.** Against top88.m with its convolution filter the J of the grey designs differs by up to 2.4 %
+  (+1.67 % for the formulation of top88 with the cell mean on 60×20); read as 0/1 the designs are within 0.5 % on
+  60×20 and 0.9 % on 150×50. Most of the difference in J is the equivalence of the radii: `r = rmin/(2√3)` matches
+  the second moment of the cone filter in 1D (the convention of Lazarov and Sigmund 2011 and of section 4.2); in 2D the
+  second moments match with r ≈ 0.274 rmin, 5 % smaller, and with that radius the cell mean on 60×20 gives J = 234.76
+  (+0.45 %), grey 0.335 (top88 0.330) and `J_bin` +0.09 % (measured in the review of the bank, 2026-11-27). `J_bin`
+  hardly depends on it. The test suite keeps 237.60 (Fig. 4) and checks the design of top88.m against Fig. 3.
 - **Cell mean or Gauss points.** top88 gives each element one physical density, the cell mean of the filtered nodal
-  field (`xPhys = TF'·K⁻¹·TF·x`). HyperShape evaluates the filtered field at the Gauss points, so the stiffness varies
-  inside an element: a different formulation, 1.1 % stiffer at 60×20 and 0.3 % at 150×50. The cell mean is obtained by composing
-  [`CellMean`](@ref) after the filter, `CellMean(dΩ) ∘ HelmholtzFilter(dΩ; rmin, ls)`; with it HyperShape reproduces
-  top88 to four digits.
+  field. HyperShape evaluates the filtered field at the Gauss points, so the stiffness varies inside an element: a
+  different formulation, 1.1 % stiffer at 60×20 and 0.3 % at 150×50. The cell mean is obtained by composing
+  [`CellMean`](@ref) after the filter, `CellMean(dΩ) ∘ HelmholtzFilter(dΩ; rmin, ls)`.
 - **Point load.** It is written as the traction dual to the shape function of the corner node on the first top edge,
   `t(x) = −(4 − 6x/h)/h` for x < h: its work on a P1 field is the value at the corner.
 - The filter has homogeneous Neumann conditions, as in top88 and SiMPL: the design sticks to the boundary of the domain.
@@ -62,7 +86,7 @@ Sₖ = ‖z − P(z − g)‖ ≤ 1e-5 (L2 metric, `StopCriteria(stationarity_to
   study of table 2, with 0.02.
 - **Sensitivity of the authors' code.** It halves the shear term (`topopt.cpp`: `M = mu*0.5`, then
   `2.0*M*grad:adjgrad`), so it is the derivative of `λ tr(ε)² + μ ε:ε` instead of `λ tr(ε)² + 2μ ε:ε`: not the exact
-  derivative of their stiffness. `mbb(…; sensitivity = :authors)` in `validation/cases.jl` replicates it. With it,
+  derivative of their stiffness. `mbb(…; sensitivity = :authors)` in `validation/common/problems.jl` replicates it. With it,
   HyperShape reproduces the iterates of the authors' log to eight digits (first iterate checked in the test suite at
   192×64) and both tables. With the exact derivative the same setup reaches a 0.97 % stiffer design, in more iterations.
 - **Iterations.** The authors count the initial design as iteration 0, so their 30 iterations of table 2 are 29 steps.

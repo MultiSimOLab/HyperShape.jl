@@ -1,17 +1,15 @@
-# Validation cases of HyperShape (shared by the scripts of this folder and by test/Validation).
+# The problems of the validation cases (shared by the scripts of validation/ and by test/Validation; included by
+# common.jl, not a library).
 #
-#   mbb(; case = :top88 | :simpl, …)  half MBB beam, SIMP, against top88 with the PDE filter (Andreassen et al. 2011)
+#   mbb(; case = :top88 | :simpl, …)  half MBB beam, SIMP, against top88 (Andreassen et al. 2011, data/top88)
 #                                     and against SiMPL (Kim, Lazarov, Surowiec, Keith, arXiv:2411.19421)
 #   cantilever3d(; …)                 3D cantilever (close to top3d), no published value: runs, Taylor tests, symmetry
 #   bridge(; …)                       the bridge of Takezawa et al. (2010) with the double well (ReactionDiffusion +
 #                                     DoubleWell): J = 23.3 published at 100 iterations
 #   cantilever_dw(; …)                the cantilever 2 × 1 with the double well from hole_seed (mesh independence)
 #
-# Each returns a named tuple with the result of `solve!` and the cell means of the physical density.
-using Gridap, Gridap.Geometry, HyperFEM, HyperShape, Printf
-
-include(joinpath(@__DIR__, "top88.jl"))
-
+# Each returns a named tuple with the result of `solve!`, the cell means of the physical density and what the fixed
+# report table needs (`cells`, `n`, `hcell`, `vf`, `jbin`: see report.jl and measures.jl).
 # tag the vertices and edges whose vertices all satisfy `pred` (a roller on part of an edge)
 function tag_faces!(model, name, pred)
   labels = get_face_labeling(model)
@@ -36,9 +34,6 @@ end
 
 design_space(model, order) = order == 0 ? TestFESpace(model, ReferenceFE(lagrangian, Float64, 0); conformity = :L2) :
                                           TestFESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity = :H1)
-
-# cell means of the physical density
-cell_means(θ, dΩ, vol) = collect(Gridap.get_array(∫(θ.ρ)dΩ)) ./ vol
 
 """
     mbb(; case, nx, ny, order = 0, opt = OC(), vf, rmin, Emin, maxiter = 2000, stop = :default, cellmean = false,
@@ -99,7 +94,27 @@ function mbb(; case, nx, ny, order = 0, opt = OC(), vf, rmin, Emin, maxiter = 20
   method = DensityMethod(opt; metric = LumpedMass(dΩ))     # OC uses it only for the stationarity measure
   kw = stop === :default ? (;) : (; stop)
   t = @elapsed r = solve!(problem, method; maxiter, verbose, monitors = (grey = Grey(θ, dΩ),), kw...)
-  (; result = r, time = t, ρ = cell_means(θ, dΩ, h * Ly / ny), nx, ny)
+  ρ = cell_means(θ, dΩ, h * Ly / ny)
+  form = (Eh, u, v) -> ∫(Eh * (ε(v) ⊙ (σ ∘ ε(u))))dΩ
+  V0 = design_space(model, 0)
+  jbin = binary_evaluator(form, l, U, V, V0; Emin)
+  jdens = density_evaluator(form, l, U, V, V0; Emin)          # J of a design given by one density per cell
+  (; result = r, time = t, ρ, nx, ny, cells = ρ, n = (nx, ny), hcell = (h, Ly / ny), vf, jbin, jdens)
+end
+
+"""
+    top88_reference(nx, ny)
+
+The reference of `data/top88` (top88.m of Andreassen et al. 2011 run in Octave, density filter ft = 2): the history
+`c` printed by the code, its iterations and the final physical design `xPhys` as cell values in Gridap's order
+(x fastest, y upwards). See `data/top88/README.md`.
+"""
+function top88_reference(nx, ny)
+  dir = joinpath(@__DIR__, "..", "data", "top88")
+  rows = [parse.(Float64, split(l, ",")) for l in readlines(joinpath(dir, "top88_$(nx)x$(ny)_hist.csv"))[2:end]]
+  x = parse.(Float64, readlines(joinpath(dir, "top88_$(nx)x$(ny)_xPhys.csv")))
+  # the array of top88 is nely × nelx, column-major, row 1 at the top
+  (; c = [r[2] for r in rows], iterations = length(rows), xPhys = vec(permutedims(reverse(reshape(x, ny, nx), dims = 1))))
 end
 
 """
@@ -144,13 +159,10 @@ function cantilever3d(; n = (24, 12, 12), order = 0, opt = OC(), vf = 0.3, maxit
   kw = stop === :default ? (;) : (; stop)
   tt = @elapsed r = solve!(problem, method; maxiter, verbose, monitors = (grey = Grey(θ, dΩ),), kw...)
   ρ = reshape(cell_means(θ, dΩ, h^3), n)
-  (; result = r, time = tt, ρ, asymmetry = maximum(abs, ρ .- reverse(ρ, dims = 2)), dofs = num_free_dofs(U))
+  jbin = binary_evaluator((Eh, u, v) -> ∫(Eh * (ε(v) ⊙ (σ ∘ ε(u))))dΩ, l, U, V, design_space(model, 0); Emin)
+  (; result = r, time = tt, ρ, asymmetry = maximum(abs, ρ .- reverse(ρ, dims = 2)), dofs = num_free_dofs(U),
+     cells = vec(ρ), n, hcell = (h, h, h), vf, jbin)
 end
-
-# one line of a results table
-row(name, r, ref = NaN) = @sprintf("| %s | %.6g | %s | %d | %s | %.1f s |", name, r.result.objective,
-                                   isnan(ref) ? "—" : @sprintf("%+.2f %%", 100 * (r.result.objective / ref - 1)),
-                                   r.result.iterations, r.result.status, r.time)
 
 # The seed of Takezawa et al. (2010) for the bridge (their Fig. 9a): rows of rectangular holes 0.2 × 0.1, every 1/6 in
 # height, 0.4 apart, alternate rows shifted by 0.2 (values 0 in the holes, 1 elsewhere)
@@ -162,31 +174,6 @@ function takezawa_bridge_seed(V)
     abs(xs - 0.4 * round(xs / 0.4)) <= 0.1 + 1e-9 ? 0.0 : 1.0
   end
   collect(get_free_dof_values(interpolate(f, V)))
-end
-
-# interior holes of a design given by its cell means on a Cartesian nx × ny mesh: the connected components (by faces)
-# of the cells below 1/2 that do not touch the boundary
-function interior_holes(χ, nx, ny)
-  void = reshape(χ .< 0.5, nx, ny)
-  seen = falses(nx, ny)
-  n = 0
-  for j in 1:ny, i in 1:nx
-    (void[i, j] && !seen[i, j]) || continue
-    stack = [(i, j)]
-    seen[i, j] = true
-    inner = true
-    while !isempty(stack)
-      (a, b) = pop!(stack)
-      for (p, q) in ((a + 1, b), (a - 1, b), (a, b + 1), (a, b - 1))
-        (1 <= p <= nx && 1 <= q <= ny) || (inner = false; continue)
-        (void[p, q] && !seen[p, q]) || continue
-        seen[p, q] = true
-        push!(stack, (p, q))
-      end
-    end
-    inner && (n += 1)
-  end
-  n
 end
 
 """
@@ -260,8 +247,10 @@ function bridge(; nx = 200, ny = nx ÷ 2, seed = :hex, method = :default, κ = 1
   χ = cells()
   M = reshape(χ, nx, ny)
   P = M .>= 0.5
+  jbin = binary_evaluator((Eh, u, v) -> ∫(Eh * (ε(v) ⊙ (σ ∘ ε(u))))dΩ, v -> ∫(t ⋅ v)dΓ, U, V, V0; Emin = 1e-5)
   (; result = r, χ, holes = interior_holes(χ, nx, ny), asymmetry = maximum(abs, M .- reverse(M, dims = 1)),
-     asymmetry_phase = count(P .!= reverse(P, dims = 1)) / length(P), volume = sum(χ) / (nx * ny), time = tt, snaps, nx, ny)
+     asymmetry_phase = count(P .!= reverse(P, dims = 1)) / length(P), volume = sum(χ) / (nx * ny), time = tt, snaps, nx, ny,
+     cells = χ, n = (nx, ny), hcell = (h, 1 / ny), vf = 0.3, jbin)
 end
 
 """
@@ -307,7 +296,9 @@ function cantilever_dw(; nx = 200, ny = nx ÷ 2, κ = 1e-5, maxiter = 300, stop 
   V0 = FESpace(model, ReferenceFE(lagrangian, Float64, 0); conformity = :L2)
   HyperShape.update_fields!(θ, problem.ctx)
   χ = collect(assemble_vector(v -> ∫(θ.χ * v)dΩ, V0)) ./ (h * h)
-  (; result = r, χ, holes = interior_holes(χ, nx, ny), volume = sum(χ) / (nx * ny), time = tt, nx, ny)
+  jbin = binary_evaluator((Eh, u, v) -> ∫(Eh * (ε(v) ⊙ (σ ∘ ε(u))))dΩ, v -> ∫(t ⋅ v)dΓ, U, V, V0; Emin = 1e-5)
+  (; result = r, χ, holes = interior_holes(χ, nx, ny), volume = sum(χ) / (nx * ny), time = tt, nx, ny,
+     cells = χ, n = (nx, ny), hcell = (h, 1 / ny), vf = 0.5, jbin)
 end
 
 # a monitor that keeps the cell means at the iterations asked

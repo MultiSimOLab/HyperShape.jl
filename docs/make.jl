@@ -16,6 +16,7 @@ makedocs(;
         "Getting started" => "getting_started.md",
         "Design" => "design.md",
         "Validation" => "validation.md",
+        "Benchmarks" => "benchmarks.md",
         "Roadmap" => "roadmap.md",
         "API reference" => ["api.md", "api/methods.md", "api/functionals.md", "api/variables.md", "api/operators.md",
                             "api/optimizers.md", "api/checks.md", "api/postprocess.md"],
